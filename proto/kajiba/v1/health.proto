@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package kajiba.v1;
+
+option go_package = "github.com/scorsi/kajiba/cli/internal/genproto/kajiba/v1;kajibav1";
+
+// Liveness/readiness probe, usable from any of the three clients (0005, 0020).
+service HealthService {
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+message CheckRequest {}
+
+message CheckResponse {
+  enum ServingStatus {
+    SERVING_STATUS_UNSPECIFIED = 0;
+    SERVING_STATUS_SERVING = 1;
+    SERVING_STATUS_NOT_SERVING = 2;
+  }
+  ServingStatus status = 1;
+}

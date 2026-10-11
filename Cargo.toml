@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "apps/server", "apps/runner"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/scorsi/kajiba"
+
+[workspace.dependencies]
+axum = "0.7"
+clap = { version = "4", features = ["derive"] }
+prost = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tonic = "0.12"
+tonic-build = "0.12"
+
+[profile.dev]
+# mold/lld in the devShell do the heavy lifting; LTO stays off for fast iteration (0002).
+lto = false

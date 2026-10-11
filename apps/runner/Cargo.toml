@@ -1,0 +1,12 @@
+[package]
+name = "kajiba-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kajiba-runner"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true

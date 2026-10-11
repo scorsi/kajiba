@@ -1,0 +1,18 @@
+version: v2
+plugins:
+  # Go client (0007) — consumed by cli/.
+  - local: protoc-gen-go
+    out: ../apps/cli/internal/genproto
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: ../apps/cli/internal/genproto
+    opt: paths=source_relative
+  # TypeScript client (0006) — consumed by apps/ui/, via connect-web. protoc-gen-es generates
+  # both messages and service clients since connect-es v2 (protoc-gen-connect-es was folded in).
+  - local: protoc-gen-es
+    out: ../apps/ui/src/lib/gen
+    include_imports: true
+    opt:
+      - target=ts
+      - import_extension=js
+# Rust client is generated at build time by crates/kajiba-proto/build.rs (tonic-build), not here.

@@ -1,0 +1,33 @@
+# ADR 0018 — Code organization: monorepo
+
+Status: Accepted — 2026-10-09
+
+## Context
+
+Four components (server, runner, CLI, frontend) in two languages plus a shared gRPC schema. Question: one repository per component or a single one.
+
+## Decision
+
+- **A single `kajiba` repository**:
+  - `proto/` — `.proto` files, source of truth (0005, 0008), compiled by each build.
+  - `crates/` — shared Rust libraries, no binary: `kajiba-core`, `kajiba-git`, `kajiba-proto`, `kajiba-exec`.
+  - `apps/` — the four deliverables, one subfolder each:
+    - `server/` — `kajiba-server` binary.
+    - `runner/` — `kajiba-runner` binary.
+    - `cli/` — Go module `kajiba-cli`.
+    - `ui/` — SvelteKit project (pnpm), `kajiba-ui` component.
+  - `nix/` — packages, NixOS/nix-darwin modules, nixosTest tests.
+  - `docs/adr/`.
+  - `flake.nix`, `go.work`, `pnpm-workspace.yaml` at the root (the latter two have a single member each; they mostly exist so that tooling that detects a project by its manifest file, e.g. a shell prompt, sees Go/Node from the root), a single devShell.
+- A cross-cutting change (proto + server + runner + CLI) fits in one commit and a single `nix flake check`.
+- Single versioning: the server, the runner and the CLI carry the same version; protocol compatibility is guaranteed by construction as long as they are deployed from the same commit (sekkeizu points to a single input).
+
+## Consequences
+
+- No registry or submodule for the protos; no version drift to manage.
+- A single circular bootstrap (0015) instead of four.
+- Nix builds remain separate derivations per component: a monorepo doesn't imply a mono-build.
+
+## Rejected alternatives
+
+- One repository per component: only for truly independent life cycles; here it would be four flakes, four CIs, proto sharing to tool and versions to synchronize.
