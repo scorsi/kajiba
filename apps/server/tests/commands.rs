@@ -44,8 +44,6 @@ fn usage_errors_exit_two() {
 #[test]
 fn placeholders_fail_with_distinct_exit_code_and_clear_error() {
     for args in [
-        vec!["config", "check", "server.toml"],
-        vec!["config", "check", "--files", "server.toml"],
         vec!["admin", "enroll", "alice"],
         vec!["admin", "import", "alice/demo", "demo.bundle"],
         vec!["admin", "repo", "create", "alice/demo"],
@@ -92,4 +90,58 @@ fn help_succeeds() {
             .contains("Usage:")
     );
     assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn config_check_validates_without_opening_secrets_and_files_checks_access() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/kajiba-core/tests/fixtures/server.toml");
+    let output = run(&["config", "check", fixture.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+
+    let dir = std::env::temp_dir().join(format!("kajiba-config-check-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("server.toml");
+    let secret = dir.join("token");
+    let input = format!(
+        "[http]\npublic_url='https://example.org'\n[runners.build-1]\ntoken_file={:?}\n",
+        secret.to_str().unwrap()
+    );
+    std::fs::write(&path, input).unwrap();
+    let args = ["config", "check", "--files", path.to_str().unwrap()];
+    let output = run(&args);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("runners.build-1.token_file")
+    );
+    std::fs::write(&secret, "DO-NOT-PRINT").unwrap();
+    let output = run(&args);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+
+    std::fs::write(
+        &path,
+        "token='DO-NOT-PRINT'\n[http]\npublic_url='https://example.org'",
+    )
+    .unwrap();
+    let output = run(&["config", "check", path.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("token_file"), "{error}");
+    assert!(!error.contains("DO-NOT-PRINT"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn config_check_missing_config_is_a_runtime_error() {
+    let output = run(&["config", "check", "/kajiba-test-missing/server.toml"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("/kajiba-test-missing/server.toml")
+    );
 }

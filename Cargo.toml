@@ -12,6 +12,9 @@ repository = "https://github.com/scorsi/kajiba"
 axum = "0.7"
 clap = { version = "4", features = ["derive"] }
 prost = "0.13"
+serde = { version = "1", features = ["derive"] }
+ssh-key = { version = "0.6.7", default-features = false, features = ["alloc", "ecdsa"] }
+toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 tonic = "0.12"
 tonic-build = "0.12"

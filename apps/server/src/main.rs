@@ -41,7 +41,7 @@ enum Command {
 
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 enum ConfigCommand {
-    /// Validate configuration (not implemented yet).
+    /// Validate configuration without contacting the server.
     Check {
         #[arg(long)]
         files: bool,
@@ -83,7 +83,7 @@ async fn main() -> ExitCode {
     let command = Args::parse().command;
     let name = match command {
         Command::Serve { config: _ } => {
-            // shortcut: retain J0's listener until configuration loading lands in J1 task 7.
+            // shortcut: retain J0's listener until J1 wires server startup and the generated module config.
             return match serve().await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
@@ -92,7 +92,17 @@ async fn main() -> ExitCode {
                 }
             };
         }
-        Command::Config { .. } => "config check",
+        Command::Config {
+            command: ConfigCommand::Check { files, path },
+        } => {
+            return match check_config(&path, files) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("kajiba-server: config check: {err}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         Command::Admin { command } => match command {
             AdminCommand::Enroll { .. } => "admin enroll",
             AdminCommand::Import { .. } => "admin import",
@@ -108,6 +118,16 @@ async fn main() -> ExitCode {
     };
     eprintln!("kajiba-server: {name}: not implemented yet");
     ExitCode::from(NOT_IMPLEMENTED)
+}
+
+fn check_config(path: &std::path::Path, files: bool) -> Result<(), String> {
+    let input =
+        std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let config = kajiba_core::config::ServerConfig::parse(&input)?;
+    if files {
+        config.check_files()?;
+    }
+    Ok(())
 }
 
 async fn serve() -> std::io::Result<()> {

@@ -18,6 +18,7 @@
           root = ../.;
           fileset = lib.fileset.unions [
             (craneLib.fileset.commonCargoSources ../crates)
+            ../crates/kajiba-core/tests/fixtures
             (craneLib.fileset.commonCargoSources ../apps/server)
             (craneLib.fileset.commonCargoSources ../apps/runner)
             (craneLib.fileset.commonCargoSources ../apps/cli)

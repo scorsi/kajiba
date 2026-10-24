@@ -1,0 +1,13 @@
+name = "build-1"
+url = "https://forge.example.org"
+token_file = "/run/secrets/kajiba-runner-build-1"
+backends = ["nix"]
+tags = []
+max_jobs = 1
+state_dir = "/var/lib/kajiba-runner"
+
+[log]
+level = "info"
+
+[metrics]
+listen = "127.0.0.1:9432"
