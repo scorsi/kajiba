@@ -87,18 +87,23 @@ pkgs.testers.runNixOSTest {
 
     with subtest("a missing token_file stops startup with config-invalid naming the file"):
         machine.succeed(f"systemctl stop {unit}", f"rm {token_file}")
-        machine.fail(f"systemctl start {unit}")
-        # Restart=on-failure retries until the start limit: the unit ends failed, never active.
-        machine.wait_until_succeeds(f"systemctl show -P ActiveState {unit} | grep -x failed", timeout=60)
-        result = machine.succeed(f"systemctl show -p ActiveState -p Result {unit}")
-        print(f"after the missing token_file: {result!r}")
+        # Runtime drop-in: one start attempt, no auto-restart, so the outcome needs no timing.
+        machine.succeed(
+            f"mkdir -p /run/systemd/system/{unit}.d",
+            f"printf '[Service]\\nRestart=no\\n' > /run/systemd/system/{unit}.d/no-restart.conf",
+            "systemctl daemon-reload",
+        )
+        # The readiness probe stops with the main process: the start job fails at once,
+        # not after TimeoutStartSec (timeout exits 124).
+        status, out = machine.execute(f"timeout 60 systemctl start {unit}")
+        assert status not in (0, 124), f"systemctl start: exit {status}, output {out!r}"
+        state = machine.succeed(f"systemctl show -p ActiveState -p Result {unit}").split()
+        assert state == ["ActiveState=failed", "Result=exit-code"], f"after the failed start: {state}"
         machine.succeed("journalctl --sync")
-        out = machine.succeed(f"journalctl _SYSTEMD_UNIT={unit} -o cat --no-pager")
-        invalid = [json.loads(line) for line in out.splitlines() if '"config-invalid"' in line]
-        # Earlier config check runs were outside the unit, so every line here comes from this phase.
-        assert invalid, f"no config-invalid line in the unit journal: {out}"
-        for line in invalid:
-            assert line["level"] == "error" and f"runners.build-1.token_file ({token_file})" in line["err"], f"config-invalid line does not name the file: {line}"
+        invocation = machine.succeed(f"systemctl show -P InvocationID {unit}").strip()
+        out = machine.succeed(f"journalctl _SYSTEMD_INVOCATION_ID={invocation} _SYSTEMD_UNIT={unit} -o cat --no-pager")
+        lines = [json.loads(line) for line in out.splitlines()]
+        assert len(lines) == 1 and lines[0]["event"] == "config-invalid" and lines[0]["level"] == "error" and f"runners.build-1.token_file ({token_file})" in lines[0]["err"], f"failed invocation {invocation}: expected one config-invalid naming the file, got {lines}"
         validate_logs(machine, unit)
   '';
 }

@@ -87,6 +87,16 @@ let
       "[::1]:${lib.removePrefix "[::]:" listen}"
     else
       listen;
+  # systemd lets ExecStartPost run after the main process died, until TimeoutStartSec: stop
+  # probing once $MAINPID is gone so a failed startup fails the unit at once. Silent: any
+  # output would be a non-JSON line in the unit's journal (0022).
+  readyProbe = pkgs.writeShellScript "kajiba-server-ready" ''
+    while kill -0 "$MAINPID" 2>/dev/null; do
+      ${lib.getExe pkgs.curl} --silent --fail --output /dev/null --max-time 5 "$1" && exit 0
+      ${pkgs.coreutils}/bin/sleep 1
+    done
+    exit 1
+  '';
 
   # systemd creates and owns directories under /var/lib; any other path is a tmpfiles rule.
   writable = [
@@ -242,7 +252,7 @@ in
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} serve --config ${configFile}";
         # The unit is active only once /readyz answers 200 (0022); TimeoutStartSec bounds it.
-        ExecStartPost = "${lib.getExe pkgs.curl} --silent --fail --output /dev/null --max-time 5 --retry 600 --retry-delay 1 --retry-all-errors http://${probe}/readyz";
+        ExecStartPost = "${readyProbe} http://${probe}/readyz";
         Restart = "on-failure";
         User = "kajiba";
         Group = "kajiba";
