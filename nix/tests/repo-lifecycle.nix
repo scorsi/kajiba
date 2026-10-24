@@ -1,6 +1,6 @@
 # J2 task 15: configurations switched through specialisations rename a repository (redirect,
 # same directory), archive it on removal (content in place, refused for git and /raw/, still
-# answered by RepoService), refuse another key taking its names, unarchive it on re-declaration,
+# answered and browsable by RepoService), refuse another key taking its names, unarchive it on re-declaration,
 # and quarantine a stray directory (0012, 0021, 0026, 0032).
 {
   pkgs,
@@ -61,6 +61,7 @@ pkgs.testers.runNixOSTest {
     { nodes, ... }:
     testLib
     + ''
+      import base64
       import json
 
       unit = "kajiba-server.service"
@@ -186,10 +187,13 @@ pkgs.testers.runNixOSTest {
               assert code == 403 and "archived" in body, f"/raw/ of {name}: {code} {body!r}"
           for request in [{"publicId": public_id}, {"name": "alice/demo2"}, {"name": "alice/demo"}]:
               assert get_repo(**request) == (public_id, "alice/demo2", True), f"GetRepo {request}: {get_repo(**request)}"
-          # The tree is still readable in place.
+          # The content is kept in place and browsable through the API, by both names.
           assert refs(forge, git_dir(public_id), user="kajiba") == source
-          tree = forge.succeed(f"runuser -u kajiba -- git --git-dir={git_dir(public_id)} show main:flake.nix")
-          assert tree == DEMO_FLAKE, f"flake.nix of the archived repository: {tree!r}"
+          for name in ["alice/demo2", "alice/demo"]:
+              request = json.dumps({"repo": name, "revision": "main", "path": "flake.nix"})
+              out = forge.succeed(f"grpcurl -plaintext -d {shlex.quote(request)} forge:8080 kajiba.v1.RepoService/GetBlob")
+              content = base64.b64decode(json.loads(out)["content"]).decode()
+              assert content == DEMO_FLAKE, f"GetBlob flake.nix of the archived {name}: {content!r}"
           code, _, location = http("/alice/demo")
           assert (code, location) == (301, "/alice/demo2"), f"UI route of the old name after archival: {code} {location!r}"
 

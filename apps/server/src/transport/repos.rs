@@ -1,13 +1,19 @@
-//! Read-only repository access (ADR 0020, 0021, 0026): `RepoService`.
+//! Read-only repository access (ADR 0020, 0021, 0026): `RepoService`, metadata and
+//! code browsing.
 // These feed `?` in tonic handlers, which return `Status` by value anyway.
 #![allow(clippy::result_large_err)]
 
 use super::{Health, cursor, local::refused};
+use kajiba_git::{GitStore, Gix};
 use kajiba_proto::v1::{
-    GetRepoRequest, GetRepoResponse, ListReposRequest, ListReposResponse, Mirror, Permission, Repo,
-    Role, Visibility, get_repo_request, repo_service_server::RepoService,
+    ChangeKind, Commit, EntryKind, FileChange, GetBlobRequest, GetBlobResponse,
+    GetCommitDiffRequest, GetCommitDiffResponse, GetRepoRequest, GetRepoResponse, GetTreeRequest,
+    GetTreeResponse, ListCommitsRequest, ListCommitsResponse, ListReposRequest, ListReposResponse,
+    Mirror, Permission, Repo, Role, TreeEntry, Visibility, get_repo_request,
+    repo_service_server::RepoService,
 };
 use sqlx::{SqliteConnection, SqlitePool};
+use std::path::{Path, PathBuf};
 use tonic::{Request, Response, Status};
 
 /// Repository routes read through the read pool, available once startup completed.
@@ -73,6 +79,87 @@ impl Repos {
             Ok(None) => Err(not_found_http()),
             Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         }
+    }
+}
+
+impl Repos {
+    /// The git directory of a repository, active or archived (0026), by public id or by
+    /// `<owner>/<name>`, current or previous.
+    async fn browse_dir(&self, repo: &str) -> Result<PathBuf, Status> {
+        let readers = self.readers()?;
+        let public_id = match repo.split_once('/') {
+            Some((owner, name)) => crate::db::repos::find(readers, owner, name)
+                .await
+                .map_err(internal)?
+                .map(|found| found.public_id),
+            None => sqlx::query_scalar("SELECT public_id FROM repo WHERE public_id = ?")
+                .bind(repo)
+                .fetch_optional(readers)
+                .await
+                .map_err(internal)?,
+        }
+        .ok_or_else(not_found)?;
+        Ok(self.0.state_dir.join(format!("repos/{public_id}.git")))
+    }
+}
+
+/// GetBlob refuses larger files: a response is held in memory whole.
+pub const MAX_BLOB_BYTES: usize = 16 << 20;
+
+/// A GitStore read, off the async runtime.
+async fn blocking<T: Send + 'static>(
+    read: impl FnOnce() -> Result<T, Status> + Send + 'static,
+) -> Result<T, Status> {
+    tokio::task::spawn_blocking(read)
+        .await
+        .map_err(|err| Status::internal(format!("git: {err}")))?
+}
+
+/// `NotFound` from git becomes `<reason>`, anything else INTERNAL.
+fn git_error(reason: &'static str) -> impl Fn(kajiba_git::Error) -> Status {
+    move |err| match err {
+        kajiba_git::Error::NotFound => refused(
+            tonic::Code::NotFound,
+            reason,
+            match reason {
+                "REVISION_NOT_FOUND" => "no branch, tag or commit by this name",
+                _ => "no such path at this revision",
+            }
+            .into(),
+        ),
+        kajiba_git::Error::Git(err) => Status::internal(format!("git: {err}")),
+    }
+}
+
+/// A branch, a tag or a full commit id, resolved to a commit id.
+fn revision(dir: &Path, revision: &str) -> Result<String, Status> {
+    match Gix.resolve(dir, revision) {
+        Ok((commit, "")) => Ok(commit),
+        // A path left over: `revision` is no ref.
+        Ok(_) => Err(git_error("REVISION_NOT_FOUND")(kajiba_git::Error::NotFound)),
+        Err(err) => Err(git_error("REVISION_NOT_FOUND")(err)),
+    }
+}
+
+fn path(path: &str) -> Result<(), Status> {
+    if path.is_empty() {
+        return Ok(());
+    }
+    kajiba_core::names::validate_path(path)
+        .map_err(|err| cursor::invalid_field("path", &err.to_string()))
+}
+
+fn commit(commit: kajiba_git::Commit) -> Commit {
+    Commit {
+        id: commit.id,
+        parent_ids: commit.parents,
+        author_name: commit.author_name,
+        author_email: commit.author_email,
+        commit_time: Some(kajiba_proto::google::protobuf::Timestamp {
+            seconds: commit.time,
+            nanos: 0,
+        }),
+        message: commit.message,
     }
 }
 
@@ -233,6 +320,141 @@ impl RepoService for Repos {
             repos,
             next_page_token,
         }))
+    }
+
+    async fn get_tree(
+        &self,
+        request: Request<GetTreeRequest>,
+    ) -> Result<Response<GetTreeResponse>, Status> {
+        let request = request.into_inner();
+        path(&request.path)?;
+        let dir = self.browse_dir(&request.repo).await?;
+        blocking(move || {
+            let commit_id = revision(&dir, &request.revision)?;
+            let entries = Gix
+                .tree(&dir, &commit_id, &request.path)
+                .map_err(git_error("PATH_NOT_FOUND"))?
+                .into_iter()
+                .map(|entry| TreeEntry {
+                    name: entry.name,
+                    kind: match entry.kind {
+                        kajiba_git::EntryKind::Tree => EntryKind::Tree,
+                        kajiba_git::EntryKind::Blob => EntryKind::Blob,
+                        kajiba_git::EntryKind::Executable => EntryKind::Executable,
+                        kajiba_git::EntryKind::Link => EntryKind::Link,
+                        kajiba_git::EntryKind::Submodule => EntryKind::Submodule,
+                    }
+                    .into(),
+                    id: entry.id,
+                })
+                .collect();
+            Ok(Response::new(GetTreeResponse { commit_id, entries }))
+        })
+        .await
+    }
+
+    async fn get_blob(
+        &self,
+        request: Request<GetBlobRequest>,
+    ) -> Result<Response<GetBlobResponse>, Status> {
+        let request = request.into_inner();
+        path(&request.path)?;
+        let dir = self.browse_dir(&request.repo).await?;
+        blocking(move || {
+            let commit_id = revision(&dir, &request.revision)?;
+            // shortcut: the blob is read whole before the size check; read the object header first if large blobs strain memory.
+            let content = Gix
+                .blob(&dir, &commit_id, &request.path)
+                .map_err(git_error("PATH_NOT_FOUND"))?;
+            if content.len() > MAX_BLOB_BYTES {
+                return Err(refused(
+                    tonic::Code::ResourceExhausted,
+                    "BLOB_TOO_LARGE",
+                    format!("the file exceeds {MAX_BLOB_BYTES} bytes"),
+                ));
+            }
+            Ok(Response::new(GetBlobResponse { commit_id, content }))
+        })
+        .await
+    }
+
+    async fn list_commits(
+        &self,
+        request: Request<ListCommitsRequest>,
+    ) -> Result<Response<ListCommitsResponse>, Status> {
+        const METHOD: &str = "v1.ListCommits";
+        let request = request.into_inner();
+        let size = cursor::page_size(request.page_size)? as usize;
+        // The cursor holds the first page's tip and the commits already returned, so
+        // pages stay stable under pushes and follow every parent of a merge.
+        let cursor = match cursor::decode(METHOD, &request.page_token)? {
+            Some((tip, skip)) => Some((
+                tip,
+                usize::try_from(skip)
+                    .map_err(|_| cursor::invalid_field("page_token", "malformed cursor"))?,
+            )),
+            None => None,
+        };
+        let dir = self.browse_dir(&request.repo).await?;
+        blocking(move || {
+            let (tip, skip) = match cursor {
+                Some(cursor) => cursor,
+                None => (revision(&dir, &request.revision)?, 0),
+            };
+            // shortcut: each page walks the history from the tip again, quadratic over deep paging; keep the walk state if that gets slow.
+            let mut commits = Gix
+                .log(&dir, &tip, skip.saturating_add(size + 1))
+                .map_err(git_error("REVISION_NOT_FOUND"))?;
+            let mut page = commits.split_off(skip.min(commits.len()));
+            let next_page_token = if page.len() > size {
+                page.truncate(size);
+                cursor::encode(METHOD, &tip, (skip + size) as i64)
+            } else {
+                String::new()
+            };
+            Ok(Response::new(ListCommitsResponse {
+                commits: page.into_iter().map(commit).collect(),
+                next_page_token,
+            }))
+        })
+        .await
+    }
+
+    async fn get_commit_diff(
+        &self,
+        request: Request<GetCommitDiffRequest>,
+    ) -> Result<Response<GetCommitDiffResponse>, Status> {
+        let request = request.into_inner();
+        let dir = self.browse_dir(&request.repo).await?;
+        blocking(move || {
+            let id = revision(&dir, &request.revision)?;
+            let found = Gix
+                .log(&dir, &id, 1)
+                .map_err(git_error("REVISION_NOT_FOUND"))?
+                .pop()
+                .ok_or_else(|| git_error("REVISION_NOT_FOUND")(kajiba_git::Error::NotFound))?;
+            let changes = Gix
+                .diff(&dir, found.parents.first().map(String::as_str), &id)
+                .map_err(git_error("REVISION_NOT_FOUND"))?
+                .into_iter()
+                .map(|change| FileChange {
+                    path: change.path,
+                    kind: match change.kind {
+                        kajiba_git::ChangeKind::Added => ChangeKind::Added,
+                        kajiba_git::ChangeKind::Deleted => ChangeKind::Deleted,
+                        kajiba_git::ChangeKind::Modified => ChangeKind::Modified,
+                    }
+                    .into(),
+                    old_id: change.old_id.unwrap_or_default(),
+                    new_id: change.new_id.unwrap_or_default(),
+                })
+                .collect();
+            Ok(Response::new(GetCommitDiffResponse {
+                commit: Some(commit(found)),
+                changes,
+            }))
+        })
+        .await
     }
 }
 

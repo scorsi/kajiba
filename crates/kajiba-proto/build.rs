@@ -5,10 +5,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .build_server(true)
         .build_client(true)
+        // Generated in this crate rather than taken from prost-types (no new dependency, 0034).
+        .compile_well_known_types(true)
         .compile_protos(
             &[
                 "../../proto/kajiba/v1/health.proto",
                 "../../proto/kajiba/v1/repo.proto",
+                "google/protobuf/timestamp.proto",
             ],
             &["../../proto"],
         )?;

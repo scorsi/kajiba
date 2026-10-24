@@ -352,5 +352,231 @@ fn the_service_has_no_mutating_method() {
         .filter_map(|line| line.trim().strip_prefix("rpc "))
         .map(|rpc| rpc.split('(').next().unwrap())
         .collect();
-    assert_eq!(methods, ["GetRepo", "ListRepos"]);
+    assert_eq!(
+        methods,
+        [
+            "GetRepo",
+            "ListRepos",
+            "GetTree",
+            "GetBlob",
+            "ListCommits",
+            "GetCommitDiff"
+        ]
+    );
+}
+
+fn reason(status: &Status) -> String {
+    status
+        .get_error_details()
+        .error_info()
+        .unwrap()
+        .reason
+        .clone()
+}
+
+async fn tree(
+    repos: &Repos,
+    repo: &str,
+    revision: &str,
+    path: &str,
+) -> Result<Vec<String>, Status> {
+    let response = repos
+        .get_tree(Request::new(GetTreeRequest {
+            repo: repo.into(),
+            revision: revision.into(),
+            path: path.into(),
+        }))
+        .await?
+        .into_inner();
+    Ok(response
+        .entries
+        .into_iter()
+        .map(|entry| format!("{}:{:?}", entry.name, entry.kind()))
+        .collect())
+}
+
+async fn blob(repos: &Repos, repo: &str, revision: &str, path: &str) -> Result<Vec<u8>, Status> {
+    repos
+        .get_blob(Request::new(GetBlobRequest {
+            repo: repo.into(),
+            revision: revision.into(),
+            path: path.into(),
+        }))
+        .await
+        .map(|response| response.into_inner().content)
+}
+
+#[tokio::test]
+async fn browses_tree_blob_log_and_diff_of_active_and_archived_repositories() {
+    let mut fixture = Fixture::new(DEMO).await;
+    fixture
+        .fill(
+            "alice/demo",
+            &[("flake.nix", "{ }\n"), ("src/lib.rs", "")],
+            &["refs/heads/b1", "refs/heads/b2", "refs/tags/v1"],
+        )
+        .await;
+    let demo = get(
+        &fixture.repos,
+        get_repo_request::Repo::Name("alice/demo".into()),
+    )
+    .await
+    .unwrap();
+    // Archived: browsing goes on, by current name, previous name and public id.
+    fixture.apply("").await;
+    let repos = &fixture.repos;
+    for repo in ["alice/demo", "alice/old", demo.public_id.as_str()] {
+        assert_eq!(
+            tree(repos, repo, "main", "").await.unwrap(),
+            ["flake.nix:Blob", "src:Tree"]
+        );
+        assert_eq!(
+            tree(repos, repo, "v1", "src").await.unwrap(),
+            ["lib.rs:Blob"]
+        );
+        assert_eq!(
+            blob(repos, repo, "b2", "flake.nix").await.unwrap(),
+            b"{ }\n"
+        );
+    }
+
+    // v1 -> b2 -> b1 -> main, newest first, two per page.
+    let mut token = String::new();
+    let mut messages = Vec::new();
+    loop {
+        let page = repos
+            .list_commits(Request::new(ListCommitsRequest {
+                repo: "alice/demo".into(),
+                revision: "v1".into(),
+                page_size: 2,
+                page_token: token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(page.commits.len() <= 2);
+        messages.extend(page.commits.into_iter().map(|c| c.message));
+        token = page.next_page_token;
+        if token.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        messages,
+        [
+            "refs/tags/v1\n",
+            "refs/heads/b2\n",
+            "refs/heads/b1\n",
+            "init\n"
+        ]
+    );
+
+    let diff = |revision: &str| {
+        repos.get_commit_diff(Request::new(GetCommitDiffRequest {
+            repo: "alice/demo".into(),
+            revision: revision.into(),
+        }))
+    };
+    // The root commit against the empty tree; b1 adds nothing to main.
+    let root = diff("main").await.unwrap().into_inner();
+    assert!(root.commit.unwrap().parent_ids.is_empty());
+    assert_eq!(
+        root.changes
+            .iter()
+            .map(|c| (c.path.as_str(), c.kind(), c.old_id.is_empty()))
+            .collect::<Vec<_>>(),
+        [
+            ("flake.nix", ChangeKind::Added, true),
+            ("src/lib.rs", ChangeKind::Added, true)
+        ]
+    );
+    let b1 = diff("b1").await.unwrap().into_inner();
+    assert_eq!(b1.commit.unwrap().parent_ids.len(), 1);
+    assert!(b1.changes.is_empty());
+
+    for (repo, revision, path, code, expected) in [
+        (
+            "alice/missing",
+            "main",
+            "",
+            Code::NotFound,
+            "REPO_NOT_FOUND",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "main",
+            "",
+            Code::NotFound,
+            "REPO_NOT_FOUND",
+        ),
+        (
+            "alice/demo",
+            "nope",
+            "",
+            Code::NotFound,
+            "REVISION_NOT_FOUND",
+        ),
+        ("alice/demo", "", "", Code::NotFound, "REVISION_NOT_FOUND"),
+        (
+            "alice/demo",
+            "main/src",
+            "",
+            Code::NotFound,
+            "REVISION_NOT_FOUND",
+        ),
+        (
+            "alice/demo",
+            "main",
+            "missing",
+            Code::NotFound,
+            "PATH_NOT_FOUND",
+        ),
+        (
+            "alice/demo",
+            "main",
+            "flake.nix",
+            Code::NotFound,
+            "PATH_NOT_FOUND",
+        ),
+        (
+            "alice/demo",
+            "main",
+            "../x",
+            Code::InvalidArgument,
+            "INVALID_FIELD",
+        ),
+    ] {
+        let status = tree(repos, repo, revision, path).await.unwrap_err();
+        assert_eq!(
+            (status.code(), reason(&status).as_str()),
+            (code, expected),
+            "{repo} {revision} {path}"
+        );
+    }
+    let status = blob(repos, "alice/demo", "main", "src").await.unwrap_err();
+    assert_eq!(reason(&status), "PATH_NOT_FOUND");
+    let status = diff("nope").await.unwrap_err();
+    assert_eq!(reason(&status), "REVISION_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn a_blob_above_the_cap_is_resource_exhausted() {
+    let fixture = Fixture::new(DEMO).await;
+    let at_cap = "a".repeat(MAX_BLOB_BYTES);
+    let above = "a".repeat(MAX_BLOB_BYTES + 1);
+    fixture
+        .fill("alice/demo", &[("at", &at_cap), ("above", &above)], &[])
+        .await;
+    let repos = &fixture.repos;
+    assert_eq!(
+        blob(repos, "alice/demo", "main", "at").await.unwrap().len(),
+        MAX_BLOB_BYTES
+    );
+    let status = blob(repos, "alice/demo", "main", "above")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (status.code(), reason(&status).as_str()),
+        (Code::ResourceExhausted, "BLOB_TOO_LARGE")
+    );
 }

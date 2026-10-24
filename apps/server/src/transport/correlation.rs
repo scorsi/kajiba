@@ -58,6 +58,10 @@ pub(super) async fn request(
         "/kajiba.v1.HealthService/Check" => "/kajiba.v1.HealthService/Check",
         "/kajiba.v1.RepoService/GetRepo" => "/kajiba.v1.RepoService/GetRepo",
         "/kajiba.v1.RepoService/ListRepos" => "/kajiba.v1.RepoService/ListRepos",
+        "/kajiba.v1.RepoService/GetTree" => "/kajiba.v1.RepoService/GetTree",
+        "/kajiba.v1.RepoService/GetBlob" => "/kajiba.v1.RepoService/GetBlob",
+        "/kajiba.v1.RepoService/ListCommits" => "/kajiba.v1.RepoService/ListCommits",
+        "/kajiba.v1.RepoService/GetCommitDiff" => "/kajiba.v1.RepoService/GetCommitDiff",
         "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo" => {
             "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
         }

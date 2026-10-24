@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [lib]
+# Generated code only; google.protobuf.Timestamp's comments hold non-Rust examples.
+doctest = false
 
 [dependencies]
 prost.workspace = true

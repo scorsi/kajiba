@@ -4,13 +4,15 @@
 
 import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import type { Timestamp } from "@bufbuild/protobuf/wkt";
+import { file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file kajiba/v1/repo.proto.
  */
 export const file_kajiba_v1_repo: GenFile = /*@__PURE__*/
-  fileDesc("ChRrYWppYmEvdjEvcmVwby5wcm90bxIJa2FqaWJhLnYxIj0KDkdldFJlcG9SZXF1ZXN0EhMKCXB1YmxpY19pZBgBIAEoCUgAEg4KBG5hbWUYAiABKAlIAEIGCgRyZXBvIjAKD0dldFJlcG9SZXNwb25zZRIdCgRyZXBvGAEgASgLMg8ua2FqaWJhLnYxLlJlcG8iOQoQTGlzdFJlcG9zUmVxdWVzdBIRCglwYWdlX3NpemUYASABKAUSEgoKcGFnZV90b2tlbhgCIAEoCSJMChFMaXN0UmVwb3NSZXNwb25zZRIeCgVyZXBvcxgBIAMoCzIPLmthamliYS52MS5SZXBvEhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSKcAgoEUmVwbxIRCglwdWJsaWNfaWQYASABKAkSDQoFb3duZXIYAiABKAkSDAoEbmFtZRgDIAEoCRITCgtkZXNjcmlwdGlvbhgEIAEoCRIpCgp2aXNpYmlsaXR5GAUgASgOMhUua2FqaWJhLnYxLlZpc2liaWxpdHkSFgoOZGVmYXVsdF9icmFuY2gYBiABKAkSEgoKY2lfZW5hYmxlZBgHIAEoCBIWCg5wcmV2aW91c19uYW1lcxgIIAMoCRIqCgtwZXJtaXNzaW9ucxgJIAMoCzIVLmthamliYS52MS5QZXJtaXNzaW9uEiIKB21pcnJvcnMYCiADKAsyES5rYWppYmEudjEuTWlycm9yEhAKCGFyY2hpdmVkGAsgASgIIjkKClBlcm1pc3Npb24SDAoEdXNlchgBIAEoCRIdCgRyb2xlGAIgASgOMg8ua2FqaWJhLnYxLlJvbGUiQQoGTWlycm9yEhIKCnJlbW90ZV91cmwYASABKAkSEgoKY3JlZGVudGlhbBgCIAEoCRIPCgdlbmFibGVkGAMgASgIKj8KClZpc2liaWxpdHkSGgoWVklTSUJJTElUWV9VTlNQRUNJRklFRBAAEhUKEVZJU0lCSUxJVFlfUFVCTElDEAEqSwoEUm9sZRIUChBST0xFX1VOU1BFQ0lGSUVEEAASDQoJUk9MRV9SRUFEEAESDgoKUk9MRV9XUklURRACEg4KClJPTEVfQURNSU4QAzKXAQoLUmVwb1NlcnZpY2USQAoHR2V0UmVwbxIZLmthamliYS52MS5HZXRSZXBvUmVxdWVzdBoaLmthamliYS52MS5HZXRSZXBvUmVzcG9uc2USRgoJTGlzdFJlcG9zEhsua2FqaWJhLnYxLkxpc3RSZXBvc1JlcXVlc3QaHC5rYWppYmEudjEuTGlzdFJlcG9zUmVzcG9uc2ViBnByb3RvMw");
+  fileDesc("ChRrYWppYmEvdjEvcmVwby5wcm90bxIJa2FqaWJhLnYxIj0KDkdldFJlcG9SZXF1ZXN0EhMKCXB1YmxpY19pZBgBIAEoCUgAEg4KBG5hbWUYAiABKAlIAEIGCgRyZXBvIjAKD0dldFJlcG9SZXNwb25zZRIdCgRyZXBvGAEgASgLMg8ua2FqaWJhLnYxLlJlcG8iOQoQTGlzdFJlcG9zUmVxdWVzdBIRCglwYWdlX3NpemUYASABKAUSEgoKcGFnZV90b2tlbhgCIAEoCSJMChFMaXN0UmVwb3NSZXNwb25zZRIeCgVyZXBvcxgBIAMoCzIPLmthamliYS52MS5SZXBvEhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSKcAgoEUmVwbxIRCglwdWJsaWNfaWQYASABKAkSDQoFb3duZXIYAiABKAkSDAoEbmFtZRgDIAEoCRITCgtkZXNjcmlwdGlvbhgEIAEoCRIpCgp2aXNpYmlsaXR5GAUgASgOMhUua2FqaWJhLnYxLlZpc2liaWxpdHkSFgoOZGVmYXVsdF9icmFuY2gYBiABKAkSEgoKY2lfZW5hYmxlZBgHIAEoCBIWCg5wcmV2aW91c19uYW1lcxgIIAMoCRIqCgtwZXJtaXNzaW9ucxgJIAMoCzIVLmthamliYS52MS5QZXJtaXNzaW9uEiIKB21pcnJvcnMYCiADKAsyES5rYWppYmEudjEuTWlycm9yEhAKCGFyY2hpdmVkGAsgASgIIjkKClBlcm1pc3Npb24SDAoEdXNlchgBIAEoCRIdCgRyb2xlGAIgASgOMg8ua2FqaWJhLnYxLlJvbGUiQQoGTWlycm9yEhIKCnJlbW90ZV91cmwYASABKAkSEgoKY3JlZGVudGlhbBgCIAEoCRIPCgdlbmFibGVkGAMgASgIIj4KDkdldFRyZWVSZXF1ZXN0EgwKBHJlcG8YASABKAkSEAoIcmV2aXNpb24YAiABKAkSDAoEcGF0aBgDIAEoCSJLCg9HZXRUcmVlUmVzcG9uc2USEQoJY29tbWl0X2lkGAEgASgJEiUKB2VudHJpZXMYAiADKAsyFC5rYWppYmEudjEuVHJlZUVudHJ5IkkKCVRyZWVFbnRyeRIMCgRuYW1lGAEgASgJEiIKBGtpbmQYAiABKA4yFC5rYWppYmEudjEuRW50cnlLaW5kEgoKAmlkGAMgASgJIj4KDkdldEJsb2JSZXF1ZXN0EgwKBHJlcG8YASABKAkSEAoIcmV2aXNpb24YAiABKAkSDAoEcGF0aBgDIAEoCSI1Cg9HZXRCbG9iUmVzcG9uc2USEQoJY29tbWl0X2lkGAEgASgJEg8KB2NvbnRlbnQYAiABKAwiWwoSTGlzdENvbW1pdHNSZXF1ZXN0EgwKBHJlcG8YASABKAkSEAoIcmV2aXNpb24YAiABKAkSEQoJcGFnZV9zaXplGAMgASgFEhIKCnBhZ2VfdG9rZW4YBCABKAkiUgoTTGlzdENvbW1pdHNSZXNwb25zZRIiCgdjb21taXRzGAEgAygLMhEua2FqaWJhLnYxLkNvbW1pdBIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkilQEKBkNvbW1pdBIKCgJpZBgBIAEoCRISCgpwYXJlbnRfaWRzGAIgAygJEhMKC2F1dGhvcl9uYW1lGAMgASgJEhQKDGF1dGhvcl9lbWFpbBgEIAEoCRIvCgtjb21taXRfdGltZRgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDwoHbWVzc2FnZRgGIAEoCSI2ChRHZXRDb21taXREaWZmUmVxdWVzdBIMCgRyZXBvGAEgASgJEhAKCHJldmlzaW9uGAIgASgJImIKFUdldENvbW1pdERpZmZSZXNwb25zZRIhCgZjb21taXQYASABKAsyES5rYWppYmEudjEuQ29tbWl0EiYKB2NoYW5nZXMYAiADKAsyFS5rYWppYmEudjEuRmlsZUNoYW5nZSJfCgpGaWxlQ2hhbmdlEgwKBHBhdGgYASABKAkSIwoEa2luZBgCIAEoDjIVLmthamliYS52MS5DaGFuZ2VLaW5kEg4KBm9sZF9pZBgDIAEoCRIOCgZuZXdfaWQYBCABKAkqPwoKVmlzaWJpbGl0eRIaChZWSVNJQklMSVRZX1VOU1BFQ0lGSUVEEAASFQoRVklTSUJJTElUWV9QVUJMSUMQASpLCgRSb2xlEhQKEFJPTEVfVU5TUEVDSUZJRUQQABINCglST0xFX1JFQUQQARIOCgpST0xFX1dSSVRFEAISDgoKUk9MRV9BRE1JThADKpsBCglFbnRyeUtpbmQSGgoWRU5UUllfS0lORF9VTlNQRUNJRklFRBAAEhMKD0VOVFJZX0tJTkRfVFJFRRABEhMKD0VOVFJZX0tJTkRfQkxPQhACEhkKFUVOVFJZX0tJTkRfRVhFQ1VUQUJMRRADEhMKD0VOVFJZX0tJTkRfTElOSxAEEhgKFEVOVFJZX0tJTkRfU1VCTU9EVUxFEAUqcwoKQ2hhbmdlS2luZBIbChdDSEFOR0VfS0lORF9VTlNQRUNJRklFRBAAEhUKEUNIQU5HRV9LSU5EX0FEREVEEAESFwoTQ0hBTkdFX0tJTkRfREVMRVRFRBACEhgKFENIQU5HRV9LSU5EX01PRElGSUVEEAMyvQMKC1JlcG9TZXJ2aWNlEkAKB0dldFJlcG8SGS5rYWppYmEudjEuR2V0UmVwb1JlcXVlc3QaGi5rYWppYmEudjEuR2V0UmVwb1Jlc3BvbnNlEkYKCUxpc3RSZXBvcxIbLmthamliYS52MS5MaXN0UmVwb3NSZXF1ZXN0Ghwua2FqaWJhLnYxLkxpc3RSZXBvc1Jlc3BvbnNlEkAKB0dldFRyZWUSGS5rYWppYmEudjEuR2V0VHJlZVJlcXVlc3QaGi5rYWppYmEudjEuR2V0VHJlZVJlc3BvbnNlEkAKB0dldEJsb2ISGS5rYWppYmEudjEuR2V0QmxvYlJlcXVlc3QaGi5rYWppYmEudjEuR2V0QmxvYlJlc3BvbnNlEkwKC0xpc3RDb21taXRzEh0ua2FqaWJhLnYxLkxpc3RDb21taXRzUmVxdWVzdBoeLmthamliYS52MS5MaXN0Q29tbWl0c1Jlc3BvbnNlElIKDUdldENvbW1pdERpZmYSHy5rYWppYmEudjEuR2V0Q29tbWl0RGlmZlJlcXVlc3QaIC5rYWppYmEudjEuR2V0Q29tbWl0RGlmZlJlc3BvbnNlYgZwcm90bzM", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message kajiba.v1.GetRepoRequest
@@ -233,6 +235,313 @@ export const MirrorSchema: GenMessage<Mirror> = /*@__PURE__*/
   messageDesc(file_kajiba_v1_repo, 6);
 
 /**
+ * @generated from message kajiba.v1.GetTreeRequest
+ */
+export type GetTreeRequest = Message<"kajiba.v1.GetTreeRequest"> & {
+  /**
+   * @generated from field: string repo = 1;
+   */
+  repo: string;
+
+  /**
+   * @generated from field: string revision = 2;
+   */
+  revision: string;
+
+  /**
+   * `/`-separated, "" for the root.
+   *
+   * @generated from field: string path = 3;
+   */
+  path: string;
+};
+
+/**
+ * Describes the message kajiba.v1.GetTreeRequest.
+ * Use `create(GetTreeRequestSchema)` to create a new message.
+ */
+export const GetTreeRequestSchema: GenMessage<GetTreeRequest> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 7);
+
+/**
+ * @generated from message kajiba.v1.GetTreeResponse
+ */
+export type GetTreeResponse = Message<"kajiba.v1.GetTreeResponse"> & {
+  /**
+   * The commit `revision` resolved to.
+   *
+   * @generated from field: string commit_id = 1;
+   */
+  commitId: string;
+
+  /**
+   * @generated from field: repeated kajiba.v1.TreeEntry entries = 2;
+   */
+  entries: TreeEntry[];
+};
+
+/**
+ * Describes the message kajiba.v1.GetTreeResponse.
+ * Use `create(GetTreeResponseSchema)` to create a new message.
+ */
+export const GetTreeResponseSchema: GenMessage<GetTreeResponse> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 8);
+
+/**
+ * @generated from message kajiba.v1.TreeEntry
+ */
+export type TreeEntry = Message<"kajiba.v1.TreeEntry"> & {
+  /**
+   * @generated from field: string name = 1;
+   */
+  name: string;
+
+  /**
+   * @generated from field: kajiba.v1.EntryKind kind = 2;
+   */
+  kind: EntryKind;
+
+  /**
+   * @generated from field: string id = 3;
+   */
+  id: string;
+};
+
+/**
+ * Describes the message kajiba.v1.TreeEntry.
+ * Use `create(TreeEntrySchema)` to create a new message.
+ */
+export const TreeEntrySchema: GenMessage<TreeEntry> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 9);
+
+/**
+ * @generated from message kajiba.v1.GetBlobRequest
+ */
+export type GetBlobRequest = Message<"kajiba.v1.GetBlobRequest"> & {
+  /**
+   * @generated from field: string repo = 1;
+   */
+  repo: string;
+
+  /**
+   * @generated from field: string revision = 2;
+   */
+  revision: string;
+
+  /**
+   * @generated from field: string path = 3;
+   */
+  path: string;
+};
+
+/**
+ * Describes the message kajiba.v1.GetBlobRequest.
+ * Use `create(GetBlobRequestSchema)` to create a new message.
+ */
+export const GetBlobRequestSchema: GenMessage<GetBlobRequest> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 10);
+
+/**
+ * @generated from message kajiba.v1.GetBlobResponse
+ */
+export type GetBlobResponse = Message<"kajiba.v1.GetBlobResponse"> & {
+  /**
+   * @generated from field: string commit_id = 1;
+   */
+  commitId: string;
+
+  /**
+   * @generated from field: bytes content = 2;
+   */
+  content: Uint8Array;
+};
+
+/**
+ * Describes the message kajiba.v1.GetBlobResponse.
+ * Use `create(GetBlobResponseSchema)` to create a new message.
+ */
+export const GetBlobResponseSchema: GenMessage<GetBlobResponse> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 11);
+
+/**
+ * @generated from message kajiba.v1.ListCommitsRequest
+ */
+export type ListCommitsRequest = Message<"kajiba.v1.ListCommitsRequest"> & {
+  /**
+   * @generated from field: string repo = 1;
+   */
+  repo: string;
+
+  /**
+   * Ignored with a page token, which keeps the first page's tip.
+   *
+   * @generated from field: string revision = 2;
+   */
+  revision: string;
+
+  /**
+   * @generated from field: int32 page_size = 3;
+   */
+  pageSize: number;
+
+  /**
+   * @generated from field: string page_token = 4;
+   */
+  pageToken: string;
+};
+
+/**
+ * Describes the message kajiba.v1.ListCommitsRequest.
+ * Use `create(ListCommitsRequestSchema)` to create a new message.
+ */
+export const ListCommitsRequestSchema: GenMessage<ListCommitsRequest> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 12);
+
+/**
+ * @generated from message kajiba.v1.ListCommitsResponse
+ */
+export type ListCommitsResponse = Message<"kajiba.v1.ListCommitsResponse"> & {
+  /**
+   * @generated from field: repeated kajiba.v1.Commit commits = 1;
+   */
+  commits: Commit[];
+
+  /**
+   * @generated from field: string next_page_token = 2;
+   */
+  nextPageToken: string;
+};
+
+/**
+ * Describes the message kajiba.v1.ListCommitsResponse.
+ * Use `create(ListCommitsResponseSchema)` to create a new message.
+ */
+export const ListCommitsResponseSchema: GenMessage<ListCommitsResponse> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 13);
+
+/**
+ * @generated from message kajiba.v1.Commit
+ */
+export type Commit = Message<"kajiba.v1.Commit"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: repeated string parent_ids = 2;
+   */
+  parentIds: string[];
+
+  /**
+   * @generated from field: string author_name = 3;
+   */
+  authorName: string;
+
+  /**
+   * @generated from field: string author_email = 4;
+   */
+  authorEmail: string;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp commit_time = 5;
+   */
+  commitTime?: Timestamp | undefined;
+
+  /**
+   * @generated from field: string message = 6;
+   */
+  message: string;
+};
+
+/**
+ * Describes the message kajiba.v1.Commit.
+ * Use `create(CommitSchema)` to create a new message.
+ */
+export const CommitSchema: GenMessage<Commit> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 14);
+
+/**
+ * @generated from message kajiba.v1.GetCommitDiffRequest
+ */
+export type GetCommitDiffRequest = Message<"kajiba.v1.GetCommitDiffRequest"> & {
+  /**
+   * @generated from field: string repo = 1;
+   */
+  repo: string;
+
+  /**
+   * @generated from field: string revision = 2;
+   */
+  revision: string;
+};
+
+/**
+ * Describes the message kajiba.v1.GetCommitDiffRequest.
+ * Use `create(GetCommitDiffRequestSchema)` to create a new message.
+ */
+export const GetCommitDiffRequestSchema: GenMessage<GetCommitDiffRequest> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 15);
+
+/**
+ * @generated from message kajiba.v1.GetCommitDiffResponse
+ */
+export type GetCommitDiffResponse = Message<"kajiba.v1.GetCommitDiffResponse"> & {
+  /**
+   * @generated from field: kajiba.v1.Commit commit = 1;
+   */
+  commit?: Commit | undefined;
+
+  /**
+   * @generated from field: repeated kajiba.v1.FileChange changes = 2;
+   */
+  changes: FileChange[];
+};
+
+/**
+ * Describes the message kajiba.v1.GetCommitDiffResponse.
+ * Use `create(GetCommitDiffResponseSchema)` to create a new message.
+ */
+export const GetCommitDiffResponseSchema: GenMessage<GetCommitDiffResponse> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 16);
+
+/**
+ * @generated from message kajiba.v1.FileChange
+ */
+export type FileChange = Message<"kajiba.v1.FileChange"> & {
+  /**
+   * @generated from field: string path = 1;
+   */
+  path: string;
+
+  /**
+   * @generated from field: kajiba.v1.ChangeKind kind = 2;
+   */
+  kind: ChangeKind;
+
+  /**
+   * Absent for an added file.
+   *
+   * @generated from field: string old_id = 3;
+   */
+  oldId: string;
+
+  /**
+   * Absent for a deleted file.
+   *
+   * @generated from field: string new_id = 4;
+   */
+  newId: string;
+};
+
+/**
+ * Describes the message kajiba.v1.FileChange.
+ * Use `create(FileChangeSchema)` to create a new message.
+ */
+export const FileChangeSchema: GenMessage<FileChange> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 17);
+
+/**
  * @generated from enum kajiba.v1.Visibility
  */
 export enum Visibility {
@@ -285,6 +594,78 @@ export const RoleSchema: GenEnum<Role> = /*@__PURE__*/
   enumDesc(file_kajiba_v1_repo, 1);
 
 /**
+ * @generated from enum kajiba.v1.EntryKind
+ */
+export enum EntryKind {
+  /**
+   * @generated from enum value: ENTRY_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: ENTRY_KIND_TREE = 1;
+   */
+  TREE = 1,
+
+  /**
+   * @generated from enum value: ENTRY_KIND_BLOB = 2;
+   */
+  BLOB = 2,
+
+  /**
+   * @generated from enum value: ENTRY_KIND_EXECUTABLE = 3;
+   */
+  EXECUTABLE = 3,
+
+  /**
+   * @generated from enum value: ENTRY_KIND_LINK = 4;
+   */
+  LINK = 4,
+
+  /**
+   * @generated from enum value: ENTRY_KIND_SUBMODULE = 5;
+   */
+  SUBMODULE = 5,
+}
+
+/**
+ * Describes the enum kajiba.v1.EntryKind.
+ */
+export const EntryKindSchema: GenEnum<EntryKind> = /*@__PURE__*/
+  enumDesc(file_kajiba_v1_repo, 2);
+
+/**
+ * @generated from enum kajiba.v1.ChangeKind
+ */
+export enum ChangeKind {
+  /**
+   * @generated from enum value: CHANGE_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: CHANGE_KIND_ADDED = 1;
+   */
+  ADDED = 1,
+
+  /**
+   * @generated from enum value: CHANGE_KIND_DELETED = 2;
+   */
+  DELETED = 2,
+
+  /**
+   * @generated from enum value: CHANGE_KIND_MODIFIED = 3;
+   */
+  MODIFIED = 3,
+}
+
+/**
+ * Describes the enum kajiba.v1.ChangeKind.
+ */
+export const ChangeKindSchema: GenEnum<ChangeKind> = /*@__PURE__*/
+  enumDesc(file_kajiba_v1_repo, 3);
+
+/**
  * Declared repositories, read-only (0026): no method creates, renames or deletes
  * one. Public repositories only until private ones exist (0013).
  *
@@ -311,6 +692,47 @@ export const RepoService: GenService<{
     methodKind: "unary";
     input: typeof ListReposRequestSchema;
     output: typeof ListReposResponseSchema;
+  },
+  /**
+   * The entries of a directory.
+   *
+   * @generated from rpc kajiba.v1.RepoService.GetTree
+   */
+  getTree: {
+    methodKind: "unary";
+    input: typeof GetTreeRequestSchema;
+    output: typeof GetTreeResponseSchema;
+  },
+  /**
+   * A file's content; above 16 MiB, RESOURCE_EXHAUSTED / BLOB_TOO_LARGE.
+   *
+   * @generated from rpc kajiba.v1.RepoService.GetBlob
+   */
+  getBlob: {
+    methodKind: "unary";
+    input: typeof GetBlobRequestSchema;
+    output: typeof GetBlobResponseSchema;
+  },
+  /**
+   * The commits reachable from `revision`, newest first (0020 pagination).
+   *
+   * @generated from rpc kajiba.v1.RepoService.ListCommits
+   */
+  listCommits: {
+    methodKind: "unary";
+    input: typeof ListCommitsRequestSchema;
+    output: typeof ListCommitsResponseSchema;
+  },
+  /**
+   * The files a commit changes against its first parent (the empty tree for a root
+   * commit); renames are not detected.
+   *
+   * @generated from rpc kajiba.v1.RepoService.GetCommitDiff
+   */
+  getCommitDiff: {
+    methodKind: "unary";
+    input: typeof GetCommitDiffRequestSchema;
+    output: typeof GetCommitDiffResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_kajiba_v1_repo, 0);

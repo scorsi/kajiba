@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package kajiba.v1;
 
+import "google/protobuf/timestamp.proto";
+
 // Declared repositories, read-only (0026): no method creates, renames or deletes
 // one. Public repositories only until private ones exist (0013).
 service RepoService {
@@ -10,6 +12,20 @@ service RepoService {
   rpc GetRepo(GetRepoRequest) returns (GetRepoResponse);
   // Active and archived repositories, ordered by <owner>/<name> (0020).
   rpc ListRepos(ListReposRequest) returns (ListReposResponse);
+
+  // Code browsing, active and archived repositories alike (0026). `repo` is a public
+  // id or <owner>/<name>, current or previous; `revision` is a branch, a tag or a
+  // full commit id. REPO_NOT_FOUND, REVISION_NOT_FOUND, PATH_NOT_FOUND otherwise.
+
+  // The entries of a directory.
+  rpc GetTree(GetTreeRequest) returns (GetTreeResponse);
+  // A file's content; above 16 MiB, RESOURCE_EXHAUSTED / BLOB_TOO_LARGE.
+  rpc GetBlob(GetBlobRequest) returns (GetBlobResponse);
+  // The commits reachable from `revision`, newest first (0020 pagination).
+  rpc ListCommits(ListCommitsRequest) returns (ListCommitsResponse);
+  // The files a commit changes against its first parent (the empty tree for a root
+  // commit); renames are not detected.
+  rpc GetCommitDiff(GetCommitDiffRequest) returns (GetCommitDiffResponse);
 }
 
 message GetRepoRequest {
@@ -75,4 +91,91 @@ message Mirror {
   // A mirror.credentials name, never the secret.
   string credential = 2;
   bool enabled = 3;
+}
+
+message GetTreeRequest {
+  string repo = 1;
+  string revision = 2;
+  // `/`-separated, "" for the root.
+  string path = 3;
+}
+
+message GetTreeResponse {
+  // The commit `revision` resolved to.
+  string commit_id = 1;
+  repeated TreeEntry entries = 2;
+}
+
+message TreeEntry {
+  string name = 1;
+  EntryKind kind = 2;
+  string id = 3;
+}
+
+enum EntryKind {
+  ENTRY_KIND_UNSPECIFIED = 0;
+  ENTRY_KIND_TREE = 1;
+  ENTRY_KIND_BLOB = 2;
+  ENTRY_KIND_EXECUTABLE = 3;
+  ENTRY_KIND_LINK = 4;
+  ENTRY_KIND_SUBMODULE = 5;
+}
+
+message GetBlobRequest {
+  string repo = 1;
+  string revision = 2;
+  string path = 3;
+}
+
+message GetBlobResponse {
+  string commit_id = 1;
+  bytes content = 2;
+}
+
+message ListCommitsRequest {
+  string repo = 1;
+  // Ignored with a page token, which keeps the first page's tip.
+  string revision = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListCommitsResponse {
+  repeated Commit commits = 1;
+  string next_page_token = 2;
+}
+
+message Commit {
+  string id = 1;
+  repeated string parent_ids = 2;
+  string author_name = 3;
+  string author_email = 4;
+  google.protobuf.Timestamp commit_time = 5;
+  string message = 6;
+}
+
+message GetCommitDiffRequest {
+  string repo = 1;
+  string revision = 2;
+}
+
+message GetCommitDiffResponse {
+  Commit commit = 1;
+  repeated FileChange changes = 2;
+}
+
+message FileChange {
+  string path = 1;
+  ChangeKind kind = 2;
+  // Absent for an added file.
+  string old_id = 3;
+  // Absent for a deleted file.
+  string new_id = 4;
+}
+
+enum ChangeKind {
+  CHANGE_KIND_UNSPECIFIED = 0;
+  CHANGE_KIND_ADDED = 1;
+  CHANGE_KIND_DELETED = 2;
+  CHANGE_KIND_MODIFIED = 3;
 }
