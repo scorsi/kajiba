@@ -2,6 +2,52 @@ use super::super::repos::tests::{DEMO, Fixture, git};
 use axum::http;
 use tonic::codegen::Service;
 
+fn gzip(body: &[u8]) -> Vec<u8> {
+    // Allow for the gzip wrapper in addition to the zlib compression bound.
+    let mut output = vec![0; zlib_rs::compress_bound(body.len()) + 16];
+    let config = zlib_rs::DeflateConfig {
+        window_bits: 31,
+        ..Default::default()
+    };
+    let (data, code) = zlib_rs::compress_slice(&mut output, body, config);
+    assert_eq!(code, zlib_rs::ReturnCode::Ok);
+    data.to_vec()
+}
+
+#[test]
+fn gunzip_accepts_bodies_up_to_the_cap() {
+    let cap = 768 << 10;
+    for size in [cap - 1, cap] {
+        let body = vec![b'a'; size];
+        assert_eq!(super::gunzip(&gzip(&body), cap).unwrap(), body);
+    }
+}
+
+#[test]
+fn gunzip_refuses_bodies_above_the_cap() {
+    // Exercise both the initial allocation clamp and growth past a non-power-of-two cap.
+    // The assertion before each allocation in gunzip checks that the buffer stays bounded.
+    for cap in [2048, 768 << 10] {
+        let body = gzip(&vec![b'a'; cap + 1]);
+        assert_eq!(
+            super::gunzip(&body, cap),
+            Err(http::StatusCode::PAYLOAD_TOO_LARGE)
+        );
+    }
+}
+
+#[test]
+fn gunzip_refuses_malformed_bodies() {
+    let mut body = gzip(b"0000");
+    body.truncate(body.len() - 1);
+    for body in [b"not gzip".as_slice(), body.as_slice()] {
+        assert_eq!(
+            super::gunzip(body, 1024),
+            Err(http::StatusCode::BAD_REQUEST)
+        );
+    }
+}
+
 /// Serves the whole public router on an ephemeral loopback port.
 async fn serve(fixture: &Fixture) -> String {
     let app = super::super::router(fixture.repos.0.clone(), false, Default::default()).unwrap();

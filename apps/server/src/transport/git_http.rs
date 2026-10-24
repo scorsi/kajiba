@@ -118,15 +118,17 @@ async fn info_refs(
 /// Requests hold wants and haves only; git gzips those up to its post buffer (1 MiB).
 const REQUEST_LIMIT: usize = 16 << 20;
 
-fn gunzip(body: &[u8]) -> Option<Vec<u8>> {
-    let mut size = body.len().max(1024) * 4;
+fn gunzip(body: &[u8], cap: usize) -> Result<Vec<u8>, StatusCode> {
+    let mut size = (body.len().max(1024) * 4).min(cap);
     loop {
+        debug_assert!(size <= cap);
         let mut output = vec![0; size];
         let config = zlib_rs::InflateConfig { window_bits: 31 };
         match zlib_rs::decompress_slice(&mut output, body, config) {
-            (data, zlib_rs::ReturnCode::Ok) => return Some(data.to_vec()),
-            (_, zlib_rs::ReturnCode::BufError) if size < REQUEST_LIMIT * 4 => size *= 2,
-            _ => return None,
+            (data, zlib_rs::ReturnCode::Ok) => return Ok(data.to_vec()),
+            (_, zlib_rs::ReturnCode::BufError) if size < cap => size = (size * 2).min(cap),
+            (_, zlib_rs::ReturnCode::BufError) => return Err(StatusCode::PAYLOAD_TOO_LARGE),
+            _ => return Err(StatusCode::BAD_REQUEST),
         }
     }
 }
@@ -158,9 +160,12 @@ async fn upload_pack(
         .map(HeaderValue::as_bytes)
     {
         None => body.to_vec(),
-        Some(b"gzip" | b"x-gzip") => match gunzip(&body) {
-            Some(body) => body,
-            None => return (StatusCode::BAD_REQUEST, "invalid gzip body\n").into_response(),
+        Some(b"gzip" | b"x-gzip") => match gunzip(&body, REQUEST_LIMIT * 4) {
+            Ok(body) => body,
+            Err(StatusCode::BAD_REQUEST) => {
+                return (StatusCode::BAD_REQUEST, "invalid gzip body\n").into_response();
+            }
+            Err(status) => return status.into_response(),
         },
         Some(_) => return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
     };
