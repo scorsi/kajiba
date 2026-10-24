@@ -8,8 +8,11 @@
 }:
 let
   cfg = config.services.kajiba-server;
-  # shortcut: empty configuration until J1 task 25 generates the typed TOML file.
-  configFile = pkgs.writeText "kajiba-server.toml" "";
+  # shortcut: example configuration until J1 task 25 generates the typed TOML file.
+  configFile = pkgs.writeText "kajiba-server.toml" ''
+    [http]
+    public_url = "https://example.org"
+  '';
 in
 {
   options.services.kajiba-server = {

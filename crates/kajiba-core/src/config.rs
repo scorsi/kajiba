@@ -372,6 +372,7 @@ impl ServerConfig {
     /// Parse and structurally validate without opening any referenced file.
     pub fn parse(input: &str) -> Result<Self, String> {
         let mut config: Self = parse(input)?;
+        crate::log::filter(&config.log.level, None)?;
         let host = url_host(&config.http.public_url, "http.public_url")?;
         if let Some(host) = &config.ssh.host {
             validate_host(host, "ssh.host")?;
@@ -480,6 +481,7 @@ impl ServerConfig {
 impl RunnerConfig {
     pub fn parse(input: &str) -> Result<Self, String> {
         let mut config: Self = parse(input)?;
+        crate::log::filter(&config.log.level, None)?;
         config.name = validate_name(&config.name).map_err(|err| format!("name: {err}"))?;
         url_host(&config.url, "url")?;
         validate_metrics(&config.metrics)?;

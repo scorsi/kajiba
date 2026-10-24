@@ -1,5 +1,6 @@
 use axum::{Router, routing::get};
 use clap::{Parser, Subcommand};
+use kajiba_core::{config::ServerConfig, log};
 use std::{path::PathBuf, process::ExitCode};
 
 // Exit codes: 0 success (including help/version), 1 runtime error, 2 usage error
@@ -18,7 +19,7 @@ struct Args {
 enum Command {
     /// Start the HTTP/gRPC server.
     Serve {
-        /// Configuration file (loading is not implemented yet).
+        /// Configuration file.
         #[arg(long)]
         config: PathBuf,
     },
@@ -80,14 +81,36 @@ enum HookCommand {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let command = Args::parse().command;
+    log::install_panic_hook();
+    let command = match Args::try_parse() {
+        Ok(args) => args.command,
+        Err(err) if err.use_stderr() => {
+            log::error("fatal", "invalid command line; use --help");
+            return ExitCode::from(2);
+        }
+        Err(err) => {
+            print!("{err}");
+            return ExitCode::SUCCESS;
+        }
+    };
     let name = match command {
-        Command::Serve { config: _ } => {
-            // shortcut: retain J0's listener until J1 wires server startup and the generated module config.
+        Command::Serve { config } => {
+            let config = match load_config(&config, true) {
+                Ok(config) => config,
+                Err(err) => {
+                    log::error("config-invalid", &err);
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Err(err) = log::init(&config.log.level) {
+                log::error("fatal", &err);
+                return ExitCode::FAILURE;
+            }
+            tracing::info!(event = "start", version = env!("CARGO_PKG_VERSION"));
             return match serve().await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
-                    eprintln!("kajiba-server: {err}");
+                    log::error("fatal", &err.to_string());
                     ExitCode::FAILURE
                 }
             };
@@ -95,10 +118,10 @@ async fn main() -> ExitCode {
         Command::Config {
             command: ConfigCommand::Check { files, path },
         } => {
-            return match check_config(&path, files) {
-                Ok(()) => ExitCode::SUCCESS,
+            return match load_config(&path, files) {
+                Ok(_) => ExitCode::SUCCESS,
                 Err(err) => {
-                    eprintln!("kajiba-server: config check: {err}");
+                    log::error("config-invalid", &err);
                     ExitCode::FAILURE
                 }
             };
@@ -116,18 +139,18 @@ async fn main() -> ExitCode {
             HookCommand::PostReceive => "hook post-receive",
         },
     };
-    eprintln!("kajiba-server: {name}: not implemented yet");
+    log::error("fatal", &format!("{name}: not implemented yet"));
     ExitCode::from(NOT_IMPLEMENTED)
 }
 
-fn check_config(path: &std::path::Path, files: bool) -> Result<(), String> {
+fn load_config(path: &std::path::Path, files: bool) -> Result<ServerConfig, String> {
     let input =
         std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
-    let config = kajiba_core::config::ServerConfig::parse(&input)?;
+    let config = ServerConfig::parse(&input)?;
     if files {
         config.check_files()?;
     }
-    Ok(())
+    Ok(config)
 }
 
 async fn serve() -> std::io::Result<()> {

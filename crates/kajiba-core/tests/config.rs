@@ -437,3 +437,28 @@ fn declared_credentials_and_tokens_require_their_fields() {
         server_error(&format!("{MINIMAL}\n[{table}]"), "token_file");
     }
 }
+
+#[test]
+fn log_levels_validate_target_directives_for_both_components() {
+    for level in ["info", "warn,kajiba_server=debug", "off"] {
+        let section = format!("\n[log]\nlevel={level:?}\n");
+        assert!(
+            ServerConfig::parse(&format!(
+                "[http]\npublic_url='https://example.org'\n{section}"
+            ))
+            .is_ok()
+        );
+        assert!(RunnerConfig::parse(&format!("name='build-1'\nurl='https://example.org'\ntoken_file='/run/secrets/token'\n{section}")).is_ok());
+    }
+    for input in [
+        "[http]\npublic_url='https://example.org'\n[log]\nlevel='kajiba=verbose'",
+        "name='build-1'\nurl='https://example.org'\ntoken_file='/run/secrets/token'\n[log]\nlevel='kajiba=verbose'",
+    ] {
+        let error = if input.starts_with("[http]") {
+            ServerConfig::parse(input).unwrap_err()
+        } else {
+            RunnerConfig::parse(input).unwrap_err()
+        };
+        assert!(error.contains("log.level"), "{error}");
+    }
+}

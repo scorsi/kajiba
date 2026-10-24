@@ -12,6 +12,9 @@ repository = "https://github.com/scorsi/kajiba"
 axum = "0.7"
 clap = { version = "4", features = ["derive"] }
 prost = "0.13"
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 serde = { version = "1", features = ["derive"] }
 ssh-key = { version = "0.6.7", default-features = false, features = ["alloc", "ecdsa"] }
 toml = "0.8"

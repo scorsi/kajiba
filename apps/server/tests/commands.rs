@@ -3,6 +3,7 @@ use std::process::{Command, Output};
 fn run(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_kajiba-server"))
         .args(args)
+        .env_remove("RUST_LOG")
         .output()
         .expect("run kajiba-server")
 }
@@ -59,10 +60,9 @@ fn placeholders_fail_with_distinct_exit_code_and_clear_error() {
         } else {
             args[..2].join(" ")
         };
-        assert_eq!(
-            String::from_utf8(output.stderr).unwrap(),
-            format!("kajiba-server: {name}: not implemented yet\n")
-        );
+        let line: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(line["event"], "fatal");
+        assert_eq!(line["err"], format!("{name}: not implemented yet"));
     }
 }
 
@@ -144,4 +144,82 @@ fn config_check_missing_config_is_a_runtime_error() {
             .unwrap()
             .contains("/kajiba-test-missing/server.toml")
     );
+}
+
+#[test]
+fn invalid_config_is_structured_for_check_and_startup() {
+    let dir = std::env::temp_dir().join(format!("kajiba-log-config-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("server.toml");
+    for (input, field) in [
+        (
+            "[http]\npublic_url='https://example.org'\n[metrics]\nlisten='0.0.0.0:9431'",
+            "metrics.listen",
+        ),
+        (
+            "token='DO-NOT-PRINT'\n[http]\npublic_url='https://example.org'",
+            "token_file",
+        ),
+        (
+            "[http]\npublic_url='https://example.org'\n[log]\nlevel='kajiba=verbose'",
+            "log.level",
+        ),
+        (
+            "[http]\npublic_url='https://example.org'\n[runners.build-1]\ntoken_file='/kajiba-test-missing/token'",
+            "runners.build-1.token_file",
+        ),
+    ] {
+        std::fs::write(&path, input).unwrap();
+        for args in [
+            vec!["config", "check", "--files", path.to_str().unwrap()],
+            vec!["serve", "--config", path.to_str().unwrap()],
+        ] {
+            let output = run(&args);
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            assert!(output.stdout.is_empty());
+            let text = std::str::from_utf8(&output.stderr).unwrap();
+            assert_eq!(text.lines().count(), 1, "{text}");
+            assert!(!text.contains("DO-NOT-PRINT"));
+            let line: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(line["v"], 1);
+            assert_eq!(line["event"], "config-invalid");
+            assert_eq!(line["level"], "error");
+            assert!(line["err"].as_str().unwrap().contains(field), "{text}");
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn serve_emits_start_with_version() {
+    use std::io::BufRead;
+    use std::process::Stdio;
+
+    let path = std::env::temp_dir().join(format!("kajiba-log-start-{}.toml", std::process::id()));
+    std::fs::write(&path, "[http]\npublic_url='https://example.org'").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kajiba-server"))
+        .args(["serve", "--config", path.to_str().unwrap()])
+        .env_remove("RUST_LOG")
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        std::io::BufReader::new(stderr)
+            .read_line(&mut text)
+            .unwrap();
+        let _ = send.send(text);
+    });
+    let line = receive.recv_timeout(std::time::Duration::from_secs(5));
+    let _ = child.kill();
+    child.wait().unwrap();
+    std::fs::remove_file(path).unwrap();
+    reader.join().unwrap();
+    let line: serde_json::Value = serde_json::from_str(&line.unwrap()).unwrap();
+    assert_eq!(line["event"], "start");
+    assert_eq!(line["level"], "info");
+    assert_eq!(line["version"], include_str!("../../../VERSION").trim());
 }
