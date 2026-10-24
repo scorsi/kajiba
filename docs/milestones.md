@@ -204,7 +204,7 @@ Content: mirrors from the configuration (0026), read-only `MirrorService` (statu
 
 **Deliverable**: the forge is operable day to day: dump/restore tested, automatic cleanups, complete and documented NixOS module.
 
-Content: `kajiba-server dump` under the write barrier, `restore`, `dump.keep` (0016); gc / retention / reconciliation / dump timers (0022); module options frozen for J9; operations documentation in the README.
+Content: `kajiba-server dump` under the write barrier, `restore`, `dump.keep` (0016); gc / retention / reconciliation / dump timers (0022); configuration reload on `SIGHUP` without restart (new ADR to write: reload semantics and the settings that still require a restart, such as listen addresses, state directory and metrics listen); module options frozen for J9; operations documentation in the README.
 
 **Acceptance criteria** (`nixos-ops`)
 
@@ -212,6 +212,7 @@ Content: `kajiba-server dump` under the write barrier, `restore`, `dump.keep` (0
 - Dump closes admission while an admitted push and another mutating operation are in flight → both drain, pending push events commit before the snapshot, restored refs and DB agree. New push or mutation during the barrier → refused with the maintenance message, accepted after.
 - Retention timer: logs older than the retention deleted, DB index consistent; `dump.keep` honored.
 - Weekly `git gc` executed without breaking a concurrent push.
+- Configuration-only change (a repository or user added) → `nixos-rebuild switch` reloads the service instead of restarting it (`Type=notify-reload`, `reloadIfChanged`): the new repository is clonable, a clone in progress completes, the process id is unchanged. Invalid configuration on reload → refused with a log line, previous configuration kept, service still ready. A change to a restart-only setting → reload refused with a message naming the setting.
 
 **Delegable**: scripted restore procedure, timer tests.
 
