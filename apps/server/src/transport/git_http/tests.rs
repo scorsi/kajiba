@@ -111,17 +111,11 @@ async fn clone(fixture: &Fixture, url: String, protocol: &str) -> Result<(String
 #[tokio::test]
 async fn clones_through_the_router_by_name_and_redirect_v0_and_v2() {
     let fixture = Fixture::new(&format!("{DEMO}default_branch='trunk'\n")).await;
-    // 40 branches: the fetch request exceeds 1 KiB, so git sends it gzipped.
-    let branches: Vec<String> = (0..40)
-        .map(|i| format!("refs/heads/feature/b{i:02}"))
-        .collect();
-    let mut refs: Vec<&str> = branches.iter().map(String::as_str).collect();
-    refs.extend(["refs/heads/trunk", "refs/tags/v1"]);
     fixture
         .fill(
             "alice/demo",
             &[("README.md", "demo\n"), ("src/lib.rs", "")],
-            &refs,
+            &["refs/heads/trunk", "refs/heads/feature/x", "refs/tags/v1"],
         )
         .await;
     let bare = fixture.dir.join(format!(
@@ -313,4 +307,116 @@ async fn public_read_budget_is_shared_and_refuses_before_reading_requests() {
     .await
     .unwrap()
     .unwrap();
+}
+
+async fn post(
+    fixture: &Fixture,
+    encodings: &[&str],
+    body: axum::body::Body,
+) -> http::Response<axum::body::Body> {
+    let mut request = http::Request::post("/alice/demo.git/git-upload-pack")
+        .header("content-type", "application/x-git-upload-pack-request");
+    for encoding in encodings {
+        request = request.header("content-encoding", *encoding);
+    }
+    super::super::router(fixture.repos.0.clone(), false, Default::default())
+        .unwrap()
+        .call(request.body(body).unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn upload_pack_accepts_plain_gzip_and_x_gzip_through_the_router() {
+    let fixture = Fixture::new(DEMO).await;
+    fixture
+        .fill("alice/demo", &[("README.md", "demo\n")], &[])
+        .await;
+    let bare = fixture.repos.git_dir("alice", "demo").await.unwrap();
+    let head = git(&bare, &["rev-parse", "HEAD"]);
+    let request = format!("0032want {}\n00000009done\n", head.trim());
+    for encoding in [None, Some("gzip"), Some("x-gzip")] {
+        let encodings: Vec<_> = encoding.into_iter().collect();
+        let bytes = if encoding.is_some() {
+            gzip(request.as_bytes())
+        } else {
+            request.as_bytes().to_vec()
+        };
+        let response = post(&fixture, &encodings, axum::body::Body::from(bytes)).await;
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/x-git-upload-pack-result"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(body.starts_with(b"0008NAK\nPACK"), "{encoding:?}: {body:?}");
+    }
+}
+
+#[tokio::test]
+async fn upload_pack_rejects_multiple_or_unsupported_encodings_before_reading() {
+    struct Unread;
+    impl http_body::Body for Unread {
+        type Data = axum::body::Bytes;
+        type Error = std::convert::Infallible;
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            panic!("unsupported encoding must be rejected before polling the body");
+        }
+    }
+    let fixture = Fixture::new(DEMO).await;
+    for encodings in [
+        vec!["br"],
+        vec!["identity"],
+        vec![""],
+        vec!["gzip, x-gzip"],
+        vec!["gzip, gzip"],
+        vec!["gzip", "gzip"],
+        vec!["gzip", "br"],
+        vec!["br", "gzip"],
+        vec!["gzip", "x-gzip"],
+    ] {
+        let response = post(&fixture, &encodings, axum::body::Body::new(Unread)).await;
+        assert_eq!(
+            response.status(),
+            http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "{encodings:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn upload_pack_enforces_gzip_validity_and_wire_and_inflated_limits() {
+    let fixture = Fixture::new(DEMO).await;
+    for encoding in ["gzip", "x-gzip"] {
+        let mut truncated = gzip(b"0000");
+        truncated.pop();
+        for bytes in [b"not gzip".to_vec(), truncated] {
+            let response = post(&fixture, &[encoding], axum::body::Body::from(bytes)).await;
+            assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+            assert_eq!(text(response).await, "invalid gzip body\n");
+        }
+        let response = post(
+            &fixture,
+            &[encoding],
+            axum::body::Body::from(vec![0; super::REQUEST_LIMIT + 1]),
+        )
+        .await;
+        assert_eq!(response.status(), http::StatusCode::PAYLOAD_TOO_LARGE);
+        let compressed = gzip(&vec![b'a'; super::REQUEST_LIMIT * 4 + 1]);
+        assert!(compressed.len() < super::REQUEST_LIMIT);
+        let response = post(&fixture, &[encoding], axum::body::Body::from(compressed)).await;
+        assert_eq!(response.status(), http::StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let response = post(
+        &fixture,
+        &[],
+        axum::body::Body::from(vec![0; super::REQUEST_LIMIT + 1]),
+    )
+    .await;
+    assert_eq!(response.status(), http::StatusCode::PAYLOAD_TOO_LARGE);
 }

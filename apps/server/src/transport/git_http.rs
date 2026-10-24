@@ -168,6 +168,11 @@ async fn upload_pack(
     {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
+    let mut encodings = parts.headers.get_all(header::CONTENT_ENCODING).iter();
+    let encoding = encodings.next().map(HeaderValue::as_bytes);
+    if encodings.next().is_some() || !matches!(encoding, None | Some(b"gzip" | b"x-gzip")) {
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+    }
     let permit = match repos.read_permit() {
         Ok(permit) => permit,
         Err(response) => return response,
@@ -175,11 +180,7 @@ async fn upload_pack(
     let Ok(body): Result<Bytes, _> = axum::body::to_bytes(body, REQUEST_LIMIT).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
-    let body = match parts
-        .headers
-        .get(header::CONTENT_ENCODING)
-        .map(HeaderValue::as_bytes)
-    {
+    let body = match encoding {
         None => body.to_vec(),
         Some(b"gzip" | b"x-gzip") => match gunzip(&body, REQUEST_LIMIT * 4) {
             Ok(body) => body,
