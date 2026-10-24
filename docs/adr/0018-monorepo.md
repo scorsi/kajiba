@@ -1,10 +1,10 @@
 # ADR 0018 — Code organization: monorepo
 
-Status: Accepted — 2026-10-09
+Status: Accepted — 2026-10-09 (revised 2026-10-24: the CLI is a Rust crate, 0007)
 
 ## Context
 
-Four components (server, runner, CLI, frontend) in two languages plus a shared gRPC schema. Question: one repository per component or a single one.
+Four components (server, runner, CLI, frontend) in two languages (Rust, TypeScript) plus a shared gRPC schema. Question: one repository per component or a single one.
 
 ## Decision
 
@@ -14,13 +14,13 @@ Four components (server, runner, CLI, frontend) in two languages plus a shared g
   - `apps/` — the four deliverables, one subfolder each:
     - `server/` — `kajiba-server` binary.
     - `runner/` — `kajiba-runner` binary.
-    - `cli/` — Go module `kajiba-cli`.
+    - `cli/` — `kajiba-cli` crate, binary `kajiba`.
     - `ui/` — SvelteKit project (pnpm), `kajiba-ui` component.
   - `nix/` — packages, NixOS/nix-darwin modules, nixosTest tests.
-  - `docs/adr/`.
-  - `flake.nix`, `go.work`, `pnpm-workspace.yaml` at the root (the latter two have a single member each; they mostly exist so that tooling that detects a project by its manifest file, e.g. a shell prompt, sees Go/Node from the root), a single devShell.
+  - `docs/adr/`, `docs/milestones.md`, `docs/schema.md`.
+  - `flake.nix`, `Cargo.toml` (workspace), `pnpm-workspace.yaml` at the root (one member; mostly so that tooling that detects a project by its manifest file sees Node from the root), a single devShell.
 - A cross-cutting change (proto + server + runner + CLI) fits in one commit and a single `nix flake check`.
-- Single versioning: the server, the runner and the CLI carry the same version; protocol compatibility is guaranteed by construction as long as they are deployed from the same commit (sekkeizu points to a single input).
+- Single versioning: the server, the runner and the CLI carry the same version; protocol compatibility is guaranteed by construction when they are built from the same revision, and by 0023's rule otherwise.
 
 ## Consequences
 
