@@ -79,7 +79,14 @@
           kajiba-ui
           ;
 
-        cargo-test = craneLib.cargoTest (commonCargoArgs // { inherit cargoArtifacts; });
+        cargo-test = craneLib.cargoTest (
+          commonCargoArgs
+          // {
+            inherit cargoArtifacts;
+            # kajiba-git tests build their fixture repositories with the git binary.
+            nativeBuildInputs = commonCargoArgs.nativeBuildInputs ++ [ pkgs.git ];
+          }
+        );
         cargo-clippy = craneLib.cargoClippy (
           commonCargoArgs
           // {
