@@ -15,7 +15,7 @@ use tonic_reflection::pb::v1::{
 
 pub(super) struct State {
     pub(super) health: Health,
-    _lock: fs::File,
+    _lock: crate::state::StateLock,
 }
 
 impl State {

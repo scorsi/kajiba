@@ -6,9 +6,21 @@ use std::{
     path::Path,
 };
 
-// Keep the returned file open for the server lifetime; never unlink the lock file.
-pub fn prepare(state_dir: &Path) -> Result<File, String> {
+// Keep the returned lock for the server lifetime; never unlink the lock file.
+pub fn prepare(state_dir: &Path) -> Result<StateLock, String> {
     prepare_with_sync(state_dir, &mut sync_dir)
+}
+
+/// The flock belongs to the open file description, which a concurrently spawned
+/// child shares until its exec closes the descriptor: unlock explicitly on drop
+/// instead of relying on the last close.
+#[derive(Debug)]
+pub struct StateLock(File);
+
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 fn sync_dir(path: &Path) -> io::Result<()> {
@@ -34,7 +46,7 @@ fn create_dir_all(path: &Path, sync: &mut impl FnMut(&Path) -> io::Result<()>) -
 fn prepare_with_sync(
     state_dir: &Path,
     sync: &mut impl FnMut(&Path) -> io::Result<()>,
-) -> Result<File, String> {
+) -> Result<StateLock, String> {
     create_dir_all(state_dir, sync).map_err(|err| format!("{}: {err}", state_dir.display()))?;
     let path = state_dir.join("kajiba.lock");
     let lock = OpenOptions::new()
@@ -47,6 +59,7 @@ fn prepare_with_sync(
         TryLockError::WouldBlock => format!("another instance holds {}", path.display()),
         TryLockError::Error(err) => format!("{}: {err}", path.display()),
     })?;
+    let lock = StateLock(lock);
     for name in ["repos", "db", "ci/logs", "ci/artifacts", "tmp"] {
         let path = state_dir.join(name);
         create_dir_all(&path, sync).map_err(|err| format!("{}: {err}", path.display()))?;
@@ -239,8 +252,11 @@ mod tests {
                 temp.0.join("kajiba.lock").display()
             )
         );
+        // A child spawned by another thread holds a copy until its exec.
+        let inherited = first.0.try_clone().unwrap();
         drop(first);
         let _second = prepare(&temp.0).unwrap();
+        drop(inherited);
     }
 
     #[test]
