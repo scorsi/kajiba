@@ -13,13 +13,13 @@ use tonic_reflection::pb::v1::{
     server_reflection_response::MessageResponse,
 };
 
-struct State {
-    health: Health,
+pub(super) struct State {
+    pub(super) health: Health,
     _lock: fs::File,
 }
 
 impl State {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
             "kajiba-transport-{}-{}",
@@ -33,7 +33,7 @@ impl State {
         }
     }
 
-    async fn start(&self) {
+    pub(super) async fn start(&self) {
         let (mut writer, readers) =
             crate::db::open(&self.health.state_dir.join("db/kajiba.sqlite"))
                 .await
@@ -49,6 +49,7 @@ impl State {
             .unwrap();
         let _bus = crate::db::events::EventBus::default();
         self.health.started(readers);
+        self.health.local_serving.store(true, Ordering::Release);
     }
 }
 
@@ -58,7 +59,7 @@ impl Drop for State {
     }
 }
 
-async fn get(app: &mut Router, path: &str) -> StatusCode {
+pub(super) async fn get(app: &mut Router, path: &str) -> StatusCode {
     app.call(http::Request::get(path).body(Body::empty()).unwrap())
         .await
         .unwrap()
@@ -179,6 +180,11 @@ async fn reflection_lists_health_and_returns_its_descriptor_when_enabled() {
                 .any(|s| s.name == "kajiba.v1.HealthService")
         );
 
+        assert!(
+            list.service
+                .iter()
+                .all(|service| !service.name.starts_with("kajiba.admin."))
+        );
         let response = grpc(
             &mut app,
             &path,
@@ -433,7 +439,14 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
                 correlation::request,
             ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        serve_listeners(listener, app, metrics).await.unwrap();
+        let local = local::Local::bind(
+            &state.health.state_dir.join("local.sock"),
+            state.health.local_serving.clone(),
+        )
+        .unwrap();
+        serve_listeners(listener, app, metrics, local, Arc::default())
+            .await
+            .unwrap();
         return;
     }
     tokio::task::spawn_blocking(|| {

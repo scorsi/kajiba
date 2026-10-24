@@ -12,7 +12,10 @@ use kajiba_proto::v1::{
 use sqlx::SqlitePool;
 use std::{
     path::PathBuf,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tonic::{Request, Response, Status, service::Routes};
 
@@ -20,6 +23,7 @@ use tonic::{Request, Response, Status, service::Routes};
 pub struct Health {
     database: Arc<OnceLock<SqlitePool>>,
     state_dir: PathBuf,
+    local_serving: Arc<AtomicBool>,
 }
 
 impl Health {
@@ -27,6 +31,7 @@ impl Health {
         Self {
             database: Arc::default(),
             state_dir,
+            local_serving: Arc::default(),
         }
     }
 
@@ -42,9 +47,10 @@ impl Health {
         let Some(database) = self.database.get() else {
             return false;
         };
-        ["repos", "db", "ci/logs", "ci/artifacts", "tmp"]
-            .iter()
-            .all(|name| self.state_dir.join(name).is_dir())
+        self.local_serving.load(Ordering::Acquire)
+            && ["repos", "db", "ci/logs", "ci/artifacts", "tmp"]
+                .iter()
+                .all(|name| self.state_dir.join(name).is_dir())
             && sqlx::query_scalar::<_, i64>("SELECT 1")
                 .fetch_one(database)
                 .await
@@ -112,18 +118,24 @@ pub async fn serve(
     bus: Arc<EventBus>,
 ) -> std::io::Result<()> {
     let registry = Arc::new(Registry::default());
+    let local = local::Local::bind(
+        std::path::Path::new(local::SOCKET_PATH),
+        health.local_serving.clone(),
+    )?;
     let app = router(health, config.reflection, registry.clone()).map_err(std::io::Error::other)?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let metrics = metrics::bind(metrics_config.listen)
         .await?
-        .map(|listener| (listener, metrics::router(registry, readers, bus)));
-    serve_listeners(listener, app, metrics).await
+        .map(|listener| (listener, metrics::router(registry.clone(), readers, bus)));
+    serve_listeners(listener, app, metrics, local, registry).await
 }
 
 async fn serve_listeners(
     listener: tokio::net::TcpListener,
     app: Router,
     metrics: Option<(tokio::net::TcpListener, Router)>,
+    local: local::Local,
+    registry: Arc<Registry>,
 ) -> std::io::Result<()> {
     use std::future::IntoFuture;
     let shutdown = shutdown_signal()?;
@@ -134,9 +146,13 @@ async fn serve_listeners(
     }
     tracing::info!(event = "ready");
     let mut http_stopped = stopped.clone();
-    let mut metrics_stopped = stopped;
+    let mut metrics_stopped = stopped.clone();
+    let mut local_stopped = stopped;
     let servers = async move {
         tokio::try_join!(
+            local.serve(registry, async move {
+                let _ = local_stopped.changed().await;
+            }),
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
                     let _ = http_stopped.changed().await;
@@ -179,6 +195,7 @@ fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
 }
 
 mod correlation;
+pub mod local;
 
 #[cfg(test)]
 mod tests;

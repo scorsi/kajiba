@@ -996,6 +996,7 @@ dependencies = [
  "axum",
  "clap",
  "http-body",
+ "hyper-util",
  "kajiba-core",
  "kajiba-proto",
  "prost",

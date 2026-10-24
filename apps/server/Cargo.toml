@@ -12,6 +12,7 @@ path = "src/main.rs"
 axum = { workspace = true, features = ["http2"] }
 clap.workspace = true
 http-body.workspace = true
+hyper-util.workspace = true
 prost.workspace = true
 kajiba-core = { path = "../../crates/kajiba-core" }
 kajiba-proto = { path = "../../crates/kajiba-proto" }

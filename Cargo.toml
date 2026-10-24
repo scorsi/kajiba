@@ -12,6 +12,7 @@ repository = "https://github.com/scorsi/kajiba"
 axum = "0.7"
 clap = { version = "4", features = ["derive"] }
 http-body = "1"
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 prost = "0.13"
 serde_json = "1"
 tracing = "0.1"

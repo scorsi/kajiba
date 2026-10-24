@@ -46,6 +46,7 @@ pub(super) async fn request(
     let method = match request.uri().path() {
         "/healthz" => "healthz",
         "/readyz" => "readyz",
+        "/kajiba.admin.v1.AdminService/Enroll" => "/kajiba.admin.v1.AdminService/Enroll",
         "/kajiba.v1.HealthService/Check" => "/kajiba.v1.HealthService/Check",
         "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo" => {
             "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"

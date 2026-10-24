@@ -168,7 +168,10 @@ async fn main() -> ExitCode {
             };
         }
         Command::Admin { command } => match command {
-            AdminCommand::Enroll { .. } => "admin enroll",
+            AdminCommand::Enroll { user } => {
+                return admin_enroll(std::path::Path::new(transport::local::SOCKET_PATH), user)
+                    .await;
+            }
             AdminCommand::Import { .. } => "admin import",
             AdminCommand::Repo { command } => match command {
                 RepoCommand::Create { .. } => "admin repo create",
@@ -182,6 +185,22 @@ async fn main() -> ExitCode {
     };
     log::error("fatal", &format!("{name}: not implemented yet"));
     ExitCode::from(NOT_IMPLEMENTED)
+}
+
+async fn admin_enroll(path: &std::path::Path, user: String) -> ExitCode {
+    match transport::local::enroll(path, user).await {
+        Ok(url) => {
+            println!("{url}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            let unimplemented = err
+                .downcast_ref::<tonic::Status>()
+                .is_some_and(|status| status.code() == tonic::Code::Unimplemented);
+            log::error("fatal", &format!("admin enroll: {err}"));
+            ExitCode::from(if unimplemented { NOT_IMPLEMENTED } else { 1 })
+        }
+    }
 }
 
 fn load_config(path: &std::path::Path, files: bool) -> Result<ServerConfig, String> {

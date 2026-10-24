@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package kajiba.admin.v1;
+
+// Host-local administration, authorized by Unix peer credentials (0014).
+service AdminService {
+  // Issue a passkey enrollment link; lifecycle is implemented in J1 task 24.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+}
+
+message EnrollRequest {
+  string user = 1;
+}
+
+message EnrollResponse {
+  string url = 1;
+}

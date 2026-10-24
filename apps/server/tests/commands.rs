@@ -45,7 +45,6 @@ fn usage_errors_exit_two() {
 #[test]
 fn placeholders_fail_with_distinct_exit_code_and_clear_error() {
     for args in [
-        vec!["admin", "enroll", "alice"],
         vec!["admin", "import", "alice/demo", "demo.bundle"],
         vec!["admin", "repo", "create", "alice/demo"],
         vec!["admin", "repo", "list"],
