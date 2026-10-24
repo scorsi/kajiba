@@ -295,3 +295,55 @@ fn transport_spawns_git_upload_pack() {
         [std::ffi::OsStr::new("receive-pack"), f.bare.as_os_str()]
     );
 }
+
+#[test]
+fn resolve_prefers_the_longest_branch_then_tag_then_commit_id() {
+    let f = fixture("resolve");
+    // A tag with a branch's name loses to the branch.
+    git(&f.bare, &["tag", "feature/x", &f.first], "0 +0000");
+    let resolve = |spec: &'static str| Gix.resolve(&f.bare, spec);
+    for (spec, commit, path) in [
+        ("feature/x/README.md", &f.third, "README.md"),
+        ("feature/x", &f.third, ""),
+        ("main/docs/a.md", &f.second, "docs/a.md"),
+        ("main", &f.second, ""),
+        ("main/", &f.second, ""),
+        ("v1/README.md", &f.first, "README.md"),
+        ("light/src/lib.rs", &f.second, "src/lib.rs"),
+    ] {
+        assert_eq!(resolve(spec), Ok((commit.clone(), path)), "{spec}");
+    }
+    let by_id = format!("{}/src/lib.rs", f.first);
+    assert_eq!(
+        Gix.resolve(&f.bare, &by_id),
+        Ok((f.first.clone(), "src/lib.rs"))
+    );
+    assert_eq!(Gix.resolve(&f.bare, &f.third), Ok((f.third.clone(), "")));
+}
+
+#[test]
+fn resolve_refuses_unknown_refs() {
+    let f = fixture("resolve-unknown");
+    let tree_id = git(
+        &f.bare,
+        &["rev-parse", &format!("{}^{{tree}}", f.first)],
+        "0 +0000",
+    );
+    let short = format!("{}/README.md", &f.first[..7]);
+    let zero = format!("{}/README.md", "0".repeat(40));
+    for spec in [
+        "",
+        "/main",
+        "nope/README.md",
+        "feature/README.md",
+        "x/main/README.md",
+        "heads/main",
+        "refs/heads/main",
+        "HEAD",
+        &short,
+        &zero,
+        &tree_id,
+    ] {
+        assert_eq!(Gix.resolve(&f.bare, spec), Err(Error::NotFound), "{spec:?}");
+    }
+}

@@ -103,6 +103,10 @@ pub trait GitStore {
     fn log(&self, repo: &Path, commit: &str, limit: usize) -> Result<Vec<Commit>>;
     /// Changes from `from` (the empty tree when `None`) to `to`.
     fn diff(&self, repo: &Path, from: Option<&str>, to: &str) -> Result<Vec<Change>>;
+    /// Splits `<ref>/<path>` (0021) into a commit id and the remaining path (`""`
+    /// when none): the longest leading run of segments naming a branch, then a tag,
+    /// otherwise a full commit id as the first segment.
+    fn resolve<'a>(&self, repo: &Path, spec: &'a str) -> Result<(String, &'a str)>;
     /// `git <service> <options> <repo>`, to be spawned by the transport (SSH, HTTP
     /// with `--stateless-rpc`).
     fn transport(&self, service: Service, repo: &Path, options: &[&str]) -> Command;
@@ -276,6 +280,34 @@ impl GitStore for Gix {
             }
         }
         Ok(changes)
+    }
+
+    fn resolve<'a>(&self, repo_path: &Path, spec: &'a str) -> Result<(String, &'a str)> {
+        // Exact names from the listing: gix's lookup would also try `refs/tags/<name>`, ….
+        let refs = self.refs(repo_path)?;
+        let repo = open(repo_path)?;
+        let ends: Vec<usize> = spec
+            .match_indices('/')
+            .map(|(end, _)| end)
+            .chain([spec.len()])
+            .collect();
+        let rest = |end: usize| spec.get(end + 1..).unwrap_or("");
+        for namespace in ["refs/heads/", "refs/tags/"] {
+            for &end in ends.iter().rev() {
+                let name = format!("{namespace}{}", &spec[..end]);
+                if let Some(found) = refs.iter().find(|r| r.name == name) {
+                    let id = gix::ObjectId::from_hex(found.target.as_bytes())
+                        .map_err(|err| Error::Git(err.to_string()))?;
+                    let commit = repo
+                        .find_object(id)?
+                        .peel_to_kind(gix::object::Kind::Commit)
+                        .map_err(|_| Error::NotFound)?;
+                    return Ok((commit.id.to_string(), rest(end)));
+                }
+            }
+        }
+        let id = commit(&repo, &spec[..ends[0]])?.id.to_string();
+        Ok((id, rest(ends[0])))
     }
 
     fn transport(&self, service: Service, repo: &Path, options: &[&str]) -> Command {
