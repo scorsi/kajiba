@@ -8,6 +8,8 @@
 }:
 let
   cfg = config.services.kajiba-server;
+  # shortcut: empty configuration until J1 task 25 generates the typed TOML file.
+  configFile = pkgs.writeText "kajiba-server.toml" "";
 in
 {
   options.services.kajiba-server = {
@@ -20,7 +22,7 @@ in
       description = "kajiba forge server";
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
-        ExecStart = "${lib.getExe cfg.package}";
+        ExecStart = "${lib.getExe cfg.package} serve --config ${configFile}";
         DynamicUser = true;
         Restart = "on-failure";
       };
