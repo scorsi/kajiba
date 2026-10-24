@@ -122,10 +122,8 @@ let
   '';
 
   # systemd creates and owns directories under /var/lib; any other path is a tmpfiles rule.
-  writable = [
-    cfg.stateDir
-    cfg.dump.dir
-  ];
+  # Dump directory access is added with the backup implementation in J8.
+  writable = [ cfg.stateDir ];
   inVarLib = lib.hasPrefix "/var/lib/";
 in
 {

@@ -215,11 +215,7 @@ in
       && unit.User == "kajiba"
       && unit.Group == "kajiba"
       && unit.StateDirectory == [ ]
-      &&
-        unit.ReadWritePaths == [
-          "/srv/kajiba"
-          "/srv/kajiba-dumps"
-        ]
+      && unit.ReadWritePaths == [ "/srv/kajiba" ]
       && unit.RuntimeDirectory == "kajiba"
       && unit.UMask == "0027"
       && unit.ProtectSystem == "strict"
@@ -253,7 +249,7 @@ in
       && users.users.kajiba.group == "kajiba"
       && users.groups ? kajiba
       && systemd.tmpfiles.settings."10-kajiba-server" ? "/srv/kajiba"
-      && systemd.tmpfiles.settings."10-kajiba-server"."/srv/kajiba-dumps".d.user == "kajiba"
+      && !(systemd.tmpfiles.settings."10-kajiba-server" ? "/srv/kajiba-dumps")
       &&
         services.kajiba-server.persistedPaths == [
           "/srv/kajiba"
@@ -264,10 +260,8 @@ in
         inherit ((evaluateWith false [ ]).config) systemd environment;
         unit = systemd.services.kajiba-server.serviceConfig;
       in
-      unit.StateDirectory == [
-        "kajiba"
-        "kajiba-dumps"
-      ]
+      unit.StateDirectory == [ "kajiba" ]
+      && unit.ReadWritePaths == [ "/var/lib/kajiba" ]
       && systemd.tmpfiles.settings."10-kajiba-server" == { }
       && unit.SocketBindAllow == [ "tcp:8080" ]
       && lib.hasSuffix " http://127.0.0.1:8080/readyz" unit.ExecStartPost
@@ -293,7 +287,7 @@ in
       ];
     assert
       (evaluate false { services.kajiba-server.dump.dir = lib.mkForce "/var/lib/kajiba-dumps"; })
-      .config.systemd.services.kajiba-server.serviceConfig.StateDirectory == [ "kajiba-dumps" ];
+      .config.systemd.services.kajiba-server.serviceConfig.StateDirectory == [ ];
     assert
       (evaluate false { }).config.systemd.services.kajiba-server.serviceConfig.ExecStart
       == "${lib.getExe inputs.self.packages.${linux}.kajiba-server} serve --config ${
