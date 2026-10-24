@@ -16,7 +16,7 @@ pub enum Error {
     NotEmpty(String),
     /// The source lacks the declared default branch.
     NoDefaultBranch(String),
-    /// The source cannot be read or fetched.
+    /// The source cannot be read or fetched; the reason is redacted by `reason`.
     Source(String),
     Internal(String),
 }
@@ -51,7 +51,7 @@ pub async fn import(
     let refs = tokio::task::spawn_blocking(move || Gix.remote_refs(&owned))
         .await
         .map_err(|err| Error::Internal(err.to_string()))?
-        .map_err(|err| Error::Source(err.to_string()))?;
+        .map_err(|err| Error::Source(reason(&err.to_string(), source)))?;
     let head = format!("refs/heads/{default_branch}");
     if !refs.iter().any(|r| r.name == head) {
         return Err(Error::NoDefaultBranch(head));
@@ -90,7 +90,38 @@ pub async fn import(
         .map_err(Error::Internal)?;
     fetched
         .map_err(|err| Error::Internal(err.to_string()))?
-        .map_err(|err| Error::Source(err.to_string()))?;
+        .map_err(|err| Error::Source(reason(&err.to_string(), source)))?;
     tracing::info!(event = "repo-imported", repo, refs = refs.len());
     Ok(refs.len())
+}
+
+/// Git's stderr may echo a source URL with its credentials: drop the userinfo of
+/// every URL and of the source as given, on one line of at most 200 characters.
+pub fn reason(stderr: &str, source: &str) -> String {
+    let mut text = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some((userinfo, _)) = source
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('@'))
+        .filter(|(userinfo, _)| !userinfo.is_empty())
+    {
+        text = text.replace(userinfo, "");
+    }
+    let mut out = String::new();
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find("://") {
+        let (head, tail) = rest.split_at(start + 3);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '\'' | '"'))
+            .unwrap_or(tail.len());
+        let authority = &tail[..end];
+        out.push_str(
+            authority
+                .rsplit_once('@')
+                .map_or(authority, |(_, host)| host),
+        );
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out.chars().take(200).collect()
 }

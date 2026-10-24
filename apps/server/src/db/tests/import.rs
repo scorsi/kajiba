@@ -245,3 +245,27 @@ async fn a_crash_during_import_is_reconciled_at_restart() {
         Err(Error::NotEmpty(_))
     ));
 }
+
+#[test]
+fn source_reasons_drop_url_credentials_and_stay_bounded() {
+    let source = "https://user:secret@example.org/demo.git";
+    assert_eq!(
+        crate::import::reason(
+            "fatal: unable to access 'https://user:secret@example.org/demo.git/':\n  \
+             see ssh://other:pass@host:22/x and https://a%40b:c@d",
+            source
+        ),
+        "fatal: unable to access 'https://example.org/demo.git/': see ssh://host:22/x and https://d"
+    );
+    // The source's own userinfo goes even outside a URL.
+    assert_eq!(
+        crate::import::reason("fatal: 'x/user:secret@y' is not a repository", source),
+        "fatal: 'x/@y' is not a repository"
+    );
+    assert_eq!(
+        crate::import::reason(&"é".repeat(500), source)
+            .chars()
+            .count(),
+        200
+    );
+}

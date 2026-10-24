@@ -202,7 +202,7 @@ impl AdminService for Admin {
             Error::Source(message) => refused(
                 tonic::Code::FailedPrecondition,
                 "INVALID_STATE",
-                format!("source: {message}"),
+                format!("the source cannot be read: {message}"),
             ),
             Error::Internal(message) => Status::internal(format!("import: {message}")),
         })?;

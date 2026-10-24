@@ -350,3 +350,70 @@ async fn list_repos_maps_ids_to_names_by_pages_and_marks_archived() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn import_never_returns_or_logs_source_credentials() {
+    const CHILD: &str = "KAJIBA_IMPORT_CLI_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "transport::local::tests::import_never_returns_or_logs_source_credentials",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(output.status.success(), "{stderr}");
+        assert!(
+            !stderr.contains("secret") && !stdout.contains("secret"),
+            "{stderr}"
+        );
+        let fatal: Vec<serde_json::Value> = stderr
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|line| line["event"] == "fatal")
+            .collect();
+        assert_eq!(fatal.len(), 2, "{stderr}");
+        for line in fatal {
+            assert!(
+                line.to_string().contains("the source cannot be read"),
+                "{line}"
+            );
+        }
+        return;
+    }
+    kajiba_core::log::init("debug").unwrap();
+    let dir = SocketDir::new();
+    let _lock = crate::state::prepare(&dir.0).unwrap();
+    let local = Local::bind(&dir.socket(), Arc::default()).unwrap();
+    let admin = admin(&dir.0, "[users.alice]").await;
+    let config = kajiba_core::config::ServerConfig::parse(&format!(
+        "[http]\npublic_url='{PUBLIC_URL}'\n[users.alice]\n[repos.demo]\nowner='alice'\ndescription=''\n"
+    ))
+    .unwrap();
+    crate::db::repos::reconcile_repos(
+        &mut *admin.writer.lock().await,
+        &dir.0,
+        &kajiba_git::Gix,
+        &config.repos,
+    )
+    .await
+    .unwrap()
+    .committed();
+    let server = tokio::spawn(local.serve(admin, Arc::default(), std::future::pending()));
+    for source in [
+        "https://user:secret@127.0.0.1:9/demo.git",
+        // git echoes this one raw: "unable to look up user:secret@127.0.0.1:9".
+        "git://user:secret@127.0.0.1:9/demo.git",
+    ] {
+        assert_eq!(
+            crate::admin_import(&dir.socket(), "alice/demo".into(), source.into()).await,
+            std::process::ExitCode::FAILURE
+        );
+    }
+    server.abort();
+}
