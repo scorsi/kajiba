@@ -830,6 +830,16 @@ fn each_repository_refusal_names_its_field() {
             "duplicate name after lowercase normalization",
         ),
         ("[repos.tools]", "[repos.raw]", "repos: name #"),
+        (
+            "default_branch = \"trunk\"",
+            "default_branch = \"a..b\"",
+            "repos.demo.default_branch: ref name must not contain '..'",
+        ),
+        (
+            "default_branch = \"trunk\"",
+            "default_branch = \"\"",
+            "repos.demo.default_branch: ref name must not start or end with",
+        ),
         ("description = \"\"\n", "", "description"),
         ("owner = \"bob\"\n", "", "owner"),
     ] {

@@ -57,9 +57,110 @@ pub fn validate_name(name: &str) -> Result<String, NameError> {
     Ok(name)
 }
 
+/// Why a ref name breaks a `git check-ref-format` rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefError {
+    OneLevel,
+    Component,
+    Character,
+    Slash,
+    Sequence,
+    TrailingDot,
+    At,
+}
+
+impl fmt::Display for RefError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::OneLevel => "ref name must contain a '/'",
+            Self::Component => "ref name component must not be empty, start with '.' or end with '.lock'",
+            Self::Character => {
+                "ref name must not contain control characters, space, '~', '^', ':', '?', '*', '[' or '\\'"
+            }
+            Self::Slash => "ref name must not start or end with '/'",
+            Self::Sequence => "ref name must not contain '..' or '@{'",
+            Self::TrailingDot => "ref name must not end with '.'",
+            Self::At => "ref name must not be '@'",
+        })
+    }
+}
+
+impl std::error::Error for RefError {}
+
+/// Validates a full ref name (`refs/heads/main`) under `git check-ref-format`
+/// without options (0021). Branch names are checked as `refs/heads/<branch>`.
+pub fn validate_ref(name: &str) -> Result<(), RefError> {
+    if name == "@" {
+        return Err(RefError::At);
+    }
+    if name.bytes().any(|c| {
+        c < 0x20
+            || matches!(
+                c,
+                0x7f | b' ' | b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\'
+            )
+    }) {
+        return Err(RefError::Character);
+    }
+    if name.starts_with('/') || name.ends_with('/') {
+        return Err(RefError::Slash);
+    }
+    if name.contains("..") || name.contains("@{") {
+        return Err(RefError::Sequence);
+    }
+    if name.ends_with('.') {
+        return Err(RefError::TrailingDot);
+    }
+    if name
+        .split('/')
+        .any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock"))
+    {
+        return Err(RefError::Component);
+    }
+    if !name.contains('/') {
+        return Err(RefError::OneLevel);
+    }
+    Ok(())
+}
+
+/// Why a path inside a repository tree is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathError {
+    EmptySegment,
+    ParentSegment,
+    Nul,
+}
+
+impl fmt::Display for PathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::EmptySegment => "path must not contain an empty segment",
+            Self::ParentSegment => "path must not contain a '..' segment",
+            Self::Nul => "path must not contain NUL",
+        })
+    }
+}
+
+impl std::error::Error for PathError {}
+
+/// Validates a `/`-separated path inside a repository tree (0021).
+pub fn validate_path(path: &str) -> Result<(), PathError> {
+    if path.contains('\0') {
+        return Err(PathError::Nul);
+    }
+    for segment in path.split('/') {
+        match segment {
+            "" => return Err(PathError::EmptySegment),
+            ".." => return Err(PathError::ParentSegment),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{NameError, validate_name};
+    use super::{NameError, PathError, RefError, validate_name, validate_path, validate_ref};
 
     #[test]
     fn valid_names() {
@@ -148,6 +249,89 @@ mod tests {
                 Err(NameError::Reserved),
                 "{name:?} uppercase"
             );
+        }
+    }
+
+    #[test]
+    fn valid_refs() {
+        for name in [
+            "refs/heads/main",
+            "refs/heads/feature/x",
+            "refs/tags/v1.0",
+            "refs/heads/a.b",
+            "refs/heads/a.lockx",
+            "refs/heads/-x",
+            "refs/heads/@",
+            "refs/heads/a@b",
+            "refs/heads/é",
+            "a/b",
+        ] {
+            assert_eq!(validate_ref(name), Ok(()), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_refs() {
+        for (name, err) in [
+            ("", RefError::Component),
+            ("main", RefError::OneLevel),
+            ("HEAD", RefError::OneLevel),
+            ("@", RefError::At),
+            ("refs/heads/.x", RefError::Component),
+            ("refs/heads/x.lock", RefError::Component),
+            ("refs/heads/.lock", RefError::Component),
+            ("refs/heads/a//b", RefError::Component),
+            ("refs/heads/a..b", RefError::Sequence),
+            ("refs/heads/a@{1}", RefError::Sequence),
+            ("refs/heads/a.", RefError::TrailingDot),
+            ("/refs/heads/a", RefError::Slash),
+            ("refs/heads/a/", RefError::Slash),
+            ("refs/heads/a b", RefError::Character),
+            ("refs/heads/a\0b", RefError::Character),
+            ("refs/heads/a\nb", RefError::Character),
+            ("refs/heads/a\x1fb", RefError::Character),
+            ("refs/heads/a\x7fb", RefError::Character),
+            ("refs/heads/a~1", RefError::Character),
+            ("refs/heads/a^", RefError::Character),
+            ("refs/heads/a:b", RefError::Character),
+            ("refs/heads/a?", RefError::Character),
+            ("refs/heads/a*", RefError::Character),
+            ("refs/heads/a[b", RefError::Character),
+            ("refs/heads/a\\b", RefError::Character),
+        ] {
+            assert_eq!(validate_ref(name), Err(err), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn valid_paths() {
+        for path in [
+            "README.md",
+            "a/b/c",
+            ".hidden",
+            "a/./b",
+            "a..b",
+            "...",
+            "é/😀",
+        ] {
+            assert_eq!(validate_path(path), Ok(()), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_paths() {
+        for (path, err) in [
+            ("", PathError::EmptySegment),
+            ("/", PathError::EmptySegment),
+            ("/a", PathError::EmptySegment),
+            ("a/", PathError::EmptySegment),
+            ("a//b", PathError::EmptySegment),
+            ("..", PathError::ParentSegment),
+            ("a/../b", PathError::ParentSegment),
+            ("a/..", PathError::ParentSegment),
+            ("a\0b", PathError::Nul),
+        ] {
+            assert_eq!(validate_path(path), Err(err), "{path:?}");
         }
     }
 }

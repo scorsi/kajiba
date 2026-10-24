@@ -513,6 +513,8 @@ fn validate_repos(config: &mut ServerConfig) -> Result<(), String> {
                 "{field}.name: same current owner and name as repos.{first}"
             ));
         }
+        crate::names::validate_ref(&format!("refs/heads/{}", repo.default_branch))
+            .map_err(|err| format!("{field}.default_branch: {err}"))?;
         normalize(&mut repo.permissions, &format!("{field}.permissions"))?;
         if let Some(user) = repo
             .permissions
