@@ -56,7 +56,7 @@ enum ConfigCommand {
 
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 enum AdminCommand {
-    /// Issue a passkey enrollment link (not implemented yet).
+    /// Revoke a user's passkeys, sessions and runtime PATs, then print an enrollment link.
     Enroll { user: String },
     /// Import a repository from a path, bundle or URL (not implemented yet).
     Import { repo: String, source: String },
@@ -140,9 +140,14 @@ async fn main() -> ExitCode {
             let bus = std::sync::Arc::new(db::events::EventBus::default());
             // CI and mirror register here when their handlers are implemented.
             let mut dispatcher = db::events::Dispatcher::default();
+            let admin = transport::local::Admin {
+                writer: writer.clone(),
+                public_url: config.http.public_url.clone(),
+                enrollment_ttl: config.auth.enrollment_ttl,
+            };
             health.started(readers.clone());
             return match tokio::select! {
-                result = transport::serve(&config.http, &config.metrics, health, readers, bus.clone()) => result,
+                result = transport::serve(&config.http, &config.metrics, health, readers, bus.clone(), admin) => result,
                 () = dispatcher.run(&bus, &writer) => unreachable!("dispatcher runs until shutdown"),
             } {
                 Ok(()) => ExitCode::SUCCESS,
@@ -190,11 +195,13 @@ async fn admin_enroll(path: &std::path::Path, user: String) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(err) => {
-            let unimplemented = err
-                .downcast_ref::<tonic::Status>()
-                .is_some_and(|status| status.code() == tonic::Code::Unimplemented);
-            log::error("fatal", &format!("admin enroll: {err}"));
-            ExitCode::from(if unimplemented { NOT_IMPLEMENTED } else { 1 })
+            // A refusal's message names the user and the reason ("unknown user alice").
+            let message = match err.downcast_ref::<tonic::Status>() {
+                Some(status) => status.message().to_owned(),
+                None => err.to_string(),
+            };
+            log::error("fatal", &format!("admin enroll: {message}"));
+            ExitCode::FAILURE
         }
     }
 }

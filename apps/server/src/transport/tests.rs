@@ -452,7 +452,8 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
             state.health.local_serving.clone(),
         )
         .unwrap();
-        serve_listeners(listener, app, metrics, local, Arc::default())
+        let admin = local::tests::admin(&state.health.state_dir.join("db"), "").await;
+        serve_listeners(listener, app, metrics, (local, admin), Arc::default())
             .await
             .unwrap();
         return;

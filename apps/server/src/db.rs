@@ -6,6 +6,7 @@ use sqlx::{
 use std::{path::Path, time::Duration};
 
 pub mod credentials;
+pub mod enrollment;
 // Production handlers follow in later milestones.
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod events;
@@ -107,6 +108,7 @@ mod tests {
     mod ci;
     mod credentials;
     mod dispatch;
+    mod enrollment;
     mod events;
     mod identity;
     mod repositories;

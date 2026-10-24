@@ -28,13 +28,62 @@ use tonic::{
 
 pub const SOCKET_PATH: &str = "/run/kajiba/local.sock";
 
-#[derive(Default)]
-struct Admin;
+pub struct Admin {
+    pub writer: crate::db::Writer,
+    pub public_url: String,
+    pub enrollment_ttl: Duration,
+}
+
+fn refused(code: tonic::Code, reason: &str, message: String) -> Status {
+    let mut details = tonic_types::ErrorDetails::new();
+    details.set_error_info(reason, "kajiba", std::collections::HashMap::new());
+    <Status as tonic_types::StatusExt>::with_error_details(code, message, details)
+}
 
 #[tonic::async_trait]
 impl AdminService for Admin {
-    async fn enroll(&self, _: Request<EnrollRequest>) -> Result<Response<EnrollResponse>, Status> {
-        Err(Status::unimplemented("admin enroll: not implemented yet"))
+    async fn enroll(
+        &self,
+        request: Request<EnrollRequest>,
+    ) -> Result<Response<EnrollResponse>, Status> {
+        use crate::db::enrollment::{Error, issue};
+        let user = request.into_inner().user;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|err| Status::internal(err.to_string()))?
+            .as_millis() as i64;
+        let token = issue(
+            &mut *self.writer.lock().await,
+            &user,
+            self.enrollment_ttl,
+            now,
+        )
+        .await
+        .map_err(|err| match err {
+            Error::UnknownUser => refused(
+                tonic::Code::NotFound,
+                "USER_NOT_FOUND",
+                format!("unknown user {user}"),
+            ),
+            Error::Disabled => refused(
+                tonic::Code::FailedPrecondition,
+                "INVALID_STATE",
+                format!("user {user} is disabled"),
+            ),
+            Error::Database(err) => Status::internal(format!("enrollment: {err}")),
+        })?;
+        // ADR 0022: never log the link or its token.
+        tracing::info!(
+            event = "enrollment-issued",
+            user = user.to_ascii_lowercase()
+        );
+        Ok(Response::new(EnrollResponse {
+            // The fragment keeps the token out of proxy and request logs; J4's page reads it.
+            url: format!(
+                "{}/auth/enroll#{token}",
+                self.public_url.trim_end_matches('/')
+            ),
+        }))
     }
 }
 
@@ -92,10 +141,11 @@ impl Local {
 
     pub(super) async fn serve(
         self,
+        admin: Admin,
         registry: Arc<Registry>,
         shutdown: impl std::future::Future<Output = ()>,
     ) -> io::Result<()> {
-        let routes = Routes::new(AdminServiceServer::new(Admin))
+        let routes = Routes::new(AdminServiceServer::new(admin))
             .into_axum_router()
             .layer(middleware::from_fn_with_state(
                 registry,
@@ -174,4 +224,4 @@ pub async fn enroll(path: &Path, user: String) -> Result<String, Box<dyn std::er
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

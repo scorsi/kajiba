@@ -53,7 +53,8 @@ export const EnrollResponseSchema: GenMessage<EnrollResponse> = /*@__PURE__*/
  */
 export const AdminService: GenService<{
   /**
-   * Issue a passkey enrollment link; lifecycle is implemented in J1 task 24.
+   * Revoke the user's passkeys, sessions and runtime PATs, then issue a
+   * single-use passkey enrollment link (0014).
    *
    * @generated from rpc kajiba.admin.v1.AdminService.Enroll
    */

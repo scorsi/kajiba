@@ -112,6 +112,7 @@ pub async fn serve(
     health: Health,
     readers: SqlitePool,
     bus: Arc<EventBus>,
+    admin: local::Admin,
 ) -> std::io::Result<()> {
     let registry = Arc::new(Registry::default());
     let local = local::Local::bind(
@@ -123,14 +124,14 @@ pub async fn serve(
     let metrics = metrics::bind(metrics_config.listen)
         .await?
         .map(|listener| (listener, metrics::router(registry.clone(), readers, bus)));
-    serve_listeners(listener, app, metrics, local, registry).await
+    serve_listeners(listener, app, metrics, (local, admin), registry).await
 }
 
 async fn serve_listeners(
     listener: tokio::net::TcpListener,
     app: Router,
     metrics: Option<(tokio::net::TcpListener, Router)>,
-    local: local::Local,
+    (local, admin): (local::Local, local::Admin),
     registry: Arc<Registry>,
 ) -> std::io::Result<()> {
     use std::future::IntoFuture;
@@ -146,7 +147,7 @@ async fn serve_listeners(
     let mut local_stopped = stopped;
     let servers = async move {
         tokio::try_join!(
-            local.serve(registry, async move {
+            local.serve(admin, registry, async move {
                 let _ = local_stopped.changed().await;
             }),
             axum::serve(listener, app)

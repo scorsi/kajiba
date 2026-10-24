@@ -4,7 +4,8 @@ package kajiba.admin.v1;
 
 // Host-local administration, authorized by Unix peer credentials (0014).
 service AdminService {
-  // Issue a passkey enrollment link; lifecycle is implemented in J1 task 24.
+  // Revoke the user's passkeys, sessions and runtime PATs, then issue a
+  // single-use passkey enrollment link (0014).
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
 }
 
