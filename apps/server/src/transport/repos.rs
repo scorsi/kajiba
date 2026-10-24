@@ -127,6 +127,11 @@ fn git_error(reason: &'static str) -> impl Fn(kajiba_git::Error) -> Status {
             }
             .into(),
         ),
+        kajiba_git::Error::TooLarge => refused(
+            tonic::Code::ResourceExhausted,
+            "BLOB_TOO_LARGE",
+            format!("the file exceeds {MAX_BLOB_BYTES} bytes"),
+        ),
         kajiba_git::Error::Git(err) => Status::internal(format!("git: {err}")),
     }
 }
@@ -362,17 +367,9 @@ impl RepoService for Repos {
         let dir = self.browse_dir(&request.repo).await?;
         blocking(move || {
             let commit_id = revision(&dir, &request.revision)?;
-            // shortcut: the blob is read whole before the size check; read the object header first if large blobs strain memory.
             let content = Gix
-                .blob(&dir, &commit_id, &request.path)
+                .blob(&dir, &commit_id, &request.path, MAX_BLOB_BYTES as u64)
                 .map_err(git_error("PATH_NOT_FOUND"))?;
-            if content.len() > MAX_BLOB_BYTES {
-                return Err(refused(
-                    tonic::Code::ResourceExhausted,
-                    "BLOB_TOO_LARGE",
-                    format!("the file exceeds {MAX_BLOB_BYTES} bytes"),
-                ));
-            }
             Ok(Response::new(GetBlobResponse { commit_id, content }))
         })
         .await
