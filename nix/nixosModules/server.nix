@@ -61,6 +61,26 @@ let
       credentials = lib.mapAttrs (_: cred: { token_file = cred.tokenFile; }) cfg.mirror.credentials;
       reconcile_interval = cfg.mirror.reconcileInterval;
     };
+    repos = lib.mapAttrs (_: repo: {
+      inherit (repo)
+        owner
+        name
+        description
+        visibility
+        permissions
+        ;
+      default_branch = repo.defaultBranch;
+      ci_enabled = repo.ciEnabled;
+      previous_names = repo.previousNames;
+      # filterAttrsRecursive does not enter lists.
+      mirrors = map (
+        mirror:
+        lib.filterAttrs (_: value: value != null) {
+          remote_url = mirror.remoteUrl;
+          inherit (mirror) credential enabled;
+        }
+      ) repo.mirrors;
+    }) cfg.repos;
     ci = {
       log_retention = cfg.ci.logRetention;
       artifact_retention = cfg.ci.artifactRetention;
@@ -193,6 +213,57 @@ in
     mirror = {
       credentials = credentials "the GitHub personal access token (0011)";
       reconcileInterval = optional types.str "1h" "Mirror reconciliation interval (0011).";
+    };
+    repos = mkOption {
+      type = types.attrsOf (
+        types.submodule {
+          options = {
+            owner = mkOption {
+              type = types.str;
+              description = "Owner, a declared user.";
+            };
+            name = optional types.str "the attribute name" "Repository name (0021).";
+            description = mkOption {
+              type = types.str;
+              description = "Free-text description.";
+            };
+            visibility = optional types.str "public" "Visibility; only public exists (0013).";
+            defaultBranch = optional types.str "main" "Default branch, the bare repository's HEAD.";
+            ciEnabled = optional types.bool "false" "Whether pushes trigger CI (0010).";
+            previousNames = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = "Former `<owner>/<name>` pairs kept as redirects (0021).";
+            };
+            permissions = mkOption {
+              type = types.attrsOf types.str;
+              default = { };
+              description = "Role (read, write or admin) per declared user; the owner is admin.";
+            };
+            mirrors = mkOption {
+              type = types.listOf (
+                types.submodule {
+                  options = {
+                    remoteUrl = mkOption {
+                      type = types.str;
+                      description = "Push mirror remote URL (0011).";
+                    };
+                    credential = mkOption {
+                      type = types.str;
+                      description = "Name of a mirror.credentials entry.";
+                    };
+                    enabled = optional types.bool "true" "Whether the mirror syncs.";
+                  };
+                }
+              );
+              default = [ ];
+              description = "Push mirrors, configuration part (0011).";
+            };
+          };
+        }
+      );
+      default = { };
+      description = "Declared repositories, by stable key (0026): renaming changes `name`, never the key.";
     };
     ci = {
       logRetention = optional types.str "14d" "CI log retention (0010).";

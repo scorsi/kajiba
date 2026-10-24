@@ -78,6 +78,31 @@ let
         credentials.github.tokenFile = "/run/secrets/kajiba-github-token";
         reconcileInterval = "2h";
       };
+      repos.demo = {
+        owner = "alice";
+        name = "demo-renamed";
+        description = "A demonstration repository";
+        visibility = "public";
+        defaultBranch = "trunk";
+        ciEnabled = true;
+        previousNames = [ "alice/demo" ];
+        permissions.alice = "admin";
+        mirrors = [
+          {
+            remoteUrl = "https://github.com/example/demo.git";
+            credential = "github";
+          }
+          {
+            remoteUrl = "https://github.com/example/demo-copy.git";
+            credential = "github";
+            enabled = false;
+          }
+        ];
+      };
+      repos.tools = {
+        owner = "alice";
+        description = "";
+      };
       ci = {
         logRetention = "7d";
         artifactRetention = "30d";
@@ -136,6 +161,35 @@ let
     mirror = {
       credentials.github.token_file = "/run/secrets/kajiba-github-token";
       reconcile_interval = "2h";
+    };
+    repos.demo = {
+      owner = "alice";
+      name = "demo-renamed";
+      description = "A demonstration repository";
+      visibility = "public";
+      default_branch = "trunk";
+      ci_enabled = true;
+      previous_names = [ "alice/demo" ];
+      permissions.alice = "admin";
+      mirrors = [
+        {
+          remote_url = "https://github.com/example/demo.git";
+          credential = "github";
+        }
+        {
+          remote_url = "https://github.com/example/demo-copy.git";
+          credential = "github";
+          enabled = false;
+        }
+      ];
+    };
+    # Unset options keep the code defaults (0019); empty collections are written as such.
+    repos.tools = {
+      owner = "alice";
+      description = "";
+      previous_names = [ ];
+      permissions = { };
+      mirrors = [ ];
     };
     ci = {
       log_retention = "7d";
@@ -261,6 +315,16 @@ in
       ];
     assert evaluationFails { services.kajiba-server.unexpected = true; };
     assert evaluationFails { services.kajiba-server.runners.build-1.token = "inline-secret"; };
+    assert evaluationFails { services.kajiba-server.repos.demo.unexpected = true; };
+    assert evaluationFails {
+      services.kajiba-server.repos.demo.mirrors = lib.mkForce [
+        {
+          remoteUrl = "https://github.com/example/demo.git";
+          credential = "github";
+          token = "inline-secret";
+        }
+      ];
+    };
     assert evaluationFails {
       services.kajiba-server.mirror.credentials.github.tokenFile = lib.mkForce ./module.nix;
     };
@@ -291,6 +355,9 @@ in
   # Generated file refused by `config check` although the option types accept it.
   module-metrics-listen = refused "metrics.listen: must be a loopback address" {
     services.kajiba-server.metrics.listen = lib.mkForce "0.0.0.0:9431";
+  };
+  module-repo-owner = refused "repos.tools.owner: not a declared user" {
+    services.kajiba-server.repos.tools.owner = lib.mkForce "bob";
   };
   module-token-hash = refused "users.alice.tokens.ci.sha256" {
     services.kajiba-server.users.alice.tokens.ci.sha256 = lib.mkForce "not-a-hash";
