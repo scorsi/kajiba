@@ -48,7 +48,8 @@ pub enum Kind {
     GrpcWeb,
     GitHttp,
     Raw,
-    Other = 5,
+    Ui,
+    Other,
 }
 impl Kind {
     pub fn from_content_type(value: &str) -> Self {

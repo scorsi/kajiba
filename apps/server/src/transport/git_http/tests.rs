@@ -161,6 +161,39 @@ async fn clones_through_the_router_by_name_and_redirect_v0_and_v2() {
 }
 
 #[tokio::test]
+async fn matched_ui_routes_observe_request_counters_and_durations() {
+    let fixture = Fixture::new(DEMO).await;
+    let registry = std::sync::Arc::new(crate::metrics::Registry::default());
+    let mut app = super::super::router(fixture.repos.0.clone(), false, registry.clone()).unwrap();
+    for (path, status) in [
+        ("/alice/old", http::StatusCode::MOVED_PERMANENTLY),
+        ("/alice/demo", http::StatusCode::NOT_FOUND),
+        ("/unknown", http::StatusCode::NOT_FOUND),
+    ] {
+        let response = app
+            .call(
+                http::Request::get(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        text(response).await;
+    }
+    let metrics = registry.exposition("test", [0; 4], [0; 4]);
+    for line in [
+        "kajiba_requests_total{kind=\"ui\",code=\"3xx\"} 1\n",
+        "kajiba_requests_total{kind=\"ui\",code=\"4xx\"} 1\n",
+        "kajiba_request_duration_seconds_count{kind=\"ui\"} 2\n",
+        "kajiba_requests_total{kind=\"other\",code=\"4xx\"} 1\n",
+        "kajiba_request_duration_seconds_count{kind=\"other\"} 1\n",
+    ] {
+        assert!(metrics.contains(line), "missing {line} in {metrics}");
+    }
+}
+
+#[tokio::test]
 async fn unknown_archived_and_ui_routes_answer_plain_statuses() {
     let mut fixture = Fixture::new(DEMO).await;
     let advertise = "/alice/demo.git/info/refs?service=git-upload-pack";
