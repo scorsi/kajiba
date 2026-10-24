@@ -1,0 +1,13 @@
+[package]
+name = "kajiba-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kajiba"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+kajiba-proto = { path = "../../crates/kajiba-proto" }

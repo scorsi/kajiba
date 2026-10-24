@@ -13,8 +13,7 @@ nix develop
 ```
 
 gives you Rust (stable), pnpm, buf, protoc, sqlx-cli, mold and Playwright. No
-other toolchain is supported. (Until J1 task 2 the devShell also carries Go
-for the CLI skeleton, ADR 0007.)
+other toolchain is supported.
 
 ## Checks
 

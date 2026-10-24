@@ -15,8 +15,7 @@ relational schema.
   `versions-identical` check enforces it (0023).
 - Everything kajiba ships is Rust, except the UI (TypeScript). The CLI is the
   `kajiba-cli` crate, binary `kajiba` (0007); the server binary is
-  `kajiba-server` and carries the host-local subcommands (0002). Until J1
-  task 2, `apps/cli` is still the Go skeleton.
+  `kajiba-server` and carries the host-local subcommands (0002).
 - `proto/` is the only place `.proto` contracts are defined. Regenerate after
   editing: `cd proto && buf generate` (TypeScript; needs
   `apps/ui/node_modules/.bin` on `PATH`, provided by `nix develop`). The Rust

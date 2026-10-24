@@ -6,9 +6,8 @@ mirroring to GitHub, a web UI, and a CLI. One owner to start, built to grow
 into a small team without a rewrite; deployed through Nix only. See [`docs/adr/`](docs/adr/) for the
 design decisions and [`docs/milestones.md`](docs/milestones.md) for the plan.
 
-Status: **J0** — skeleton only, no feature works yet. J1 starts by replacing
-the Go CLI skeleton with a Rust crate (ADR 0007); until then `apps/cli` is
-still a Go module.
+Status: **J1 in progress** — skeleton only, no forge feature works yet.
+The CLI is a Rust crate (ADR 0007).
 
 ## Layout
 

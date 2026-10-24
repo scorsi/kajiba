@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package kajiba.v1;
 
-option go_package = "github.com/scorsi/kajiba/cli/internal/genproto/kajiba/v1;kajibav1";
-
 // Liveness/readiness probe, usable from any of the three clients (0005, 0020).
 service HealthService {
   rpc Check(CheckRequest) returns (CheckResponse);

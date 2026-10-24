@@ -19,7 +19,9 @@
             (craneLib.fileset.commonCargoSources ../crates)
             (craneLib.fileset.commonCargoSources ../apps/server)
             (craneLib.fileset.commonCargoSources ../apps/runner)
+            (craneLib.fileset.commonCargoSources ../apps/cli)
             ../Cargo.toml
+            ../VERSION
             ../Cargo.lock
             ../proto
           ];
@@ -39,7 +41,9 @@
         kajiba-runner = pkgs.callPackage ./packages/kajiba-runner.nix {
           inherit craneLib commonCargoArgs cargoArtifacts;
         };
-        kajiba-cli = pkgs.callPackage ./packages/kajiba-cli.nix { };
+        kajiba-cli = pkgs.callPackage ./packages/kajiba-cli.nix {
+          inherit craneLib commonCargoArgs cargoArtifacts;
+        };
         kajiba-ui = pkgs.callPackage ./packages/kajiba-ui.nix { };
       };
 
@@ -49,13 +53,10 @@
           rustc
           rust-analyzer
           clippy
-          go
           nodejs
           pnpm
           buf
           protobuf
-          protoc-gen-go
-          protoc-gen-go-grpc
           sqlx-cli
           mold
           playwright
@@ -89,7 +90,6 @@
                 fileset = lib.fileset.unions [
                   ../VERSION
                   ../Cargo.toml
-                  ../apps/cli/internal/version/version.go
                   ../apps/ui/package.json
                 ];
               };
@@ -118,12 +118,10 @@
         projectRootFile = "flake.nix";
         programs = {
           rustfmt.enable = true;
-          gofmt.enable = true;
           prettier.enable = true;
           nixfmt.enable = true;
         };
         settings.excludes = [
-          "apps/cli/internal/genproto/**"
           "apps/ui/src/lib/gen/**"
           "apps/ui/build/**"
           "apps/ui/.svelte-kit/**"
@@ -131,7 +129,6 @@
           "target/**"
           "Cargo.lock"
           "pnpm-lock.yaml"
-          "apps/cli/go.sum"
         ];
       };
     };
