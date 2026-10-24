@@ -11,5 +11,6 @@ craneLib.buildPackage (
     inherit cargoArtifacts;
     pname = "kajiba-server";
     cargoExtraArgs = "--locked -p kajiba-server";
+    meta.mainProgram = "kajiba-server";
   }
 )

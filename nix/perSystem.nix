@@ -161,6 +161,10 @@
           touch $out
         '';
       }
+      // import ./checks/module.nix {
+        inherit inputs pkgs system;
+        kajibaServerPackage = config.packages.kajiba-server;
+      }
       // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
         nixos-healthz = import ./tests/healthz.nix {
           inherit pkgs;

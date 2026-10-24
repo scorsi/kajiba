@@ -8,6 +8,7 @@ pkgs.testers.nixosTest {
     services.kajiba-server = {
       enable = true;
       package = kajibaServerPackage;
+      http.publicUrl = "https://example.org";
     };
   };
 
