@@ -177,22 +177,23 @@ async fn renames_keep_identity_and_redirects_follow_previous_names() {
         .unwrap();
     let (demo, _, _) = state.repo("demo").await;
     let (other, _, _) = state.repo("other").await;
-    // Swap the names of two keys, move demo to bob, change fields and redirects.
+    // Swap the names of two keys under the same owner (UNIQUE(owner_id, name) collides
+    // unless the names are freed first), change fields and redirects.
     state
         .apply(
-            "[repos.demo]\nowner='bob'\nname='swap'\ndescription='New'\ndefault_branch='dev'\n\
-             previous_names=['alice/demo']\n\
-             [repos.other]\nowner='bob'\nname='demo'\ndescription=''\n",
+            "[repos.demo]\nowner='alice'\nname='swap'\ndescription='New'\ndefault_branch='dev'\n\
+             previous_names=['alice/legacy']\n\
+             [repos.other]\nowner='alice'\nname='demo'\ndescription=''\n",
         )
         .await
         .unwrap();
     assert_eq!(
         state.repo("demo").await,
-        (demo.clone(), "bob/swap".into(), None)
+        (demo.clone(), "alice/swap".into(), None)
     );
     assert_eq!(
         state.repo("other").await,
-        (other.clone(), "bob/demo".into(), None)
+        (other.clone(), "alice/demo".into(), None)
     );
     let mut dirs = vec![format!("{demo}.git"), format!("{other}.git")];
     dirs.sort();
@@ -205,7 +206,7 @@ async fn renames_keep_identity_and_redirects_follow_previous_names() {
         state
             .strings("SELECT owner_name || '/' || repo_redirect.name || '>' || repo.config_key FROM repo_redirect JOIN repo ON repo.id = repo_id")
             .await,
-        ["alice/demo>demo"]
+        ["alice/legacy>demo"]
     );
     assert_eq!(
         state
@@ -213,6 +214,19 @@ async fn renames_keep_identity_and_redirects_follow_previous_names() {
             .await,
         ["Newdev"]
     );
+    // A change of owner keeps the row and the directory too.
+    state
+        .apply(
+            "[repos.demo]\nowner='bob'\nname='swap'\ndescription='New'\ndefault_branch='dev'\n\
+             [repos.other]\nowner='alice'\nname='demo'\ndescription=''\n",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        state.repo("demo").await,
+        (demo.clone(), "bob/swap".into(), None)
+    );
+    assert_eq!(state.repo_dirs(), dirs);
     assert!(
         state
             .strings("SELECT role FROM repo_permission")
@@ -261,11 +275,16 @@ async fn mirror_runtime_state_survives_configuration_changes() {
     state.close().await;
 }
 
+const TOOLS: &str = "[repos.tools]\nowner='alice'\ndescription=''\n";
+
 #[tokio::test]
 async fn archival_keeps_row_directory_history_and_locks_names() {
     let mut state = State::new().await;
-    state.apply(DEMO).await.unwrap();
+    state.apply(&format!("{DEMO}{TOOLS}")).await.unwrap();
     let (public_id, _, _) = state.repo("demo").await;
+    let (tools, _, _) = state.repo("tools").await;
+    let mut dirs = vec![format!("{public_id}.git"), format!("{tools}.git")];
+    dirs.sort();
     let path = state.path(&public_id);
     let tree = git(&path, &["mktree"], "");
     let commit = git(&path, &["commit-tree", &tree, "-m", "init"], "");
@@ -276,20 +295,27 @@ async fn archival_keeps_row_directory_history_and_locks_names() {
          INSERT INTO run (public_id, repo_id, sha, trigger, state, created_at)
          VALUES ('00000000000000000000000001', 1, 'a', 'manual', 'queued', 0),
                 ('00000000000000000000000002', 1, 'a', 'manual', 'succeeded', 0);
+         INSERT INTO runner (public_id, name, capabilities, version, connected)
+         VALUES ('00000000000000000000000003', 'r', '{}', '0', 0);
+         INSERT INTO job (public_id, run_id, name, requirements, replayable, max_attempts, state, created_at)
+         VALUES ('00000000000000000000000004', 1, 'build', '{}', 0, 1, 'running', 0),
+                ('00000000000000000000000005', 2, 'build', '{}', 0, 1, 'succeeded', 0);
+         INSERT INTO job_attempt (public_id, job_id, number, runner_id, state, lease_expires_at, started_at)
+         VALUES ('00000000000000000000000006', 1, 1, 1, 'running', 0, 0);
          INSERT INTO pending_push (repo_id, correlation_id, updates, created_at) VALUES (1, 'c', '[]', 0);",
     )
     .execute(&mut state.writer)
     .await
     .unwrap();
 
-    state.apply("").await.unwrap();
+    state.apply(TOOLS).await.unwrap();
     let (same, name, archived) = state.repo("demo").await;
     assert_eq!(
         (same.as_str(), name.as_str()),
         (public_id.as_str(), "alice/demo")
     );
     assert!(archived.is_some());
-    assert_eq!(state.repo_dirs(), [format!("{public_id}.git")]);
+    assert_eq!(state.repo_dirs(), dirs);
     assert_eq!(Gix.refs(&path).unwrap(), refs);
     assert!(
         state
@@ -308,10 +334,21 @@ async fn archival_keeps_row_directory_history_and_locks_names() {
         ["cancelled", "succeeded"]
     );
     assert_eq!(
+        state.strings("SELECT state FROM job ORDER BY id").await,
+        ["cancelled", "succeeded"]
+    );
+    assert_eq!(
+        state
+            .strings("SELECT state || ' ' || (finished_at IS NOT NULL) FROM job_attempt")
+            .await,
+        ["cancelled 1"]
+    );
+    // Mirror queue state is runtime state: kept, the worker skips archived repositories.
+    assert_eq!(
         state
             .strings("SELECT state || ' ' || ifnull(next_attempt_at, '-') || ' ' || last_success_at FROM mirror")
             .await,
-        ["idle - 5"]
+        ["queued 7 5"]
     );
     assert_eq!(
         state
@@ -323,38 +360,55 @@ async fn archival_keeps_row_directory_history_and_locks_names() {
     crate::state::cleanup(&state.dir.0, &mut state.writer)
         .await
         .unwrap();
-    assert_eq!(state.repo_dirs(), [format!("{public_id}.git")]);
+    assert_eq!(state.repo_dirs(), dirs);
     assert!(!state.dir.0.join("tmp/orphans").exists());
 
-    // Another key may take neither its current nor its previous name; nothing is written.
+    // No other key, new or renamed, may take its current or previous name; nothing is written.
     let before = changes(&mut state.writer).await;
-    for (repos, name) in [
+    for (repos, key, name) in [
         (
-            "[repos.copy]\nowner='alice'\nname='demo'\ndescription=''\n",
+            format!("{TOOLS}[repos.copy]\nowner='alice'\nname='demo'\ndescription=''\n"),
+            "copy",
             "alice/demo",
         ),
         (
-            "[repos.copy]\nowner='alice'\nname='old'\ndescription=''\n",
+            format!("{TOOLS}[repos.copy]\nowner='alice'\nname='old'\ndescription=''\n"),
+            "copy",
             "alice/old",
         ),
         (
-            "[repos.copy]\nowner='alice'\ndescription=''\nprevious_names=['alice/demo']\n",
+            format!(
+                "{TOOLS}[repos.copy]\nowner='alice'\ndescription=''\nprevious_names=['alice/demo']\n"
+            ),
+            "copy",
             "alice/demo",
         ),
+        (
+            "[repos.tools]\nowner='alice'\nname='demo'\ndescription=''\n".to_owned(),
+            "tools",
+            "alice/demo",
+        ),
+        (
+            "[repos.tools]\nowner='alice'\ndescription=''\nprevious_names=['alice/old']\n"
+                .to_owned(),
+            "tools",
+            "alice/old",
+        ),
     ] {
-        let error = state.apply(repos).await.unwrap_err();
+        let error = state.apply(&repos).await.unwrap_err();
         assert!(
             error.contains(&format!(
-                "repos.copy: {name} is held by archived repository repos.demo"
+                "repos.{key}: {name} is held by archived repository repos.demo"
             )),
             "{error}"
         );
         assert_eq!(changes(&mut state.writer).await, before);
-        assert_eq!(state.repo_dirs(), [format!("{public_id}.git")]);
+        assert_eq!(state.repo_dirs(), dirs);
+        assert_eq!(state.repo("tools").await.1, "alice/tools");
     }
 
     // The same key re-declared unarchives the same row, content intact.
-    state.apply(DEMO).await.unwrap();
+    state.apply(&format!("{DEMO}{TOOLS}")).await.unwrap();
     assert_eq!(
         state.repo("demo").await,
         (public_id.clone(), "alice/demo".into(), None)
@@ -368,7 +422,7 @@ async fn archival_keeps_row_directory_history_and_locks_names() {
         state.strings("SELECT state FROM run ORDER BY id").await,
         ["cancelled", "succeeded"]
     );
-    assert_eq!(state.repo_dirs(), [format!("{public_id}.git")]);
+    assert_eq!(state.repo_dirs(), dirs);
     state.close().await;
 }
 

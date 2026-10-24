@@ -353,7 +353,8 @@ async fn apply(
         .iter()
         .filter(|row| !row.archived && !declared.contains_key(&row.key))
     {
-        // Row, directory, redirects, mirror rows and status stay; a retained pending_push too.
+        // Row, directory, redirects, mirror rows and their queue state stay (the mirror
+        // worker skips archived repositories); a retained pending_push too.
         for statement in [
             "UPDATE repo SET archived_at = ?1 WHERE id = ?2",
             "DELETE FROM repo_permission WHERE repo_id = ?2 AND ?1 IS NOT NULL",
@@ -362,8 +363,6 @@ async fn apply(
             "UPDATE job SET state = 'cancelled', finished_at = ?1
              WHERE state IN ('pending', 'assigned', 'running') AND run_id IN (SELECT id FROM run WHERE repo_id = ?2)",
             "UPDATE run SET state = 'cancelled', finished_at = ?1 WHERE repo_id = ?2 AND state IN ('queued', 'running')",
-            "UPDATE mirror SET state = 'idle', redo = 0, next_attempt_at = NULL
-             WHERE repo_id = ?2 AND ?1 IS NOT NULL AND (state != 'idle' OR redo != 0 OR next_attempt_at IS NOT NULL)",
         ] {
             sqlx::query(statement)
                 .bind(now)
