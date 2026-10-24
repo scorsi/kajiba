@@ -74,7 +74,13 @@ pkgs.testers.runNixOSTest {
 
     def assert_ready():
         machine.wait_for_unit(unit)
-        assert "status=0/0" in machine.succeed(f"systemctl show -p ExecStartPost {unit}")
+        # systemd reaches active only once ExecStartPost exited 0; its curl is the /readyz 200
+        # request logged by this invocation (systemctl show keeps no ExecStartPost status).
+        state = machine.succeed(f"systemctl show -P ActiveState {unit}").strip()
+        assert state == "active", f"ActiveState: {state!r}"
+        events = invocation_events()
+        probes = [e for e in events if e["event"] == "request" and e.get("method") == "readyz" and e.get("status") == 200]
+        assert probes, f"no /readyz 200 request in this invocation: {events}"
         for path in ["healthz", "readyz"]:
             code = machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:8080/{path}")
             assert code == "200", f"/{path}: {code}"
@@ -83,18 +89,18 @@ pkgs.testers.runNixOSTest {
     with subtest("ready through the module after migrating a fresh stateDir"):
         assert_ready()
         events = invocation_events()
-        assert applied(events) == migrations, events
-        assert "ready" in {event["event"] for event in events}, events
+        assert applied(events) == migrations, f"applied {applied(events)} != {migrations}: {events}"
+        assert "ready" in {event["event"] for event in events}, f"no ready line: {events}"
 
     with subtest("declared user and SSH key reconciled into the database"):
         first = identity()
-        assert without_ids(first) == ["alice", "1", "config", "1", "auth", "ssh-ed25519", "1", "config"], first
+        assert without_ids(first) == ["alice", "1", "config", "1", "auth", "ssh-ed25519", "1", "config"], f"identity row: {first}"
 
     with subtest("a second serve on the same stateDir is refused by kajiba.lock"):
         machine.fail("runuser -u kajiba -- kajiba-server serve --config /etc/kajiba/server.toml 2>/tmp/second.log")
         lines = [json.loads(line) for line in machine.succeed("cat /tmp/second.log").splitlines()]
         fatal = [line for line in lines if line["event"] == "fatal"]
-        assert len(fatal) == 1 and "another instance holds ${stateDir}/kajiba.lock" in fatal[0]["err"], lines
+        assert len(fatal) == 1 and "another instance holds ${stateDir}/kajiba.lock" in fatal[0]["err"], f"second serve output: {lines}"
         validate_log_output(machine, "cat /tmp/second.log")
         assert_ready()
 
@@ -102,17 +108,20 @@ pkgs.testers.runNixOSTest {
         machine.shutdown()
         machine.start()
         assert_ready()
-        assert applied(invocation_events()) == set()
-        assert identity() == first
+        events = invocation_events()
+        assert applied(events) == set(), f"re-migrated {applied(events)}: {events}"
+        after = identity()
+        assert after == first, f"{after} != {first}"
 
     with subtest("a wiped stateDir is migrated again from scratch"):
         machine.succeed(f"systemctl stop {unit}", "rm -rf ${stateDir}", f"systemctl start {unit}")
         assert_ready()
-        assert applied(invocation_events()) == migrations
+        events = invocation_events()
+        assert applied(events) == migrations, f"applied {applied(events)} != {migrations}: {events}"
         fresh = identity()
         # Same declared content, new rows: the reconciliation re-created them from the config.
-        assert without_ids(fresh) == without_ids(first), fresh
-        assert fresh[0] != first[0] and fresh[5] != first[5], fresh
+        assert without_ids(fresh) == without_ids(first), f"{fresh} != {first}"
+        assert fresh[0] != first[0] and fresh[5] != first[5], f"public ids kept: {fresh} vs {first}"
 
     with subtest("every service log line validates against the nisshi schema"):
         validate_logs(machine, unit)
