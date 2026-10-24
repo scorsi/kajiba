@@ -1,9 +1,36 @@
 use std::{path::Path, time::Duration};
 
-use kajiba_core::config::{Backend, RunnerConfig, Scope, ServerConfig};
+use kajiba_core::config::{Backend, Role, RunnerConfig, Scope, ServerConfig, Visibility};
 
 const SERVER: &str = include_str!("fixtures/server.toml");
 const RUNNER: &str = include_str!("fixtures/runner.toml");
+// ADR 0026's repository fields, declared on top of the ADR 0019 example.
+const REPOS: &str = r#"
+[users.bob]
+
+[repos.demo]
+owner = "Alice"
+name = "Demo"
+description = "A demonstration repository"
+visibility = "public"
+default_branch = "trunk"
+ci_enabled = true
+previous_names = ["alice/old-demo", "Bob/Demo"]
+permissions = { bob = "write", ALICE = "admin" }
+
+[[repos.demo.mirrors]]
+remote_url = "https://github.com/example/demo.git"
+credential = "GitHub"
+
+[[repos.demo.mirrors]]
+remote_url = "https://github.com/example/demo-copy.git"
+credential = "github"
+enabled = false
+
+[repos.tools]
+owner = "bob"
+description = ""
+"#;
 const MINIMAL: &str = "[http]\npublic_url = 'https://forge.example.org'\n";
 
 fn server_error(input: &str, field: &str) {
@@ -692,5 +719,121 @@ fn credentials_unique_in_the_schema_are_refused_naming_both_fields() {
         format!("[users.alice]\nssh_keys=['{KEY}', '{KEY} again']"),
     ] {
         ServerConfig::parse(&format!("{MINIMAL}{input}")).unwrap();
+    }
+}
+
+#[test]
+fn a_full_repository_example_loads_with_defaults_and_normalized_names() {
+    let config = ServerConfig::parse(&format!("{SERVER}{REPOS}")).unwrap();
+    let demo = &config.repos["demo"];
+    assert_eq!((demo.owner.as_str(), demo.name.as_str()), ("alice", "demo"));
+    assert_eq!(demo.description, "A demonstration repository");
+    assert_eq!(demo.visibility, Visibility::Public);
+    assert_eq!(demo.default_branch, "trunk");
+    assert!(demo.ci_enabled);
+    assert_eq!(demo.previous_names, ["alice/old-demo", "bob/demo"]);
+    assert_eq!(demo.permissions["bob"], Role::Write);
+    assert_eq!(demo.permissions["alice"], Role::Admin);
+    assert_eq!(demo.mirrors.len(), 2);
+    assert_eq!(demo.mirrors[0].credential, "github");
+    assert!(demo.mirrors[0].enabled);
+    assert!(!demo.mirrors[1].enabled);
+    let tools = &config.repos["tools"];
+    assert_eq!(tools.name, "tools");
+    assert_eq!(tools.visibility, Visibility::Public);
+    assert_eq!(tools.default_branch, "main");
+    assert!(!tools.ci_enabled);
+    assert!(tools.previous_names.is_empty() && tools.permissions.is_empty());
+    assert!(tools.mirrors.is_empty());
+    assert!(ServerConfig::parse(MINIMAL).unwrap().repos.is_empty());
+    for header in ["[repos.tools]", "[[repos.demo.mirrors]]"] {
+        let input =
+            format!("{SERVER}{REPOS}").replacen(header, &format!("{header}\ntypo = true"), 1);
+        server_error(&input, "typo");
+    }
+}
+
+#[test]
+fn each_repository_refusal_names_its_field() {
+    let full = format!("{SERVER}{REPOS}");
+    for (from, to, field) in [
+        (
+            "owner = \"bob\"",
+            "owner = \"carol\"",
+            "repos.tools.owner: not a declared user",
+        ),
+        ("owner = \"bob\"", "owner = \"b/c\"", "repos.tools.owner"),
+        (
+            "bob = \"write\"",
+            "carol = \"write\"",
+            "repos.demo.permissions.carol: not a declared user",
+        ),
+        ("bob = \"write\"", "bob = \"owner\"", "permissions"),
+        (
+            "owner = \"bob\"",
+            "owner = \"alice\"\nname = \"DEMO\"",
+            "repos.tools.name: same current owner and name as repos.demo",
+        ),
+        (
+            "owner = \"bob\"",
+            "owner = \"bob\"\nname = \"\"",
+            "name must contain",
+        ),
+        (
+            "owner = \"bob\"",
+            "owner = \"bob\"\nname = \"raw\"",
+            "repos.tools.name",
+        ),
+        (
+            "\"Bob/Demo\"",
+            "\"Bob/Tools\"",
+            "repos.demo.previous_names[1]: current name of repos.tools",
+        ),
+        (
+            "\"Bob/Demo\"",
+            "\"alice/OLD-demo\"",
+            "repos.demo.previous_names[1]: already declared by repos.demo.previous_names[0]",
+        ),
+        (
+            "owner = \"bob\"",
+            "owner = \"bob\"\nprevious_names = [\"alice/old-demo\"]",
+            "repos.tools.previous_names[0]: already declared by repos.demo.previous_names[0]",
+        ),
+        (
+            "\"Bob/Demo\"",
+            "\"bob\"",
+            "repos.demo.previous_names[1]: expected <owner>/<name>",
+        ),
+        (
+            "\"Bob/Demo\"",
+            "\"bob/a/b\"",
+            "repos.demo.previous_names[1]: expected <owner>/<name>",
+        ),
+        (
+            "credential = \"GitHub\"",
+            "credential = \"gitlab\"",
+            "repos.demo.mirrors[0].credential: not a declared mirror credential",
+        ),
+        (
+            "demo-copy.git",
+            "demo.git",
+            "repos.demo.mirrors[1].remote_url: already declared by repos.demo.mirrors[0].remote_url",
+        ),
+        (
+            "visibility = \"public\"",
+            "visibility = \"private\"",
+            "visibility",
+        ),
+        (
+            "[repos.tools]",
+            "[repos.\"Demo\"]",
+            "duplicate name after lowercase normalization",
+        ),
+        ("[repos.tools]", "[repos.raw]", "repos: name #"),
+        ("description = \"\"\n", "", "description"),
+        ("owner = \"bob\"\n", "", "owner"),
+    ] {
+        assert!(full.contains(from), "{from}");
+        server_error(&full.replacen(from, to, 1), field);
     }
 }

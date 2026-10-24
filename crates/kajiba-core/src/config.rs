@@ -36,6 +36,8 @@ pub struct ServerConfig {
     #[serde(default)]
     pub mirror: MirrorConfig,
     #[serde(default)]
+    pub repos: BTreeMap<String, RepoConfig>,
+    #[serde(default)]
     pub ci: CiConfig,
     #[serde(default)]
     pub dump: DumpConfig,
@@ -161,6 +163,54 @@ impl Default for MirrorConfig {
     }
 }
 
+/// A declared repository (0026); its map key is its stable identity.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepoConfig {
+    pub owner: String,
+    /// Empty when absent; `ServerConfig::parse` replaces it with the key.
+    #[serde(default, deserialize_with = "explicit_name")]
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub visibility: Visibility,
+    #[serde(default = "default_branch")]
+    pub default_branch: String,
+    #[serde(default)]
+    pub ci_enabled: bool,
+    /// `<owner>/<name>` pairs, lowercase after `ServerConfig::parse`.
+    #[serde(default)]
+    pub previous_names: Vec<String>,
+    #[serde(default)]
+    pub permissions: BTreeMap<String, Role>,
+    #[serde(default)]
+    pub mirrors: Vec<RepoMirrorConfig>,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    #[default]
+    Public,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Read,
+    Write,
+    Admin,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepoMirrorConfig {
+    pub remote_url: String,
+    pub credential: String,
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CiConfig {
@@ -238,6 +288,21 @@ fn backends() -> Vec<Backend> {
 }
 fn max_jobs() -> u32 {
     1
+}
+fn default_branch() -> String {
+    "main".into()
+}
+fn enabled() -> bool {
+    true
+}
+
+/// An explicit empty `name` must not silently mean "the key".
+fn explicit_name<'de, D: Deserializer<'de>>(de: D) -> Result<String, D::Error> {
+    let name = String::deserialize(de)?;
+    if name.is_empty() {
+        return Err(serde::de::Error::custom(crate::names::NameError::Length));
+    }
+    Ok(name)
 }
 
 fn duration<'de, D: Deserializer<'de>>(de: D) -> Result<Duration, D::Error> {
@@ -428,6 +493,77 @@ fn open_file(path: &Path, field: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// ADR 0026's `config check` rules; names are normalized to lowercase in place.
+fn validate_repos(config: &mut ServerConfig) -> Result<(), String> {
+    // Rejected values are not echoed (they may be misplaced secrets); fields are.
+    let mut current = BTreeMap::new();
+    for (key, repo) in &mut config.repos {
+        let field = format!("repos.{key}");
+        repo.owner = validate_name(&repo.owner).map_err(|err| format!("{field}.owner: {err}"))?;
+        if !config.users.contains_key(&repo.owner) {
+            return Err(format!("{field}.owner: not a declared user"));
+        }
+        repo.name = if repo.name.is_empty() {
+            key.clone()
+        } else {
+            validate_name(&repo.name).map_err(|err| format!("{field}.name: {err}"))?
+        };
+        if let Some(first) = current.insert(format!("{}/{}", repo.owner, repo.name), key.clone()) {
+            return Err(format!(
+                "{field}.name: same current owner and name as repos.{first}"
+            ));
+        }
+        normalize(&mut repo.permissions, &format!("{field}.permissions"))?;
+        if let Some(user) = repo
+            .permissions
+            .keys()
+            .find(|user| !config.users.contains_key(*user))
+        {
+            return Err(format!("{field}.permissions.{user}: not a declared user"));
+        }
+        let mut remotes = BTreeMap::new();
+        for (index, mirror) in repo.mirrors.iter_mut().enumerate() {
+            let mirror_field = format!("{field}.mirrors[{index}]");
+            mirror.credential = validate_name(&mirror.credential)
+                .ok()
+                .filter(|name| config.mirror.credentials.contains_key(name))
+                .ok_or_else(|| {
+                    format!("{mirror_field}.credential: not a declared mirror credential")
+                })?;
+            if let Some(first) = remotes.insert(mirror.remote_url.clone(), index) {
+                return Err(format!(
+                    "{mirror_field}.remote_url: already declared by {field}.mirrors[{first}].remote_url"
+                ));
+            }
+        }
+    }
+    let mut previous = BTreeMap::new();
+    for (key, repo) in &mut config.repos {
+        for (index, name) in repo.previous_names.iter_mut().enumerate() {
+            let field = format!("repos.{key}.previous_names[{index}]");
+            let pair = name
+                .split_once('/')
+                .ok_or(crate::names::NameError::InvalidCharacters)
+                .and_then(|(owner, name)| {
+                    Ok(format!(
+                        "{}/{}",
+                        validate_name(owner)?,
+                        validate_name(name)?
+                    ))
+                })
+                .map_err(|err| format!("{field}: expected <owner>/<name>: {err}"))?;
+            if let Some(holder) = current.get(&pair) {
+                return Err(format!("{field}: current name of repos.{holder}"));
+            }
+            if let Some(first) = previous.insert(pair.clone(), field.clone()) {
+                return Err(format!("{field}: already declared by {first}"));
+            }
+            *name = pair;
+        }
+    }
+    Ok(())
+}
+
 impl ServerConfig {
     /// Parse and structurally validate without opening any referenced file.
     pub fn parse(input: &str) -> Result<Self, String> {
@@ -464,6 +600,7 @@ impl ServerConfig {
         normalize(&mut config.users, "users")?;
         normalize(&mut config.runners, "runners")?;
         normalize(&mut config.mirror.credentials, "mirror.credentials")?;
+        normalize(&mut config.repos, "repos")?;
         for (field, ttl, max, max_text) in [
             (
                 "auth.enrollment_ttl",
@@ -556,6 +693,7 @@ impl ServerConfig {
                 &format!("mirror.credentials.{name}.token_file"),
             )?;
         }
+        validate_repos(&mut config)?;
         Ok(config)
     }
 
