@@ -129,7 +129,7 @@ pub trait Clock {
     async fn sleep(&self, duration: Duration);
 }
 
-struct SystemClock;
+pub struct SystemClock;
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
         Instant::now()

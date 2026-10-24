@@ -22,7 +22,11 @@ pub(super) struct State {
 
 impl State {
     pub(super) async fn new() -> Self {
-        let dir = TempDir::new();
+        Self::at(TempDir::new()).await
+    }
+
+    /// A server start on `dir`: takes the state lock and opens the database.
+    pub(super) async fn at(dir: TempDir) -> Self {
         let lock = crate::state::prepare(&dir.0).unwrap();
         let (writer, readers) = open(&dir.0.join("db/kajiba.sqlite")).await.unwrap();
         Self {
@@ -80,6 +84,13 @@ impl State {
             .await
             .unwrap();
         std::mem::replace(&mut self.readers, readers).close().await;
+    }
+
+    /// A server stop that keeps the state directory for the next start.
+    pub(super) async fn stop(self) -> TempDir {
+        self.readers.close().await;
+        self.writer.close().await.unwrap();
+        self.dir
     }
 
     pub(super) async fn close(self) {

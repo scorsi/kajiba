@@ -241,3 +241,81 @@ async fn a_recovery_pass_converts_rows_and_the_next_one_retries_after_an_error()
     );
     state.close().await;
 }
+
+/// A clock whose every sleep reports its duration and waits for the test's wake-up.
+struct Ticks {
+    asleep: tokio::sync::mpsc::UnboundedSender<std::time::Duration>,
+    wake: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<()>>,
+}
+
+impl crate::db::events::Clock for Ticks {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+    async fn sleep(&self, duration: std::time::Duration) {
+        self.asleep.send(duration).unwrap();
+        self.wake.lock().await.recv().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn the_recovery_timer_waits_its_interval_then_retries_each_tick() {
+    let (mut state, path, c1, c2) = setup().await;
+    let dead = Gate::default();
+    dead.admit(
+        &mut state.writer,
+        1,
+        None,
+        "import",
+        &[update("main", &c1, &c2)],
+    )
+    .await
+    .unwrap();
+    git(&path, &["update-ref", "refs/heads/main", &c2], "");
+    let hidden = path.with_extension("hidden");
+    std::fs::rename(&path, &hidden).unwrap();
+
+    let (asleep, mut slept) = tokio::sync::mpsc::unbounded_channel();
+    let (wake, woken) = tokio::sync::mpsc::unbounded_channel();
+    let clock = Ticks {
+        asleep,
+        wake: woken.into(),
+    };
+    let writer = tokio::sync::Mutex::new(std::mem::replace(
+        &mut state.writer,
+        sqlx::Connection::connect("sqlite::memory:").await.unwrap(),
+    ));
+    let (gate, bus, dir) = (Gate::default(), EventBus::default(), state.dir.0.clone());
+    let pending = async || -> Vec<String> {
+        sqlx::query_scalar("SELECT correlation_id FROM pending_push")
+            .fetch_all(&mut *writer.lock().await)
+            .await
+            .unwrap()
+    };
+    {
+        let recovery = gate.recover_periodically(&clock, &writer, &bus, &dir, &Gix);
+        tokio::pin!(recovery);
+        // Runs the loop until its next sleep, i.e. until the current pass is over.
+        let mut tick = async || {
+            tokio::select! {
+                () = &mut recovery => unreachable!("the loop never ends"),
+                duration = slept.recv() => assert_eq!(duration, Some(std::time::Duration::from_secs(60))),
+            }
+        };
+        tick().await;
+        assert_eq!(pending().await, ["import"], "no pass before the interval");
+        wake.send(()).unwrap();
+        tick().await;
+        assert_eq!(pending().await, ["import"], "a failed pass keeps the row");
+        std::fs::rename(&hidden, &path).unwrap();
+        wake.send(()).unwrap();
+        tick().await;
+        assert!(pending().await.is_empty(), "the next tick retries");
+    }
+    state.writer = writer.into_inner();
+    assert_eq!(
+        events(&mut state).await,
+        [format!("system - 1 import {}", payload("main", &c1, &c2))]
+    );
+    state.close().await;
+}

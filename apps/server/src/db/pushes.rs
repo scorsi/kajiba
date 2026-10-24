@@ -2,7 +2,7 @@
 //! mutation, and turned into one `push` event per applied ref once the mutating
 //! process has exited.
 
-use super::events::{EventBus, NewEvent, append_event};
+use super::events::{Clock, EventBus, NewEvent, append_event};
 use super::users::new_public_id;
 use kajiba_git::GitStore;
 use sqlx::{Connection, SqliteConnection};
@@ -217,6 +217,7 @@ impl Gate {
                     )
                     .await?;
                 }
+                checkpoint("converting");
                 sqlx::query("DELETE FROM pending_push WHERE id = ?")
                     .bind(id)
                     .execute(&mut *tx)
@@ -247,13 +248,14 @@ const RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60
 impl Gate {
     pub async fn recover_periodically(
         &self,
+        clock: &impl Clock,
         writer: &tokio::sync::Mutex<SqliteConnection>,
         bus: &EventBus,
         state_dir: &Path,
         store: &impl GitStore,
     ) {
         loop {
-            tokio::time::sleep(RECOVERY_INTERVAL).await;
+            clock.sleep(RECOVERY_INTERVAL).await;
             self.recover_once(&mut *writer.lock().await, bus, state_dir, store)
                 .await;
         }
@@ -273,6 +275,18 @@ impl Gate {
         }
     }
 }
+
+/// Test-only crash injection: the process aborts at the checkpoint named by
+/// `KAJIBA_TEST_CRASH_AT`. Compiled out of every non-test build.
+#[cfg(test)]
+pub(crate) fn checkpoint(name: &str) {
+    if std::env::var("KAJIBA_TEST_CRASH_AT").as_deref() == Ok(name) {
+        std::process::abort();
+    }
+}
+
+#[cfg(not(test))]
+pub(crate) fn checkpoint(_: &str) {}
 
 fn parse(updates: &str) -> Result<Vec<RefUpdate>, String> {
     let field = |value: &serde_json::Value, name: &str| {

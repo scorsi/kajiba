@@ -4,7 +4,7 @@
 use crate::db::{
     Writer,
     events::EventBus,
-    pushes::{Gate, RefUpdate, Refused, ZERO},
+    pushes::{Gate, RefUpdate, Refused, ZERO, checkpoint},
 };
 use kajiba_git::{GitStore, Gix};
 use std::{
@@ -89,6 +89,7 @@ pub async fn import(
                 err => Error::NotEmpty(err.to_string()),
             })?;
     }
+    checkpoint("admitted");
 
     let (target, owned, wanted) = (path.clone(), source.to_owned(), refs.clone());
     let fetched = supervise(
@@ -123,6 +124,7 @@ pub(crate) fn supervise(
         let mutated = tokio::task::spawn_blocking(mutate)
             .await
             .map_err(|err| err.to_string());
+        checkpoint("fetched");
         gate.exited(repo_id);
         gate.reconcile_repo(&mut *writer.lock().await, &bus, &state_dir, &Gix, repo_id)
             .await?;

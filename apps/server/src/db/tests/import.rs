@@ -408,3 +408,125 @@ async fn another_repository_s_broken_row_does_not_fail_the_import() {
             .is_err()
     );
 }
+
+/// The child half of `a_killed_import_converts_once_after_restart`: a server
+/// process importing `alice/demo`, aborted at `KAJIBA_TEST_CRASH_AT`. A no-op when
+/// run as a plain test.
+#[tokio::test]
+async fn crash_child() {
+    let Ok(state_dir) = std::env::var("KAJIBA_TEST_STATE_DIR") else {
+        return;
+    };
+    let state_dir = PathBuf::from(state_dir);
+    let _lock = crate::state::prepare(&state_dir).unwrap();
+    let (writer, _) = crate::db::open(&state_dir.join("db/kajiba.sqlite"))
+        .await
+        .unwrap();
+    let source = std::env::var("KAJIBA_TEST_SOURCE").unwrap();
+    let result = import(
+        &Writer::new(writer.into()),
+        &Arc::default(),
+        &Arc::default(),
+        &state_dir,
+        "alice/demo",
+        &source,
+        "request-1",
+    )
+    .await;
+    panic!("checkpoint not reached: {result:?}");
+}
+
+#[tokio::test]
+async fn a_killed_import_converts_once_after_restart() {
+    use std::os::unix::process::ExitStatusExt;
+    for checkpoint in ["admitted", "fetched", "converting"] {
+        let mut state = State::new().await;
+        state.apply(DECLARED).await.unwrap();
+        let source = source(&state.dir.0, "main");
+        let expected = branches_and_tags(&source);
+        let (public_id, ..) = state.repo("demo").await;
+        let target = state.path(&public_id);
+        let dir = state.stop().await;
+
+        // The child really dies: no destructor, no `exited`, connections dropped by the kernel.
+        let child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "db::tests::import::crash_child", "--nocapture"])
+            .env("KAJIBA_TEST_CRASH_AT", checkpoint)
+            .env("KAJIBA_TEST_STATE_DIR", &dir.0)
+            .env("KAJIBA_TEST_SOURCE", &source)
+            .kill_on_drop(true)
+            .output();
+        let output = tokio::time::timeout(Duration::from_secs(120), child)
+            .await
+            .expect("child bounded")
+            .unwrap();
+        // SIGABRT is 6 on Linux and macOS.
+        assert_eq!(output.status.signal(), Some(6), "{checkpoint}: {output:?}");
+
+        // Restart on the same state directory, as `serve` does.
+        let mut state = State::at(dir).await;
+        crate::state::cleanup(&state.dir.0, &mut state.writer)
+            .await
+            .unwrap();
+        let (gate, bus) = (Arc::new(Gate::default()), Arc::new(EventBus::default()));
+        gate.reconcile(&mut state.writer, &bus, &state.dir.0, &Gix)
+            .await
+            .unwrap();
+        assert!(
+            state
+                .strings("SELECT correlation_id FROM pending_push")
+                .await
+                .is_empty(),
+            "{checkpoint}"
+        );
+        let writer = Writer::new(
+            std::mem::replace(
+                &mut state.writer,
+                sqlx::Connection::connect("sqlite::memory:").await.unwrap(),
+            )
+            .into(),
+        );
+        if checkpoint == "admitted" {
+            // Nothing was fetched: no event, and the released gate admits a new import.
+            assert!(Gix.refs(&target).unwrap().is_empty());
+            assert_eq!(
+                import(
+                    &writer,
+                    &gate,
+                    &bus,
+                    &state.dir.0,
+                    "alice/demo",
+                    source.to_str().unwrap(),
+                    "request-1"
+                )
+                .await
+                .unwrap(),
+                4
+            );
+        }
+        assert_eq!(Gix.refs(&target).unwrap(), expected, "{checkpoint}");
+        let events: Vec<String> =
+            sqlx::query_scalar("SELECT payload FROM event WHERE kind = 'push' ORDER BY id")
+                .fetch_all(&mut *writer.lock().await)
+                .await
+                .unwrap();
+        let wanted: Vec<String> = expected
+            .iter()
+            .map(|r| {
+                format!(
+                    r#"{{"new":"{}","old":"{}","ref":"{}"}}"#,
+                    r.target,
+                    crate::db::pushes::ZERO,
+                    r.name
+                )
+            })
+            .collect();
+        assert_eq!(events, wanted, "{checkpoint}: exactly once, in order");
+        // The gate is released: the next ref update is admitted.
+        gate.admit(&mut *writer.lock().await, 1, None, "next", &[])
+            .await
+            .unwrap();
+        state.writer = Arc::try_unwrap(writer).unwrap().into_inner();
+        state.close().await;
+    }
+}
