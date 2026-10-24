@@ -31,6 +31,7 @@ The ADRs describe the product. Values of a particular deployment (hosts, ports, 
 | 0021 | Repository addressing and URLs                                               | Accepted                  |
 | 0022 | Operations and observability                                                 | Accepted                  |
 | 0023 | Versions, migrations and compatibility                                       | Accepted                  |
+| 0024 | Decisions taken during J1                                                    | Accepted                  |
 
 Relational schema: [`docs/schema.md`](../schema.md) (Accepted).
 
