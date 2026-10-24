@@ -754,6 +754,51 @@ fn a_full_repository_example_loads_with_defaults_and_normalized_names() {
 }
 
 #[test]
+fn mirror_urls_are_absolute_and_never_contain_credentials_queries_or_fragments() {
+    let full = format!("{SERVER}{REPOS}");
+    let original = "https://github.com/example/demo.git";
+    for remote in [
+        "https://example.org/demo.git",
+        "ssh://example.org/demo.git",
+        "ssh://example.org:2222/demo.git",
+        "https://[::1]:443/demo.git",
+    ] {
+        let config = ServerConfig::parse(&full.replacen(original, remote, 1)).unwrap();
+        assert_eq!(config.repos["demo"].mirrors[0].remote_url, remote);
+    }
+    for remote in [
+        "",
+        "not a URL",
+        "/tmp/demo.git",
+        "example.org:demo.git",
+        "http://example.org/demo.git",
+        "file:///tmp/demo.git",
+        "https:///demo.git",
+        "https://bad_host/demo.git",
+        "ssh://example.org:0/demo.git",
+        "https://example.org:99999/demo.git",
+        "https://example.org:/demo.git",
+        "https://user:PRIVATE-TOKEN@example.org/demo.git",
+        "https://PRIVATE-TOKEN@example.org/demo.git",
+        "ssh://user@example.org/demo.git",
+        "https://@example.org/demo.git",
+        "https://example.org/demo.git?token=PRIVATE-TOKEN",
+        "https://example.org/demo.git?",
+        "https://example.org/demo.git#PRIVATE-TOKEN",
+    ] {
+        let error = ServerConfig::parse(&full.replacen(original, remote, 1)).unwrap_err();
+        assert!(
+            error.starts_with("repos.demo.mirrors[0].remote_url:"),
+            "{error}"
+        );
+        assert!(!error.contains("PRIVATE-TOKEN"), "{error}");
+        if !remote.is_empty() {
+            assert!(!error.contains(remote), "{error}");
+        }
+    }
+}
+
+#[test]
 fn each_repository_refusal_names_its_field() {
     let full = format!("{SERVER}{REPOS}");
     for (from, to, field) in [

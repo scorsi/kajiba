@@ -233,6 +233,50 @@ async fn get_returns_declared_fields_by_id_name_and_redirect_archived_included()
 }
 
 #[tokio::test]
+async fn get_and_list_redact_unsafe_persisted_mirror_urls_including_archived_repos() {
+    let mut fixture = Fixture::new(DEMO).await;
+    for remote in [
+        "https://user:PRIVATE-TOKEN@example.org/demo.git",
+        "ssh://PRIVATE-TOKEN@example.org/demo.git",
+        "https://example.org/demo.git?token=PRIVATE-TOKEN",
+    ] {
+        sqlx::query("UPDATE mirror SET remote_url = ?")
+            .bind(remote)
+            .execute(&mut fixture.writer)
+            .await
+            .unwrap();
+        for repo in [
+            get(
+                &fixture.repos,
+                get_repo_request::Repo::Name("alice/demo".into()),
+            )
+            .await
+            .unwrap(),
+            list(&fixture.repos, 0, String::new()).await.repos.remove(0),
+        ] {
+            assert_eq!(repo.mirrors.len(), 1);
+            assert!(repo.mirrors[0].remote_url.is_empty());
+            assert_eq!(repo.mirrors[0].credential, "github");
+            assert_eq!(repo.permissions.len(), 1);
+        }
+    }
+    fixture.apply("").await;
+    for repo in [
+        get(
+            &fixture.repos,
+            get_repo_request::Repo::Name("alice/old".into()),
+        )
+        .await
+        .unwrap(),
+        list(&fixture.repos, 0, String::new()).await.repos.remove(0),
+    ] {
+        assert!(repo.archived);
+        assert_eq!(repo.mirrors.len(), 1);
+        assert!(repo.mirrors[0].remote_url.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn list_pages_by_name_stay_stable_under_inserts_and_mark_archived() {
     let mut fixture = Fixture::new(&format!("{DEMO}{TOOLS}{ZETA}")).await;
     fixture.apply(&format!("{DEMO}{ZETA}")).await;

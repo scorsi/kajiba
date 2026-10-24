@@ -109,7 +109,12 @@ async fn message(connection: &mut SqliteConnection, row: Row) -> Result<Repo, sq
     .await?
     .into_iter()
     .map(|(remote_url, credential, enabled)| Mirror {
-        remote_url,
+        // Archived rows may predate config validation; never publish an unsafe remote.
+        remote_url: if kajiba_core::config::validate_mirror_url(&remote_url, "remote_url").is_ok() {
+            remote_url
+        } else {
+            String::new()
+        },
         credential,
         enabled,
     })

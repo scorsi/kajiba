@@ -384,6 +384,29 @@ fn url_host(value: &str, field: &str) -> Result<String, String> {
     Ok(host.to_ascii_lowercase())
 }
 
+/// Mirror remotes are public configuration; authentication belongs in credential files.
+pub fn validate_mirror_url(value: &str, field: &str) -> Result<(), String> {
+    let error = || {
+        format!(
+            "{field}: expected an absolute HTTPS or SSH URL with a host and valid port, without userinfo, query or fragment"
+        )
+    };
+    let uri: Uri = value.parse().map_err(|_| error())?;
+    let authority = uri.authority().ok_or_else(error)?;
+    let host = authority.host();
+    if !matches!(uri.scheme_str(), Some("https" | "ssh"))
+        || host.is_empty()
+        || authority.as_str().contains('@')
+        || uri.query().is_some()
+        || value.contains('#')
+        || (authority.as_str().len() > host.len() && authority.port_u16().is_none())
+        || authority.port_u16() == Some(0)
+    {
+        return Err(error());
+    }
+    validate_host(host, field)
+}
+
 fn validate_host(host: &str, field: &str) -> Result<(), String> {
     let ip = host
         .strip_prefix('[')
@@ -526,6 +549,7 @@ fn validate_repos(config: &mut ServerConfig) -> Result<(), String> {
         let mut remotes = BTreeMap::new();
         for (index, mirror) in repo.mirrors.iter_mut().enumerate() {
             let mirror_field = format!("{field}.mirrors[{index}]");
+            validate_mirror_url(&mirror.remote_url, &format!("{mirror_field}.remote_url"))?;
             mirror.credential = validate_name(&mirror.credential)
                 .ok()
                 .filter(|name| config.mirror.credentials.contains_key(name))
