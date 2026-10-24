@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, fs::File, net::SocketAddr, path::PathBuf, time::Duration};
 
-use axum::http::Uri;
+use http::Uri;
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
 
 use crate::names::validate_name;
@@ -391,23 +391,48 @@ impl ServerConfig {
         normalize(&mut config.users, "users")?;
         normalize(&mut config.runners, "runners")?;
         normalize(&mut config.mirror.credentials, "mirror.credentials")?;
+        // The schema has UNIQUE(fingerprint, usage) and UNIQUE(token_hash): refuse here,
+        // naming both fields, rather than fail at startup.
+        let mut fingerprints = BTreeMap::new();
+        let mut hashes = BTreeMap::new();
         for (name, user) in &mut config.users {
-            for (kind, keys) in [
-                ("ssh_keys", &user.ssh_keys),
-                ("signing_keys", &user.signing_keys),
+            for (kind, usage, keys) in [
+                ("ssh_keys", "auth", &user.ssh_keys),
+                ("signing_keys", "signing", &user.signing_keys),
             ] {
                 for (index, key) in keys.iter().enumerate() {
-                    parse_ssh_key(key)
-                        .map_err(|err| format!("users.{name}.{kind}[{index}]: {err}"))?;
+                    let field = format!("users.{name}.{kind}[{index}]");
+                    let fingerprint = parse_ssh_key(key)
+                        .map_err(|err| format!("{field}: {err}"))?
+                        .fingerprint(Default::default())
+                        .to_string();
+                    let (owner, first) = fingerprints
+                        .entry((usage, fingerprint))
+                        .or_insert_with(|| (name.clone(), field.clone()));
+                    // One user listing a key twice is harmless; two users cannot share it.
+                    if owner != name {
+                        return Err(format!(
+                            "{field}: key fingerprint already declared by {first}"
+                        ));
+                    }
                 }
             }
             normalize(&mut user.tokens, &format!("users.{name}.tokens"))?;
             for (token_name, token) in &user.tokens {
                 let field = format!("users.{name}.tokens.{token_name}");
-                if token.sha256.len() != 64 || !token.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                if token.sha256.len() != 64
+                    || !token
+                        .sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
                 {
                     return Err(format!(
-                        "{field}.sha256: expected 64 hexadecimal characters"
+                        "{field}.sha256: expected 64 lowercase hexadecimal characters"
+                    ));
+                }
+                if let Some(first) = hashes.insert(token.sha256.clone(), field.clone()) {
+                    return Err(format!(
+                        "{field}.sha256: hash already declared by {first}.sha256"
                     ));
                 }
                 if let Some(expires) = &token.expires {

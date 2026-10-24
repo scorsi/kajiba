@@ -41,10 +41,7 @@ impl State {
         crate::state::cleanup(&self.health.state_dir, &mut writer)
             .await
             .unwrap();
-        crate::db::users::reconcile_users(&mut writer, &Default::default())
-            .await
-            .unwrap();
-        crate::db::credentials::reconcile_credentials(&mut writer, &Default::default())
+        crate::db::reconcile(&mut writer, &Default::default())
             .await
             .unwrap();
         let _bus = crate::db::events::EventBus::default();
@@ -158,12 +155,22 @@ async fn reflection_is_disabled_by_default() {
 async fn reflection_lists_health_and_returns_its_descriptor_when_enabled() {
     let state = State::new();
     let mut app = router(state.health.clone(), true, Arc::default()).unwrap();
-    // v1 and v1alpha use the same wire format; support both grpcurl generations.
-    for version in ["v1", "v1alpha"] {
-        let path = format!("/grpc.reflection.{version}.ServerReflection/ServerReflectionInfo");
+    // Only v1 is served; the deprecated v1alpha is not.
+    let response = grpc(
+        &mut app,
+        "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+        ServerReflectionRequest {
+            message_request: Some(MessageRequest::ListServices(String::new())),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(response.headers()["grpc-status"], "12");
+    {
+        let path = "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo";
         let response = grpc(
             &mut app,
-            &path,
+            path,
             ServerReflectionRequest {
                 message_request: Some(MessageRequest::ListServices(String::new())),
                 ..Default::default()
@@ -187,7 +194,7 @@ async fn reflection_lists_health_and_returns_its_descriptor_when_enabled() {
         );
         let response = grpc(
             &mut app,
-            &path,
+            path,
             ServerReflectionRequest {
                 message_request: Some(MessageRequest::FileContainingSymbol(
                     "kajiba.v1.HealthService".into(),
@@ -389,7 +396,8 @@ async fn concurrent_errors_match_request_logs_and_inherit_spans() {
             .find(|line| line["event"] == "request")
             .unwrap();
         assert_eq!(request["method"], "/kajiba.v1.HealthService/Check");
-        assert_eq!(request["status"], "INTERNAL");
+        assert_eq!(request["status"], 200);
+        assert_eq!(request["grpc_code"], "INTERNAL");
         assert_eq!(request["level"], "error");
         assert_eq!(request["err"], "private failure");
         assert!(request["dur_us"].is_u64());
@@ -514,6 +522,8 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
                 let request = recv.recv_timeout(timeout).unwrap();
                 assert_eq!(request["event"], "request");
                 assert_eq!(request["request_id"], started["request_id"]);
+                assert_eq!(request["status"], 200);
+                assert!(request.get("grpc_code").is_none(), "{request}");
                 let deadline = std::time::Instant::now() + timeout;
                 loop {
                     if let Some(status) = child.try_wait().unwrap() {
@@ -548,7 +558,8 @@ async fn tonic_transport_errors_receive_error_info() {
     assert_eq!(details.code, tonic::Code::Unimplemented as i32);
     let info = tonic_types::pb::ErrorInfo::decode(details.details[0].value.as_slice()).unwrap();
     assert_eq!(info.domain, "kajiba");
-    assert_eq!(info.reason, "INTERNAL");
+    // UNIMPLEMENTED has no row in ADR 0020's mapping: no reason is invented.
+    assert_eq!(info.reason, "");
     assert_eq!(info.metadata["request_id"].len(), 26);
 }
 

@@ -131,23 +131,19 @@ async fn main() -> ExitCode {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
-            if let Err(err) = db::users::reconcile_users(&mut writer, &config.users).await {
+            if let Err(err) = db::reconcile(&mut writer, &config.users).await {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
-            if let Err(err) =
-                db::credentials::reconcile_credentials(&mut writer, &config.users).await
-            {
-                log::error("fatal", &err);
-                return ExitCode::FAILURE;
-            }
+            // Request handlers that write (enrollment, push hooks) take a clone of this handle.
+            let writer = db::Writer::new(writer.into());
             let bus = std::sync::Arc::new(db::events::EventBus::default());
             // CI and mirror register here when their handlers are implemented.
             let mut dispatcher = db::events::Dispatcher::default();
             health.started(readers.clone());
             return match tokio::select! {
                 result = transport::serve(&config.http, &config.metrics, health, readers, bus.clone()) => result,
-                () = dispatcher.run(&bus, &mut writer) => unreachable!("dispatcher runs until shutdown"),
+                () = dispatcher.run(&bus, &writer) => unreachable!("dispatcher runs until shutdown"),
             } {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {

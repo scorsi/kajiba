@@ -83,10 +83,6 @@ fn router(
             .register_encoded_file_descriptor_set(kajiba_proto::FILE_DESCRIPTOR_SET)
             .build_v1()?;
         grpc = grpc.add_service(reflection);
-        let reflection = tonic_reflection::server::Builder::configure()
-            .register_encoded_file_descriptor_set(kajiba_proto::FILE_DESCRIPTOR_SET)
-            .build_v1alpha()?;
-        grpc = grpc.add_service(reflection);
     }
     Ok(grpc
         .into_axum_router()

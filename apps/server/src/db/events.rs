@@ -3,16 +3,15 @@ use std::{
     collections::BTreeMap,
     future::Future,
     pin::Pin,
-    sync::Mutex,
     time::{Duration, Instant},
 };
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 
-/// One wake-up consumer drives all handlers against the single writer.
+/// One wake-up consumer drives all handlers against the single shared writer.
 #[derive(Default)]
 pub struct EventBus {
     wake: Notify,
-    failures: Mutex<BTreeMap<&'static str, u64>>,
+    failures: std::sync::Mutex<BTreeMap<&'static str, u64>>,
 }
 
 impl EventBus {
@@ -157,7 +156,7 @@ impl Dispatcher {
     }
 
     /// Drain immediately on startup, before waiting for any commit notification.
-    pub async fn run(&mut self, bus: &EventBus, writer: &mut SqliteConnection) {
+    pub async fn run(&mut self, bus: &EventBus, writer: &Mutex<SqliteConnection>) {
         loop {
             self.drain(bus, writer, &SystemClock).await;
             bus.notified().await;
@@ -168,7 +167,7 @@ impl Dispatcher {
     pub async fn drain(
         &mut self,
         bus: &EventBus,
-        writer: &mut SqliteConnection,
+        writer: &Mutex<SqliteConnection>,
         clock: &impl Clock,
     ) {
         loop {
@@ -180,7 +179,11 @@ impl Dispatcher {
                 {
                     continue;
                 }
-                match bus.dispatch(writer, state.handler.as_mut()).await {
+                // Hold the writer for one event only, so request transactions interleave.
+                let result = bus
+                    .dispatch(&mut *writer.lock().await, state.handler.as_mut())
+                    .await;
+                match result {
                     Ok(handled) => {
                         state.retry_at = None;
                         state.backoff = RETRY_INITIAL;

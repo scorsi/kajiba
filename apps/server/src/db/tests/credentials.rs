@@ -44,7 +44,7 @@ async fn tokens(writer: &mut SqliteConnection) -> Vec<TokenRow> {
 fn config() -> std::collections::BTreeMap<String, kajiba_core::config::UserConfig> {
     declared(&format!(
         "[users.alice]\nssh_keys=['{AUTH} user@example.org']\nsigning_keys=['{SIGNING}']\n[users.alice.tokens.ci]\nsha256='{}'\nscopes=['repo:read','ci:trigger']\nexpires='2028-02-29T01:02:03.456789+01:00'",
-        "aB".repeat(32)
+        "ab".repeat(32)
     ))
 }
 
@@ -200,15 +200,35 @@ async fn uniqueness_refusals_roll_back_deletions_and_insertions() {
     reconcile_credentials(&mut writer, &initial).await.unwrap();
     let original_keys = keys(&mut writer).await;
     let original_tokens = tokens(&mut writer).await;
-    let bad_configs = [
-        declared(&format!(
-            "[users.alice]\nssh_keys=['{SIGNING}']\n[users.bob]\nssh_keys=['{SIGNING}']"
-        )),
-        declared(&format!(
-            "[users.alice]\n[users.alice.tokens.one]\nsha256='{}'\nscopes=[]\n[users.bob.tokens.two]\nsha256='{}'\nscopes=['admin']",
-            "12".repeat(32),
-            "12".repeat(32)
-        )),
+    // Configuration validation refuses both; the schema must still hold without it.
+    use kajiba_core::config::{TokenConfig, UserConfig};
+    let key_user = || UserConfig {
+        ssh_keys: vec![SIGNING.into()],
+        ..Default::default()
+    };
+    let token_user = |name: &str| UserConfig {
+        tokens: [(
+            name.to_owned(),
+            TokenConfig {
+                sha256: "12".repeat(32),
+                scopes: Vec::new(),
+                expires: None,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let bad_configs: [std::collections::BTreeMap<String, UserConfig>; 2] = [
+        [
+            ("alice".to_owned(), key_user()),
+            ("bob".to_owned(), key_user()),
+        ]
+        .into(),
+        [
+            ("alice".to_owned(), token_user("one")),
+            ("bob".to_owned(), token_user("two")),
+        ]
+        .into(),
     ];
     for bad in bad_configs {
         let err = reconcile_credentials(&mut writer, &bad).await.unwrap_err();
@@ -306,6 +326,31 @@ async fn rotates_hashes_and_replaces_key_material_then_reruns_without_writes() {
     let before = changes(&mut writer).await;
     reconcile_credentials(&mut writer, &config).await.unwrap();
     assert_eq!(changes(&mut writer).await, before);
+    readers.close().await;
+    writer.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn users_and_credentials_reconcile_in_one_transaction() {
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    let mut config = config();
+    crate::db::reconcile(&mut writer, &config).await.unwrap();
+    // A runtime key now collides with alice's declared key, after bob would be added.
+    sqlx::query("UPDATE ssh_key SET source = 'runtime' WHERE usage = 'auth'")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    config.insert("bob".into(), Default::default());
+    let err = crate::db::reconcile(&mut writer, &config)
+        .await
+        .unwrap_err();
+    assert!(err.contains("UNIQUE"), "{err}");
+    let names: Vec<String> = sqlx::query_scalar("SELECT name FROM user ORDER BY name")
+        .fetch_all(&mut writer)
+        .await
+        .unwrap();
+    assert_eq!(names, ["alice"]);
     readers.close().await;
     writer.close().await.unwrap();
 }

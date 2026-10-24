@@ -53,17 +53,17 @@ bash nix/checks/proto-generated.sh
 bash nix/checks/proto-generated-test.sh "$PWD/nix/checks/proto-generated.sh"
 ```
 
-`buf-breaking` passes with a skip message: the Nix source has no `.git` and
-no tag baseline is available in the sandbox. In a checkout with release tags,
-run against the last release tag (replace `<tag>` with that tag):
+`buf-breaking` is informational: in `nix flake check` it always passes with a
+skip message, because the Nix sandbox source has no git history (no `.git`, no
+tags) to compare against. Run the comparison manually from a checkout, against
+the last release tag (replace `<tag>` with that tag):
 
 ```sh
 cd proto
 buf breaking --against '.git#tag=<tag>'
 ```
 
-This is informational before 1.0.0; breaking changes are allowed in a minor
-bump (ADRs 0020, 0023). A checkout without release tags skips this comparison.
+Before 1.0.0, breaking changes are allowed in a minor bump (ADRs 0020, 0023).
 
 ## Versioning
 

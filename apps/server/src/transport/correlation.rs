@@ -38,11 +38,6 @@ pub(super) async fn request(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let request_id = request_id().map_err(|err| {
-        kajiba_core::log::error("fatal", &format!("request id: {err}"));
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let span = tracing::info_span!("request", request_id = %request_id);
     let method = match request.uri().path() {
         "/healthz" => "healthz",
         "/readyz" => "readyz",
@@ -51,11 +46,11 @@ pub(super) async fn request(
         "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo" => {
             "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
         }
-        "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo" => {
-            "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo"
-        }
         _ => "other",
     };
+    let started = Instant::now();
+    let request_id = request_id().map_err(|err| request_id_failed(method, started, &err))?;
+    let span = tracing::info_span!("request", request_id = %request_id);
     let kind = Kind::from_content_type(
         request
             .headers()
@@ -71,21 +66,33 @@ pub(super) async fn request(
         request_id,
         method,
         status: "CANCELLED".into(),
+        http_status: None,
         error: None,
-        started: Instant::now(),
+        started,
         finished: false,
+        grpc: !matches!(kind, Kind::Other),
     };
     let mut response = next.run(request).instrument(body.span.clone()).await;
-    let (status, error) = {
+    let details = {
         let _entered = body.span.enter();
         grpc_details(response.headers_mut(), &body.request_id)
-    }
-    .unwrap_or_else(|| (response.status().as_u16().to_string(), None));
+    };
+    body.grpc |= details.is_some();
+    let (status, error) = details.unwrap_or_else(|| (response.status().as_u16().to_string(), None));
     let (parts, inner) = response.into_parts();
+    body.http_status = Some(parts.status.as_u16());
     body.inner = inner;
     body.status = status;
     body.error = error;
     Ok(Response::from_parts(parts, Body::new(body)))
+}
+
+// The process survives a failed request id: log the request, never `fatal`.
+fn request_id_failed(method: &str, started: Instant, err: &std::io::Error) -> StatusCode {
+    let status = StatusCode::INTERNAL_SERVER_ERROR;
+    let dur_us = started.elapsed().as_micros() as u64;
+    tracing::error!(event = "request", method, status = status.as_u16(), dur_us, err = %format!("request id: {err}"));
+    status
 }
 
 // gRPC can finish in either the initial headers or the final trailers.
@@ -105,15 +112,8 @@ fn grpc_details(headers: &mut HeaderMap, request_id: &str) -> Option<(String, Op
                 .then(|| tonic_types::pb::ErrorInfo::decode(detail.value.as_slice()).ok())
                 .flatten()
         })
-        .unwrap_or_else(|| tonic_types::pb::ErrorInfo {
-            reason: match status.code() {
-                tonic::Code::InvalidArgument => "INVALID_FIELD",
-                tonic::Code::Unavailable => "MAINTENANCE",
-                _ => "INTERNAL",
-            }
-            .into(),
-            ..Default::default()
-        });
+        // Only the handler knows the situation behind a code (ADR 0020); never invent a reason.
+        .unwrap_or_default();
     if status.code() == tonic::Code::Internal {
         info.reason = "INTERNAL".into();
         info.metadata.clear();
@@ -171,10 +171,14 @@ struct RequestBody {
     span: Span,
     request_id: String,
     method: &'static str,
+    // gRPC code name or HTTP status: the metrics `code` label.
     status: String,
+    // None when the request is dropped before any response.
+    http_status: Option<u16>,
     error: Option<String>,
     started: Instant,
     finished: bool,
+    grpc: bool,
 }
 
 impl RequestBody {
@@ -184,10 +188,26 @@ impl RequestBody {
             let duration = self.started.elapsed();
             self.metrics.observe(self.kind, &self.status, duration);
             let dur_us = duration.as_micros() as u64;
+            // `status` is the HTTP status; gRPC adds its code name in `grpc_code`.
+            let grpc_code =
+                (self.grpc && self.status.parse::<u16>().is_err()).then_some(self.status.as_str());
             if let Some(err) = &self.error {
-                tracing::error!(event = "request", method = self.method, status = %self.status, dur_us, err);
+                tracing::error!(
+                    event = "request",
+                    method = self.method,
+                    status = self.http_status,
+                    grpc_code,
+                    dur_us,
+                    err
+                );
             } else {
-                tracing::info!(event = "request", method = self.method, status = %self.status, dur_us);
+                tracing::info!(
+                    event = "request",
+                    method = self.method,
+                    status = self.http_status,
+                    grpc_code,
+                    dur_us
+                );
             }
             self.finished = true;
         }
@@ -211,6 +231,7 @@ impl HttpBody for RequestBody {
                     .trailers_mut()
                     .and_then(|trailers| grpc_details(trailers, &self.request_id))
                 {
+                    self.grpc = true;
                     self.status = status;
                     self.error = error;
                 }
@@ -332,9 +353,11 @@ mod tests {
             request_id: "test-id".into(),
             method: "other",
             status: "200".into(),
+            http_status: Some(200),
             error: None,
             started: Instant::now(),
             finished: false,
+            grpc: true,
         };
         assert!(!body.finished);
         let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
@@ -346,7 +369,8 @@ mod tests {
         assert_eq!(status.code(), Code::Unavailable);
         let details = tonic_types::pb::Status::decode(status.details()).unwrap();
         let info = tonic_types::pb::ErrorInfo::decode(details.details[0].value.as_slice()).unwrap();
-        assert_eq!(info.reason, "MAINTENANCE");
+        // No handler ErrorInfo: the reason stays empty rather than guessed.
+        assert_eq!(info.reason, "");
         assert_eq!(info.domain, "kajiba");
         assert_eq!(info.metadata["request_id"], "test-id");
         assert_eq!(body.status, "UNAVAILABLE");
@@ -356,5 +380,42 @@ mod tests {
                 .is_none()
         );
         assert!(body.finished);
+    }
+
+    #[test]
+    fn request_id_failure_logs_the_request_instead_of_fatal() {
+        const CHILD: &str = "KAJIBA_TEST_REQUEST_ID_FAILURE";
+        if std::env::var_os(CHILD).is_some() {
+            kajiba_core::log::init("info").unwrap();
+            let status = request_id_failed(
+                "healthz",
+                Instant::now(),
+                &std::io::Error::other("no entropy"),
+            );
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "transport::correlation::tests::request_id_failure_logs_the_request_instead_of_fatal",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let lines: Vec<serde_json::Value> = String::from_utf8(output.stderr)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["event"], "request");
+        assert_eq!(lines[0]["level"], "error");
+        assert_eq!(lines[0]["method"], "healthz");
+        assert_eq!(lines[0]["status"], 500);
+        assert_eq!(lines[0]["err"], "request id: no entropy");
     }
 }

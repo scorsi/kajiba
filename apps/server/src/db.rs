@@ -13,6 +13,29 @@ pub mod users;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+/// The single writer, shared by the event dispatcher and request handlers. Lock it
+/// only for one transaction: append events in the caller's transaction, then
+/// commit through `EventBus::commit`.
+pub type Writer = std::sync::Arc<tokio::sync::Mutex<SqliteConnection>>;
+
+/// Users and their declared credentials change together or not at all.
+pub async fn reconcile(
+    writer: &mut SqliteConnection,
+    declared: &std::collections::BTreeMap<String, kajiba_core::config::UserConfig>,
+) -> Result<(), String> {
+    let mut transaction = writer
+        .begin()
+        .await
+        .map_err(|err| format!("reconciliation: {err}"))?;
+    // Each step's own transaction nests as a savepoint inside this one.
+    users::reconcile_users(&mut transaction, declared).await?;
+    credentials::reconcile_credentials(&mut transaction, declared).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|err| format!("reconciliation: {err}"))
+}
+
 // The caller must hold the state lock for the lifetime of both handles.
 pub async fn open(path: &Path) -> Result<(SqliteConnection, SqlitePool), String> {
     let options = SqliteConnectOptions::new()
@@ -46,10 +69,26 @@ async fn migrate(
     migrator: &Migrator,
 ) -> Result<(), MigrateError> {
     connection.ensure_migrations_table().await?;
+    if let Some(version) = connection.dirty_version().await? {
+        return Err(MigrateError::Dirty(version));
+    }
     let applied = connection.list_applied_migrations().await?;
-    migrator.run_direct(&mut *connection).await?;
+    for row in &applied {
+        match migrator
+            .iter()
+            .find(|migration| migration.version == row.version)
+        {
+            None => return Err(MigrateError::VersionMissing(row.version)),
+            Some(migration) if migration.checksum != row.checksum => {
+                return Err(MigrateError::VersionMismatch(row.version));
+            }
+            Some(_) => {}
+        }
+    }
+    // Log each migration once it commits, so a later failure leaves earlier ones logged.
     for migration in migrator.iter() {
         if !applied.iter().any(|row| row.version == migration.version) {
+            connection.apply(migration).await?;
             tracing::info!(event = "migration-applied", version = migration.version);
         }
     }
@@ -109,37 +148,13 @@ mod tests {
         .fetch_all(&mut writer)
         .await
         .unwrap();
-        assert_eq!(history.len(), 5);
-        assert_eq!(history[4].0, 5);
-        assert!(history[4].2);
-        assert_eq!(
-            history[4].3,
-            MIGRATOR.iter().nth(4).unwrap().checksum.as_ref()
-        );
-        assert_eq!(history[3].0, 4);
-        assert!(history[3].2);
-        assert_eq!(
-            history[3].3,
-            MIGRATOR.iter().nth(3).unwrap().checksum.as_ref()
-        );
-        assert_eq!(history[2].0, 3);
-        assert!(history[2].2);
-        assert_eq!(
-            history[2].3,
-            MIGRATOR.iter().nth(2).unwrap().checksum.as_ref()
-        );
-        assert_eq!(history[1].0, 2);
-        assert!(history[1].2);
-        assert_eq!(
-            history[1].3,
-            MIGRATOR.iter().nth(1).unwrap().checksum.as_ref()
-        );
-        assert_eq!(history[0].0, 1);
-        assert!(history[0].2);
-        assert_eq!(
-            history[0].3,
-            MIGRATOR.iter().next().unwrap().checksum.as_ref()
-        );
+        assert_eq!(history.len(), MIGRATOR.iter().count());
+        assert_eq!(history.len(), 6);
+        for ((row, migration), version) in history.iter().zip(MIGRATOR.iter()).zip(1..) {
+            assert_eq!(row.0, version);
+            assert!(row.2);
+            assert_eq!(row.3, migration.checksum.as_ref());
+        }
         readers.close().await;
         writer.close().await.unwrap();
 
@@ -279,7 +294,86 @@ mod tests {
                 .fetch_all(&mut writer)
                 .await
                 .unwrap();
-        assert_eq!(versions, [1, 2, 3, 4, 5]);
+        assert_eq!(versions, [1, 2, 3, 4, 5, 6]);
+        readers.close().await;
+        writer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn logs_each_migration_as_it_commits_before_a_later_failure() {
+        static BROKEN: Migrator = sqlx::migrate!("./tests/fixtures/broken-migrations");
+        const CHILD: &str = "KAJIBA_MIGRATION_LOG_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "db::tests::logs_each_migration_as_it_commits_before_a_later_failure",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env_remove("RUST_LOG")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let versions: Vec<i64> = String::from_utf8(output.stderr)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .inspect(|line| assert_eq!(line["event"], "migration-applied"))
+                .map(|line| line["version"].as_i64().unwrap())
+                .collect();
+            assert_eq!(versions, [1, 2, 3, 4, 5, 6]);
+            return;
+        }
+        kajiba_core::log::init("info").unwrap();
+        let dir = TempDir::new();
+        let options = SqliteConnectOptions::new()
+            .filename(dir.database())
+            .create_if_missing(true);
+        let mut writer = SqliteConnection::connect_with(&options).await.unwrap();
+        sqlx::query("CREATE TABLE preserved (value TEXT NOT NULL)")
+            .execute(&mut writer)
+            .await
+            .unwrap();
+        let migrator = Migrator {
+            migrations: MIGRATOR
+                .iter()
+                .chain(BROKEN.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+                .into(),
+            ..BROKEN
+        };
+        assert!(migrate(&mut writer, &migrator).await.is_err());
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&mut writer)
+                .await
+                .unwrap();
+        assert_eq!(versions, [1, 2, 3, 4, 5, 6]);
+        writer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn user_names_must_be_stored_lowercase() {
+        let dir = TempDir::new();
+        let (mut writer, readers) = open(&dir.database()).await.unwrap();
+        let insert = |name: &'static str| {
+            sqlx::query("INSERT INTO user (public_id, name, kind, is_admin, source, created_at) VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAV', ?, 'local', 0, 'config', 0)")
+                .bind(name)
+        };
+        let err = insert("Alice").execute(&mut writer).await.unwrap_err();
+        assert!(err.to_string().contains("CHECK constraint failed"), "{err}");
+        insert("alice").execute(&mut writer).await.unwrap();
+        let err = sqlx::query("UPDATE user SET name = 'ALICE'")
+            .execute(&mut writer)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("CHECK constraint failed"), "{err}");
         readers.close().await;
         writer.close().await.unwrap();
     }

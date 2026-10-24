@@ -165,13 +165,13 @@ fn hashes_scopes_and_expirations_are_validated() {
         "a".repeat(65),
         "g".repeat(64),
         "é".repeat(32),
+        hash.to_ascii_uppercase(),
     ] {
         server_error(
             &SERVER.replace(hash, &value),
             "users.alice.tokens.ci.sha256",
         );
     }
-    assert!(ServerConfig::parse(&SERVER.replace(hash, &hash.to_ascii_uppercase())).is_ok());
     server_error(
         &SERVER.replace("repo:read", "repo:unknown"),
         "users.alice.tokens.ci.scopes",
@@ -492,5 +492,50 @@ fn token_expiry_converts_offsets_leap_days_and_subseconds_to_epoch_millis() {
     for invalid in ["bad", "2028-02-29", "2028-02-29T01:02:03"] {
         token.expires = Some(invalid.into());
         assert!(token.expires_at_millis().is_err(), "{invalid}");
+    }
+}
+
+#[test]
+fn credentials_unique_in_the_schema_are_refused_naming_both_fields() {
+    const KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea";
+    let hash = "ab".repeat(32);
+    for (input, field, first) in [
+        (
+            format!(
+                "[users.alice]\nssh_keys=['{KEY}']\n[users.bob]\nssh_keys=['{KEY} bob@example.org']"
+            ),
+            "users.bob.ssh_keys[0]",
+            "users.alice.ssh_keys[0]",
+        ),
+        (
+            format!("[users.alice]\nsigning_keys=['{KEY}']\n[users.bob]\nsigning_keys=['{KEY}']"),
+            "users.bob.signing_keys[0]",
+            "users.alice.signing_keys[0]",
+        ),
+        (
+            format!(
+                "[users.alice.tokens.one]\nsha256='{hash}'\nscopes=[]\n[users.alice.tokens.two]\nsha256='{hash}'\nscopes=[]"
+            ),
+            "users.alice.tokens.two.sha256",
+            "users.alice.tokens.one.sha256",
+        ),
+        (
+            format!(
+                "[users.alice.tokens.one]\nsha256='{hash}'\nscopes=[]\n[users.bob.tokens.one]\nsha256='{hash}'\nscopes=[]"
+            ),
+            "users.bob.tokens.one.sha256",
+            "users.alice.tokens.one.sha256",
+        ),
+    ] {
+        let error = ServerConfig::parse(&format!("{MINIMAL}{input}")).unwrap_err();
+        assert!(error.contains(field) && error.contains(first), "{error}");
+    }
+    // The same key for authentication and signing, or listed twice by one user, is allowed.
+    for input in [
+        format!("[users.alice]\nssh_keys=['{KEY}']\n[users.bob]\nsigning_keys=['{KEY}']"),
+        format!("[users.alice]\nssh_keys=['{KEY}', '{KEY} again']"),
+    ] {
+        ServerConfig::parse(&format!("{MINIMAL}{input}")).unwrap();
     }
 }

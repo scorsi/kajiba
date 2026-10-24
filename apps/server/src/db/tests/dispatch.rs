@@ -325,7 +325,9 @@ async fn retries_twice_with_rollback_counts_and_failure_logs() {
     });
     dispatcher.register(TestHandler::<true> { fail: false });
     let clock = FakeClock::new();
-    dispatcher.drain(&bus, &mut writer, &clock).await;
+    let writer = tokio::sync::Mutex::new(writer);
+    dispatcher.drain(&bus, &writer, &clock).await;
+    let writer = writer.into_inner();
     assert_eq!(effects(&readers, "ci").await, [first, second]);
     assert_eq!(effects(&readers, "mirror").await, [first, second]);
     assert_eq!(checkpoint(&readers, "ci").await, Some(second));
@@ -360,14 +362,15 @@ async fn restart_dispatches_committed_event_without_notification_and_replay_is_u
     drop(bus);
     readers.close().await;
     writer.close().await.unwrap();
-    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    let (writer, readers) = open(&dir.database()).await.unwrap();
     let bus = EventBus::default();
     let mut dispatcher = Dispatcher::default();
     dispatcher.register(TestHandler::<false> { fail: false });
     let clock = FakeClock::new();
+    let writer = tokio::sync::Mutex::new(writer);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         tokio::select! {
-            () = dispatcher.run(&bus, &mut writer) => panic!("dispatcher stopped"),
+            () = dispatcher.run(&bus, &writer) => panic!("dispatcher stopped"),
             () = async {
                 while checkpoint(&readers, "ci").await != Some(second) {
                     tokio::task::yield_now().await;
@@ -381,10 +384,11 @@ async fn restart_dispatches_committed_event_without_notification_and_replay_is_u
     assert_eq!(checkpoint(&readers, "ci").await, Some(second));
     sqlx::query("UPDATE handler_checkpoint SET last_event_id = ? WHERE handler = 'ci'")
         .bind(first)
-        .execute(&mut writer)
+        .execute(&mut *writer.lock().await)
         .await
         .unwrap();
-    dispatcher.drain(&bus, &mut writer, &clock).await;
+    dispatcher.drain(&bus, &writer, &clock).await;
+    let writer = writer.into_inner();
     assert_eq!(effects(&readers, "ci").await, [first, second]);
     assert_eq!(checkpoint(&readers, "ci").await, Some(second));
     assert_eq!(bus.failure_count("ci"), 0);
@@ -409,7 +413,9 @@ async fn retry_backoff_is_capped() {
         check_mirror: false,
     });
     let clock = FakeClock::new();
-    dispatcher.drain(&bus, &mut writer, &clock).await;
+    let writer = tokio::sync::Mutex::new(writer);
+    dispatcher.drain(&bus, &writer, &clock).await;
+    let writer = writer.into_inner();
     let milliseconds: Vec<_> = clock
         .sleeps
         .borrow()
@@ -519,4 +525,126 @@ async fn metrics_count_each_failed_attempt_once_and_lag_tracks_checkpoints() {
         StatusCode::SERVICE_UNAVAILABLE
     );
     writer.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn request_transactions_share_the_writer_with_a_running_dispatcher() {
+    use crate::db::events::Dispatcher;
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    setup(&mut writer).await;
+    let writer = tokio::sync::Mutex::new(writer);
+    let bus = EventBus::default();
+    let mut dispatcher = Dispatcher::default();
+    dispatcher.register(TestHandler::<false> { fail: false });
+    let id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            () = dispatcher.run(&bus, &writer) => panic!("dispatcher stopped"),
+            id = async {
+                // A request path opens its own caller transaction while the dispatcher runs.
+                let mut connection = writer.lock().await;
+                let mut transaction = connection.begin().await.unwrap();
+                let id = append(&mut transaction, 1).await;
+                bus.commit(transaction).await.unwrap();
+                drop(connection);
+                while checkpoint(&readers, "ci").await != Some(id) {
+                    tokio::task::yield_now().await;
+                }
+                id
+            } => id,
+        }
+    })
+    .await
+    .expect("request transaction must not wait for the dispatcher");
+    assert_eq!(effects(&readers, "ci").await, [id]);
+    readers.close().await;
+    writer.into_inner().close().await.unwrap();
+}
+
+/// Writes its effect, then never finishes: the child dies inside the dispatch transaction.
+struct HangingHandler;
+
+impl Handler for HangingHandler {
+    const NAME: &'static str = "ci";
+
+    async fn apply(
+        &mut self,
+        transaction: &mut SqliteConnection,
+        event: &Event,
+    ) -> Result<(), sqlx::Error> {
+        TestHandler::<false> { fail: false }
+            .apply(transaction, event)
+            .await?;
+        println!("DISPATCHING={}", event.id);
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn sigkill_after_commit_replays_exactly_one_effect_on_restart() {
+    use crate::db::events::Dispatcher;
+    use std::io::BufRead;
+    const CHILD: &str = "KAJIBA_CRASH_TEST_DATABASE";
+    if let Some(path) = std::env::var_os(CHILD) {
+        let (writer, _readers) = open(std::path::Path::new(&path)).await.unwrap();
+        let writer = tokio::sync::Mutex::new(writer);
+        let bus = EventBus::default();
+        let mut dispatcher = Dispatcher::default();
+        dispatcher.register(HangingHandler);
+        tokio::join!(dispatcher.run(&bus, &writer), async {
+            let mut connection = writer.lock().await;
+            let mut transaction = connection.begin().await.unwrap();
+            let id = append(&mut transaction, 1).await;
+            bus.commit(transaction).await.unwrap();
+            println!("COMMITTED={id}");
+        });
+        unreachable!("the parent kills this process");
+    }
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    setup(&mut writer).await;
+    readers.close().await;
+    writer.close().await.unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "db::tests::dispatch::sigkill_after_commit_replays_exactly_one_effect_on_restart",
+            "--nocapture",
+        ])
+        .env(CHILD, dir.database())
+        .env_remove("RUST_LOG")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut committed = None;
+    let mut dispatching = false;
+    for line in std::io::BufReader::new(child.stdout.take().unwrap()).lines() {
+        let line = line.unwrap();
+        if let Some(id) = line.strip_prefix("COMMITTED=") {
+            committed = Some(id.parse::<i64>().unwrap());
+        }
+        if line.starts_with("DISPATCHING=") {
+            dispatching = true;
+            break;
+        }
+    }
+    // Child::kill sends SIGKILL: no destructor, rollback or flush runs in the child.
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let id = committed.expect("child committed an event");
+    assert!(dispatching, "child reached the handler");
+
+    let (writer, readers) = open(&dir.database()).await.unwrap();
+    assert!(effects(&readers, "ci").await.is_empty());
+    assert_eq!(checkpoint(&readers, "ci").await, None);
+    let writer = tokio::sync::Mutex::new(writer);
+    let bus = EventBus::default();
+    let mut dispatcher = Dispatcher::default();
+    dispatcher.register(TestHandler::<false> { fail: false });
+    dispatcher.drain(&bus, &writer, &FakeClock::new()).await;
+    assert_eq!(effects(&readers, "ci").await, [id]);
+    assert_eq!(checkpoint(&readers, "ci").await, Some(id));
+    readers.close().await;
+    writer.into_inner().close().await.unwrap();
 }

@@ -157,7 +157,7 @@
         };
 
         buf-breaking = pkgs.runCommand "buf-breaking" { } ''
-          echo "buf-breaking: skipped (no tag baseline available in the sandbox; see CONTRIBUTING.md). Informational before 1.0.0."
+          echo "buf-breaking: informational; always skipped in the Nix sandbox, whose source has no git history to compare against. Run it manually: see CONTRIBUTING.md."
           touch $out
         '';
       }

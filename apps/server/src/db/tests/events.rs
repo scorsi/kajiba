@@ -276,3 +276,42 @@ async fn pending_foreign_keys_protect_principals_and_cascade_repositories_but_jo
     readers.close().await;
     writer.close().await.unwrap();
 }
+
+#[test]
+fn production_code_never_updates_or_deletes_events() {
+    fn visit(dir: &std::path::Path, sources: &mut Vec<(PathBuf, String)>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                // Tests rewrite journal rows on purpose to probe replay and lag.
+                if path.file_name().unwrap() != "tests" {
+                    visit(&path, sources);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                sources.push((path.clone(), fs::read_to_string(&path).unwrap()));
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sources = vec![(
+        root.join("db.rs"),
+        fs::read_to_string(root.join("db.rs")).unwrap(),
+    )];
+    visit(&root.join("db"), &mut sources);
+    assert!(sources.len() > 3, "{sources:?}");
+    for (path, source) in sources {
+        // Compare SQL keywords case-insensitively across line breaks.
+        let words: Vec<String> = source
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|word| !word.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        for window in words.windows(3) {
+            let refused = matches!(
+                [window[0].as_str(), window[1].as_str(), window[2].as_str()],
+                ["update", "event", _] | ["delete", "from", "event"] | ["replace", "into", "event"]
+            );
+            assert!(!refused, "{}: {window:?}", path.display());
+        }
+    }
+}

@@ -43,8 +43,10 @@ pub fn validate_name(name: &str) -> Result<String, NameError> {
     if name.ends_with(".git") {
         return Err(NameError::GitSuffix);
     }
-    // Every gRPC package (`kajiba.v1`, `kajiba.runner.v1`, …) is a top-level route (0021).
+    // Every gRPC package (`kajiba.v1`, `kajiba.runner.v1`, …) is a top-level route (0021),
+    // as is server reflection under `grpc.reflection.*`.
     if name.starts_with("kajiba.")
+        || name.starts_with("grpc.")
         || matches!(
             name.as_str(),
             "raw" | "healthz" | "readyz" | "auth" | "metrics"
@@ -62,8 +64,19 @@ mod tests {
     #[test]
     fn valid_names() {
         for name in [
-            "alice", "demo", "build-1", "github", "0", "a.b_c-d", "a.", "a_", "a-", "a..b",
+            "alice",
+            "demo",
+            "build-1",
+            "github",
+            "0",
+            "a.b_c-d",
+            "a.",
+            "a_",
+            "a-",
+            "a..b",
             "raw-data",
+            "grpc",
+            "grpc-tools",
         ] {
             assert_eq!(validate_name(name), Ok(name.to_owned()), "{name:?}");
         }
@@ -122,6 +135,8 @@ mod tests {
             "kajiba.runner.v1",
             "kajiba.admin.v1",
             "kajiba.v1.extra",
+            "grpc.reflection.v1",
+            "grpc.health.v1",
             "healthz",
             "readyz",
             "auth",

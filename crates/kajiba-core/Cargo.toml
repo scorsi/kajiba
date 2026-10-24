@@ -7,7 +7,7 @@ license.workspace = true
 [lib]
 
 [dependencies]
-axum.workspace = true
+http.workspace = true
 serde.workspace = true
 ssh-key.workspace = true
 toml.workspace = true
