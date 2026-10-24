@@ -1,6 +1,6 @@
 # J0's only integration test: the module starts kajiba-server and /healthz answers (0015).
 { pkgs, kajibaServerPackage }:
-pkgs.nixosTest {
+pkgs.testers.nixosTest {
   name = "kajiba-healthz";
 
   nodes.forge = {
