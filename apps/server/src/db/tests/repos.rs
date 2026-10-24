@@ -373,6 +373,55 @@ async fn archival_keeps_row_directory_history_and_locks_names() {
 }
 
 #[tokio::test]
+async fn a_failure_after_a_head_change_rolls_back_rows_and_the_next_run_converges() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut state = State::new().await;
+    state.apply(DEMO).await.unwrap();
+    let (demo, _, _) = state.repo("demo").await;
+    let head = state.path(&demo).join("HEAD");
+    // demo's HEAD moves first, then creating `fresh` fails: tmp/ is read-only.
+    let changed = "[repos.demo]\nowner='alice'\ndescription='Demo'\ndefault_branch='dev'\n\
+                   [repos.fresh]\nowner='bob'\ndescription=''\n";
+    let tmp = state.dir.0.join("tmp");
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o500)).unwrap();
+    let error = state.apply(changed).await.unwrap_err();
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(error.contains(&tmp.display().to_string()), "{error}");
+    assert_eq!(
+        state
+            .strings("SELECT config_key || ' ' || default_branch FROM repo")
+            .await,
+        ["demo main"]
+    );
+    assert_eq!(state.repo_dirs(), [format!("{demo}.git")]);
+    assert_eq!(
+        fs::read_to_string(&head).unwrap(),
+        "ref: refs/heads/dev\n",
+        "the file change is not rolled back; the next run converges"
+    );
+    // The same declaration converges: row and HEAD agree.
+    state.apply(changed).await.unwrap();
+    assert_eq!(
+        state
+            .strings("SELECT default_branch FROM repo WHERE config_key = 'demo'")
+            .await,
+        ["dev"]
+    );
+    assert_eq!(fs::read_to_string(&head).unwrap(), "ref: refs/heads/dev\n");
+    assert_eq!(state.repo_dirs().len(), 2);
+    // So does the previous one: the file is compared, not the row's previous value.
+    state.apply(DEMO).await.unwrap();
+    assert_eq!(fs::read_to_string(&head).unwrap(), "ref: refs/heads/main\n");
+    // A HEAD truncated by a crash is repaired by a rerun that writes no row.
+    fs::write(&head, "").unwrap();
+    let before = changes(&mut state.writer).await;
+    state.apply(DEMO).await.unwrap();
+    assert_eq!(changes(&mut state.writer).await, before);
+    assert_eq!(fs::read_to_string(&head).unwrap(), "ref: refs/heads/main\n");
+    state.close().await;
+}
+
+#[tokio::test]
 async fn a_repository_refusal_rolls_back_user_and_credential_changes() {
     let mut state = State::new().await;
     state.apply(DEMO).await.unwrap();

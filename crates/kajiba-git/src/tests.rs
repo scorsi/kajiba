@@ -110,6 +110,46 @@ fn init_bare_puts_head_on_the_default_branch() {
 }
 
 #[test]
+fn set_head_is_idempotent_and_replaces_head_atomically() {
+    let dir = scratch("set-head");
+    let bare = dir.join("repo.git");
+    Gix.init_bare(&bare, "main").unwrap();
+    let head = bare.join("HEAD");
+    let epoch = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+    std::fs::File::options()
+        .write(true)
+        .open(&head)
+        .unwrap()
+        .set_modified(epoch)
+        .unwrap();
+    // Already pointing at the branch: the file is left alone.
+    Gix.set_head(&bare, "main").unwrap();
+    assert_eq!(std::fs::metadata(&head).unwrap().modified().unwrap(), epoch);
+    // A truncated HEAD (crash mid-write) and a planted symlink are both replaced.
+    std::fs::write(&head, "").unwrap();
+    Gix.set_head(&bare, "main").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&head).unwrap(),
+        "ref: refs/heads/main\n"
+    );
+    std::fs::remove_file(&head).unwrap();
+    std::fs::write(dir.join("elsewhere"), "ref: refs/heads/main\n").unwrap();
+    std::os::unix::fs::symlink(dir.join("elsewhere"), &head).unwrap();
+    Gix.set_head(&bare, "trunk").unwrap();
+    assert!(std::fs::symlink_metadata(&head).unwrap().is_file());
+    assert_eq!(
+        std::fs::read_to_string(&head).unwrap(),
+        "ref: refs/heads/trunk\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("elsewhere")).unwrap(),
+        "ref: refs/heads/main\n"
+    );
+    assert!(!bare.join("HEAD.tmp").exists());
+    assert!(Gix.set_head(&dir.join("missing.git"), "main").is_err());
+}
+
+#[test]
 fn refs_match_the_git_binary() {
     let f = fixture("refs");
     let expected = git(

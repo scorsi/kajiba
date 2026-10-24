@@ -15,7 +15,6 @@ struct Row {
     owner: String,
     name: String,
     archived: bool,
-    default_branch: String,
 }
 
 enum Log {
@@ -110,26 +109,23 @@ async fn apply(
         .map_err(sql)?
         .into_iter()
         .collect();
-    let rows: Vec<Row> = sqlx::query_as::<_, (i64, String, String, String, String, bool, String)>(
+    let rows: Vec<Row> = sqlx::query_as::<_, (i64, String, String, String, String, bool)>(
         "SELECT repo.id, repo.public_id, repo.config_key, user.name, repo.name,
-                repo.archived_at IS NOT NULL, repo.default_branch
+                repo.archived_at IS NOT NULL
          FROM repo JOIN user ON user.id = repo.owner_id",
     )
     .fetch_all(&mut *tx)
     .await
     .map_err(sql)?
     .into_iter()
-    .map(
-        |(id, public_id, key, owner, name, archived, default_branch)| Row {
-            id,
-            public_id,
-            key,
-            owner,
-            name,
-            archived,
-            default_branch,
-        },
-    )
+    .map(|(id, public_id, key, owner, name, archived)| Row {
+        id,
+        public_id,
+        key,
+        owner,
+        name,
+        archived,
+    })
     .collect();
     let redirects: Vec<(i64, String)> =
         sqlx::query_as("SELECT repo_id, owner_name || '/' || name FROM repo_redirect")
@@ -211,12 +207,12 @@ async fn apply(
             .execute(&mut *tx)
             .await
             .map_err(sql)?;
-            if row.default_branch != repo.default_branch {
-                let path = state_dir.join(format!("repos/{}.git", row.public_id));
-                store
-                    .set_head(&path, &repo.default_branch)
-                    .map_err(|err| format!("repos.{key}.default_branch: {err}"))?;
-            }
+            // Compare the file itself, not the row's previous value: a HEAD left by an
+            // interrupted or rolled-back run converges here (set_head is idempotent).
+            let path = state_dir.join(format!("repos/{}.git", row.public_id));
+            store
+                .set_head(&path, &repo.default_branch)
+                .map_err(|err| format!("repos.{key}.default_branch: {err}"))?;
             let previous = format!("{}/{}", row.owner, row.name);
             if previous != current {
                 logs.push(Log::Renamed(current.clone(), previous));

@@ -191,10 +191,33 @@ impl GitStore for Gix {
     }
 
     fn set_head(&self, repo: &Path, branch: &str) -> Result<()> {
+        use std::io::Write;
         let head = format!("refs/heads/{branch}");
         kajiba_core::names::validate_ref(&head).map_err(|err| Error::Git(err.to_string()))?;
-        std::fs::write(repo.join("HEAD"), format!("ref: {head}\n"))
-            .map_err(|err| Error::Git(err.to_string()))
+        let io = |err: std::io::Error| Error::Git(format!("{}/HEAD: {err}", repo.display()));
+        let path = repo.join("HEAD");
+        let content = format!("ref: {head}\n");
+        // Idempotent: startup calls this for every declared repository, so a HEAD left
+        // behind by a failed or interrupted run converges without touching the others.
+        let current = std::fs::symlink_metadata(&path).map_err(io)?;
+        if current.is_file() && std::fs::read(&path).map_err(io)? == content.as_bytes() {
+            return Ok(());
+        }
+        // Temp file, fsync, rename over HEAD, fsync the directory: git never sees a
+        // truncated HEAD. `create_new` refuses to write through a planted symlink.
+        let tmp = repo.join("HEAD.tmp");
+        let _ = std::fs::remove_file(&tmp);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(io)?;
+        file.write_all(content.as_bytes()).map_err(io)?;
+        file.sync_all().map_err(io)?;
+        std::fs::rename(&tmp, &path).map_err(io)?;
+        std::fs::File::open(repo)
+            .and_then(|dir| dir.sync_all())
+            .map_err(io)
     }
 
     fn refs(&self, repo: &Path) -> Result<Vec<Ref>> {
