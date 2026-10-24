@@ -1,4 +1,4 @@
-use axum::{Router, http::StatusCode, routing::get};
+use axum::{Router, http::StatusCode, middleware, routing::get};
 use kajiba_core::config::HttpConfig;
 use kajiba_proto::v1::{
     CheckRequest, CheckResponse,
@@ -89,16 +89,39 @@ fn router(health: Health, reflection: bool) -> Result<Router, tonic_reflection::
                     }
                 }
             }),
-        ))
+        )
+        .layer(middleware::from_fn(correlation::request)))
 }
 
 pub async fn serve(config: &HttpConfig, health: Health) -> std::io::Result<()> {
     let app = router(health, config.reflection).map_err(std::io::Error::other)?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
+    serve_listener(listener, app).await
+}
+
+async fn serve_listener(listener: tokio::net::TcpListener, app: Router) -> std::io::Result<()> {
+    let shutdown = shutdown_signal()?;
     tracing::info!(event = "listening", addr = %listener.local_addr()?);
     tracing::info!(event = "ready");
-    axum::serve(listener, app).await
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
 }
+
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            _ = terminate.recv() => {},
+            _ = interrupt.recv() => {},
+        }
+        tracing::info!(event = "stopping");
+    })
+}
+
+mod correlation;
 
 #[cfg(test)]
 mod tests;

@@ -11,6 +11,7 @@ use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
+use tracing_subscriber::registry::LookupSpan;
 
 pub fn filter(level: &str, rust_log: Option<&str>) -> Result<Targets, String> {
     let configured = level
@@ -21,8 +22,14 @@ pub fn filter(level: &str, rust_log: Option<&str>) -> Result<Targets, String> {
 
 pub fn init(level: &str) -> Result<(), String> {
     let rust_log = std::env::var("RUST_LOG").ok();
+    let targets = filter(level, rust_log.as_deref())?;
     tracing_subscriber::registry()
-        .with(JsonLayer.with_filter(filter(level, rust_log.as_deref())?))
+        .with(
+            JsonLayer.with_filter(tracing_subscriber::filter::filter_fn(move |metadata| {
+                // Correlation spans must survive even when info events are filtered out.
+                metadata.is_span() || targets.would_enable(metadata.target(), metadata.level())
+            })),
+        )
         .try_init()
         .map_err(|e| e.to_string())
 }
@@ -33,9 +40,49 @@ pub fn install_panic_hook() {
 
 pub struct JsonLayer;
 
-impl<S: Subscriber> Layer<S> for JsonLayer {
-    fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
-        if let Some(line) = format(event, &ts_now()) {
+#[derive(Default)]
+struct RequestId(Option<String>);
+
+impl Visit for RequestId {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() == "request_id" {
+            self.0 = Some(format!("{value:?}"));
+        }
+    }
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "request_id" {
+            self.0 = Some(value.into());
+        }
+    }
+}
+
+impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for JsonLayer {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::Id,
+        ctx: Context<'_, S>,
+    ) {
+        let mut request_id = RequestId::default();
+        attrs.record(&mut request_id);
+        ctx.span(id).unwrap().extensions_mut().insert(request_id);
+    }
+
+    fn on_record(&self, id: &tracing::Id, values: &tracing::span::Record<'_>, ctx: Context<'_, S>) {
+        let span = ctx.span(id).unwrap();
+        let mut extensions = span.extensions_mut();
+        values.record(extensions.get_mut::<RequestId>().unwrap());
+    }
+
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        let request_id = ctx.event_scope(event).and_then(|mut scope| {
+            scope.find_map(|span| {
+                span.extensions()
+                    .get::<RequestId>()
+                    .and_then(|id| id.0.clone())
+            })
+        });
+        if let Some(line) = format(event, &ts_now(), request_id.as_deref()) {
             write(&mut io::stderr().lock(), &line);
         }
     }
@@ -64,9 +111,12 @@ struct Line<'a> {
     fields: &'a Fields,
 }
 
-fn format(event: &Event<'_>, ts: &str) -> Option<String> {
+fn format(event: &Event<'_>, ts: &str, request_id: Option<&str>) -> Option<String> {
     let mut fields = Fields::default();
     event.record(&mut fields);
+    if let Some(request_id) = request_id {
+        fields.extra.insert("request_id".into(), request_id.into());
+    }
     let level = match *event.metadata().level() {
         Level::ERROR => "error",
         Level::WARN => "warn",
@@ -111,10 +161,23 @@ pub fn error(event: &str, err: &str) {
     if !event_name(event) {
         return;
     }
-    let fields = Fields {
+    let mut fields = Fields {
         err: Some(err.into()),
         ..Fields::default()
     };
+    let request_id = tracing::Span::current()
+        .with_subscriber(|(id, dispatch)| {
+            let registry = dispatch.downcast_ref::<tracing_subscriber::Registry>()?;
+            registry.span(id)?.scope().find_map(|span| {
+                span.extensions()
+                    .get::<RequestId>()
+                    .and_then(|id| id.0.clone())
+            })
+        })
+        .flatten();
+    if let Some(request_id) = request_id {
+        fields.extra.insert("request_id".into(), request_id.into());
+    }
     if let Some(line) = render(&ts_now(), "error", event, &fields) {
         write(&mut io::stderr().lock(), &line);
     }
@@ -213,7 +276,7 @@ mod tests {
     struct Capture(Arc<Mutex<Vec<u8>>>);
     impl<S: Subscriber> Layer<S> for Capture {
         fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
-            if let Some(line) = format(event, &ts_from(0, 0)) {
+            if let Some(line) = format(event, &ts_from(0, 0), None) {
                 write(&mut *self.0.lock().unwrap(), &line);
             }
         }
@@ -403,5 +466,53 @@ mod tests {
         assert_eq!(v["event"], "fatal");
         assert_eq!(v["level"], "error");
         assert!(v["err"].as_str().unwrap().contains("panic with a quote"));
+    }
+}
+
+#[cfg(test)]
+mod correlation_tests {
+    use super::*;
+
+    #[test]
+    fn request_spans_cover_nested_events_records_and_direct_errors() {
+        const CHILD: &str = "KAJIBA_TEST_LOG_SPAN";
+        if std::env::var_os(CHILD).is_some() {
+            init(&std::env::var(CHILD).unwrap()).unwrap();
+            let request = tracing::info_span!("request", request_id = tracing::field::Empty);
+            request.record("request_id", "outer");
+            request.in_scope(|| {
+                let child = tracing::info_span!("handler");
+                child.in_scope(|| {
+                    tracing::info!(event = "handling", request_id = "cannot-override");
+                    error("request-failed", "direct error");
+                });
+                tracing::info_span!("nested-request", request_id = "inner").in_scope(|| {
+                    tracing::info!(event = "handled");
+                });
+            });
+            tracing::info!(event = "stopping");
+            return;
+        }
+        for level in ["info", "error", "off"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "log::correlation_tests::request_spans_cover_nested_events_records_and_direct_errors", "--nocapture"])
+                .env(CHILD, level).env_remove("RUST_LOG").output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let text = String::from_utf8(output.stderr).unwrap();
+            let lines: Vec<Value> = text
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            if level == "info" {
+                assert_eq!(lines.len(), 4, "{text}");
+                assert_eq!(lines[0]["request_id"], "outer");
+                assert_eq!(lines[1]["request_id"], "outer");
+                assert_eq!(lines[2]["request_id"], "inner");
+                assert!(lines[3].get("request_id").is_none());
+            } else {
+                assert_eq!(lines.len(), 1, "{text}");
+                assert_eq!(lines[0]["request_id"], "outer");
+            }
+        }
     }
 }

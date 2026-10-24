@@ -11,6 +11,7 @@ repository = "https://github.com/scorsi/kajiba"
 [workspace.dependencies]
 axum = "0.7"
 clap = { version = "4", features = ["derive"] }
+http-body = "1"
 prost = "0.13"
 serde_json = "1"
 tracing = "0.1"
@@ -19,8 +20,9 @@ serde = { version = "1", features = ["derive"] }
 ssh-key = { version = "0.6.7", default-features = false, features = ["alloc", "ecdsa"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
 toml = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 tonic = "0.12"
+tonic-types = "0.12"
 tonic-build = "0.12"
 tonic-reflection = { version = "0.12", default-features = false, features = ["server"] }
 
