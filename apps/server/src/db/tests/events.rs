@@ -2,7 +2,7 @@ use super::*;
 use crate::db::events::{NewEvent, append_event, events_after};
 use sqlx::Row;
 
-fn event(public_id: &str) -> NewEvent {
+pub(super) fn event(public_id: &str) -> NewEvent {
     NewEvent {
         public_id: public_id.into(),
         kind: "push".into(),
