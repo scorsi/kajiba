@@ -177,6 +177,14 @@
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
           };
+          nixos-server-config = import ./tests/server-config.nix {
+            inherit pkgs testLib;
+            kajibaServerPackage = config.packages.kajiba-server;
+          };
+          nixos-server-observability = import ./tests/server-observability.nix {
+            inherit pkgs testLib;
+            kajibaServerPackage = config.packages.kajiba-server;
+          };
         }
       );
 
