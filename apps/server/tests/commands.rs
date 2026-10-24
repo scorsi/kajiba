@@ -299,7 +299,7 @@ fn serve_refuses_held_state_lock_with_fatal_error() {
 }
 
 #[tokio::test]
-async fn serve_reconciles_declared_users_before_serving() {
+async fn serve_reconciles_declared_users_keys_and_tokens_before_serving() {
     use sqlx::Connection;
     use std::time::{Duration, Instant};
 
@@ -309,7 +309,7 @@ async fn serve_reconciles_declared_users_before_serving() {
     std::fs::write(
         &path,
         format!(
-            "state_dir={:?}\n[http]\npublic_url='https://example.org'\n[users.alice]\nis_admin=true",
+            "state_dir={:?}\n[http]\npublic_url='https://example.org'\n[users.alice]\nis_admin=true\nssh_keys=['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea']\n[users.alice.tokens.ci]\nsha256='abababababababababababababababababababababababababababababababab'\nscopes=['repo:read']",
             dir.to_str().unwrap()
         ),
     )
@@ -329,7 +329,7 @@ async fn serve_reconciles_declared_users_before_serving() {
     while Instant::now() < deadline {
         if let Ok(mut connection) = sqlx::SqliteConnection::connect_with(&options).await {
             let count = sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM user WHERE name = 'alice' AND kind = 'local' AND is_admin = 1 AND source = 'config' AND disabled_at IS NULL",
+                "SELECT count(*) FROM user JOIN ssh_key ON ssh_key.user_id = user.id JOIN api_token ON api_token.user_id = user.id WHERE user.name = 'alice' AND kind = 'local' AND is_admin = 1 AND user.source = 'config' AND disabled_at IS NULL AND ssh_key.source = 'config' AND ssh_key.usage = 'auth' AND api_token.source = 'config' AND api_token.name = 'ci'",
             )
             .fetch_one(&mut connection)
             .await;
@@ -347,5 +347,8 @@ async fn serve_reconciles_declared_users_before_serving() {
     let _ = child.kill();
     child.wait().unwrap();
     std::fs::remove_dir_all(dir).unwrap();
-    assert!(reconciled, "serve did not reconcile the declared user");
+    assert!(
+        reconciled,
+        "serve did not reconcile the declared user, key and token"
+    );
 }

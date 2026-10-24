@@ -6,6 +6,7 @@ use sqlx::{
 use std::{path::Path, time::Duration};
 
 // The journal API is consumed by the dispatcher in J1 task 18.
+pub mod credentials;
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod events;
 pub mod users;
@@ -65,6 +66,7 @@ mod tests {
     };
 
     mod ci;
+    mod credentials;
     mod events;
     mod identity;
     mod repositories;

@@ -133,6 +133,12 @@ async fn main() -> ExitCode {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
+            if let Err(err) =
+                db::credentials::reconcile_credentials(&mut writer, &config.users).await
+            {
+                log::error("fatal", &err);
+                return ExitCode::FAILURE;
+            }
             return match serve().await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {

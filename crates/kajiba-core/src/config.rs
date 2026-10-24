@@ -397,25 +397,8 @@ impl ServerConfig {
                 ("signing_keys", &user.signing_keys),
             ] {
                 for (index, key) in keys.iter().enumerate() {
-                    if !matches!(
-                        key.split_whitespace().next(),
-                        Some(
-                            "ssh-ed25519"
-                                | "sk-ssh-ed25519@openssh.com"
-                                | "ssh-rsa"
-                                | "ecdsa-sha2-nistp256"
-                                | "ecdsa-sha2-nistp384"
-                                | "ecdsa-sha2-nistp521"
-                                | "sk-ecdsa-sha2-nistp256@openssh.com"
-                        )
-                    ) {
-                        return Err(format!(
-                            "users.{name}.{kind}[{index}]: unsupported OpenSSH public key type"
-                        ));
-                    }
-                    ssh_key::PublicKey::from_openssh(key).map_err(|_| {
-                        format!("users.{name}.{kind}[{index}]: invalid OpenSSH public key")
-                    })?;
+                    parse_ssh_key(key)
+                        .map_err(|err| format!("users.{name}.{kind}[{index}]: {err}"))?;
                 }
             }
             normalize(&mut user.tokens, &format!("users.{name}.tokens"))?;
@@ -495,5 +478,75 @@ impl RunnerConfig {
 
     pub fn check_files(&self) -> Result<(), String> {
         open_file(&self.token_file, "token_file")
+    }
+}
+
+/// Parse the same OpenSSH key types accepted by configuration validation.
+pub fn parse_ssh_key(key: &str) -> Result<ssh_key::PublicKey, String> {
+    if !matches!(
+        key.split_whitespace().next(),
+        Some(
+            "ssh-ed25519"
+                | "sk-ssh-ed25519@openssh.com"
+                | "ssh-rsa"
+                | "ecdsa-sha2-nistp256"
+                | "ecdsa-sha2-nistp384"
+                | "ecdsa-sha2-nistp521"
+                | "sk-ecdsa-sha2-nistp256@openssh.com"
+        )
+    ) {
+        return Err("unsupported OpenSSH public key type".into());
+    }
+    ssh_key::PublicKey::from_openssh(key).map_err(|_| "invalid OpenSSH public key".into())
+}
+
+impl TokenConfig {
+    /// Convert the validated RFC 3339 expiry to the schema's UTC milliseconds.
+    pub fn expires_at_millis(&self) -> Result<Option<i64>, String> {
+        let Some(expires) = &self.expires else {
+            return Ok(None);
+        };
+        let date = expires
+            .parse::<toml::value::Datetime>()
+            .map_err(|_| "invalid token expiry")?;
+        let day = date.date.ok_or("missing token expiry date")?;
+        let time = date.time.ok_or("missing token expiry time")?;
+        let offset = match date.offset.ok_or("missing token expiry offset")? {
+            toml::value::Offset::Z => 0,
+            toml::value::Offset::Custom { minutes } => i64::from(minutes) * 60,
+        };
+        let year = i64::from(day.year);
+        let leap = |y: i64| y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let days_before_year = |y: i64| {
+            let y = y - 1;
+            365 * y + y.div_euclid(4) - y.div_euclid(100) + y.div_euclid(400)
+        };
+        let months = [
+            31,
+            if leap(year) { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        let days = days_before_year(year) - days_before_year(1970)
+            + months[..usize::from(day.month - 1)].iter().sum::<i64>()
+            + i64::from(day.day)
+            - 1;
+        Ok(Some(
+            (days * 86400
+                + i64::from(time.hour) * 3600
+                + i64::from(time.minute) * 60
+                + i64::from(time.second)
+                - offset)
+                * 1000
+                + i64::from(time.nanosecond / 1_000_000),
+        ))
     }
 }

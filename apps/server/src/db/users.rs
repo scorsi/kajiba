@@ -32,18 +32,7 @@ pub async fn reconcile_users(
                 .execute(&mut *tx)
                 .await?;
             } else {
-                let random: Vec<u8> = sqlx::query_scalar("SELECT randomblob(10)")
-                    .fetch_one(&mut *tx)
-                    .await?;
-                let mut bytes = [0_u8; 16];
-                bytes[6..].copy_from_slice(&random);
-                let value = (now << 80) | u128::from_be_bytes(bytes);
-                let public_id: String = (0..26)
-                    .rev()
-                    .map(|shift| {
-                        b"0123456789ABCDEFGHJKMNPQRSTVWXYZ"[((value >> (shift * 5)) & 31) as usize] as char
-                    })
-                    .collect();
+                let public_id = new_public_id(&mut tx, now).await?;
                 sqlx::query(
                     "INSERT INTO user (public_id, name, kind, is_admin, source, created_at)
                      VALUES (?, ?, 'local', ?, 'config', ?)",
@@ -81,4 +70,23 @@ pub async fn reconcile_users(
     }
     .await;
     result.map_err(|err: sqlx::Error| format!("user reconciliation: {err}"))
+}
+
+pub(super) async fn new_public_id(
+    writer: &mut SqliteConnection,
+    now: u128,
+) -> Result<String, sqlx::Error> {
+    let random: Vec<u8> = sqlx::query_scalar("SELECT randomblob(10)")
+        .fetch_one(writer)
+        .await?;
+    let mut bytes = [0_u8; 16];
+    bytes[6..].copy_from_slice(&random);
+    let value = (now << 80) | u128::from_be_bytes(bytes);
+    let public_id: String = (0..26)
+        .rev()
+        .map(|shift| {
+            b"0123456789ABCDEFGHJKMNPQRSTVWXYZ"[((value >> (shift * 5)) & 31) as usize] as char
+        })
+        .collect();
+    Ok(public_id)
 }

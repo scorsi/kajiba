@@ -3,7 +3,7 @@ use crate::db::users::reconcile_users;
 use kajiba_core::config::{ServerConfig, UserConfig};
 use std::collections::BTreeMap;
 
-fn declared(input: &str) -> BTreeMap<String, UserConfig> {
+pub(super) fn declared(input: &str) -> BTreeMap<String, UserConfig> {
     ServerConfig::parse(&format!(
         "[http]\npublic_url='https://example.org'\n{input}"
     ))
@@ -18,7 +18,7 @@ async fn users(writer: &mut SqliteConnection) -> Vec<UserRow> {
         .fetch_all(writer).await.unwrap()
 }
 
-async fn changes(writer: &mut SqliteConnection) -> i64 {
+pub(super) async fn changes(writer: &mut SqliteConnection) -> i64 {
     sqlx::query_scalar("SELECT total_changes()")
         .fetch_one(writer)
         .await

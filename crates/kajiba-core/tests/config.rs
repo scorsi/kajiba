@@ -462,3 +462,35 @@ fn log_levels_validate_target_directives_for_both_components() {
         assert!(error.contains("log.level"), "{error}");
     }
 }
+
+#[test]
+fn token_expiry_converts_offsets_leap_days_and_subseconds_to_epoch_millis() {
+    use kajiba_core::config::TokenConfig;
+    let mut token = TokenConfig {
+        sha256: "00".repeat(32),
+        scopes: vec![],
+        expires: None,
+    };
+    assert_eq!(token.expires_at_millis().unwrap(), None);
+    for (expires, expected) in [
+        ("1970-01-01T00:00:00Z", 0),
+        ("1969-12-31T23:59:59.999999999Z", -1),
+        ("1970-01-01t01:00:00+01:00", 0),
+        ("1969-12-31T23:00:00-01:00", 0),
+        ("2000-02-29T00:00:00Z", 951_782_400_000),
+        ("1900-03-01T00:00:00Z", -2_203_891_200_000),
+        ("2100-03-01T00:00:00Z", 4_107_542_400_000),
+        ("2028-02-29T01:02:03.456789+01:00", 1_835_395_323_456),
+    ] {
+        token.expires = Some(expires.into());
+        assert_eq!(
+            token.expires_at_millis().unwrap(),
+            Some(expected),
+            "{expires}"
+        );
+    }
+    for invalid in ["bad", "2028-02-29", "2028-02-29T01:02:03"] {
+        token.expires = Some(invalid.into());
+        assert!(token.expires_at_millis().is_err(), "{invalid}");
+    }
+}
