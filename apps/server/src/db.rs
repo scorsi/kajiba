@@ -39,6 +39,32 @@ pub async fn reconcile(
         .map_err(|err| format!("reconciliation: {err}"))
 }
 
+/// ADR 0026: users, credentials and repositories are reconciled in one transaction;
+/// a refusal anywhere leaves nothing committed.
+pub async fn reconcile_declared(
+    writer: &mut SqliteConnection,
+    config: &kajiba_core::config::ServerConfig,
+    store: &impl kajiba_git::GitStore,
+) -> Result<(), String> {
+    let mut transaction = writer
+        .begin()
+        .await
+        .map_err(|err| format!("reconciliation: {err}"))?;
+    reconcile(&mut transaction, &config.users).await?;
+    let applied =
+        repos::reconcile_repos(&mut transaction, &config.state_dir, store, &config.repos).await?;
+    match transaction.commit().await {
+        Ok(()) => {
+            applied.committed();
+            Ok(())
+        }
+        Err(err) => {
+            applied.abandoned();
+            Err(format!("reconciliation: {err}"))
+        }
+    }
+}
+
 // The caller must hold the state lock for the lifetime of both handles.
 pub async fn open(path: &Path) -> Result<(SqliteConnection, SqlitePool), String> {
     let options = SqliteConnectOptions::new()

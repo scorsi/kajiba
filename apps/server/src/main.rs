@@ -130,18 +130,7 @@ async fn main() -> ExitCode {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
-            if let Err(err) = db::reconcile(&mut writer, &config.users).await {
-                log::error("fatal", &err);
-                return ExitCode::FAILURE;
-            }
-            if let Err(err) = db::repos::reconcile_repos(
-                &mut writer,
-                &config.state_dir,
-                &kajiba_git::Gix,
-                &config.repos,
-            )
-            .await
-            {
+            if let Err(err) = db::reconcile_declared(&mut writer, &config, &kajiba_git::Gix).await {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }

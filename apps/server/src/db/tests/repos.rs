@@ -36,7 +36,9 @@ impl State {
     pub(super) async fn apply(&mut self, repos: &str) -> Result<(), String> {
         let config = config(repos);
         reconcile(&mut self.writer, &config.users).await.unwrap();
-        reconcile_repos(&mut self.writer, &self.dir.0, &Gix, &config.repos).await
+        reconcile_repos(&mut self.writer, &self.dir.0, &Gix, &config.repos)
+            .await
+            .map(|applied| applied.committed())
     }
 
     pub(super) async fn repo(&mut self, key: &str) -> (String, String, Option<i64>) {
@@ -367,5 +369,44 @@ async fn archival_keeps_row_directory_history_and_locks_names() {
         ["cancelled", "succeeded"]
     );
     assert_eq!(state.repo_dirs(), [format!("{public_id}.git")]);
+    state.close().await;
+}
+
+#[tokio::test]
+async fn a_repository_refusal_rolls_back_user_and_credential_changes() {
+    let mut state = State::new().await;
+    state.apply(DEMO).await.unwrap();
+    state.apply("").await.unwrap();
+    // carol is new, but repos.copy takes the archived repository's name.
+    let mut config =
+        config("[users.carol]\n[repos.copy]\nowner='alice'\nname='demo'\ndescription=''\n");
+    config.state_dir = state.dir.0.clone();
+    let error = crate::db::reconcile_declared(&mut state.writer, &config, &Gix)
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("held by archived repository repos.demo"),
+        "{error}"
+    );
+    assert_eq!(
+        state.strings("SELECT name FROM user ORDER BY name").await,
+        ["alice", "bob"]
+    );
+    assert_eq!(state.repo_dirs().len(), 1);
+
+    // Accepted, the same pass commits users and repositories together.
+    config.repos.clear();
+    config.repos.insert(
+        "demo".into(),
+        self::config(DEMO).repos.remove("demo").unwrap(),
+    );
+    crate::db::reconcile_declared(&mut state.writer, &config, &Gix)
+        .await
+        .unwrap();
+    assert_eq!(state.repo("demo").await.2, None);
+    assert_eq!(
+        state.strings("SELECT name FROM user ORDER BY name").await,
+        ["alice", "bob", "carol"]
+    );
     state.close().await;
 }

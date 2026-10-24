@@ -25,6 +25,38 @@ enum Log {
     Unarchived(String),
 }
 
+/// Repository changes applied in the caller's transaction: log them once it commits,
+/// or remove the directories created for its rows if it does not.
+#[must_use]
+pub struct Applied {
+    created: Vec<PathBuf>,
+    logs: Vec<Log>,
+}
+
+impl Applied {
+    pub fn committed(self) {
+        for log in self.logs {
+            match log {
+                Log::Created(repo) => tracing::info!(event = "repo-created", repo),
+                Log::Renamed(repo, from) => tracing::info!(event = "repo-renamed", repo, from),
+                Log::Archived(repo) => tracing::warn!(
+                    event = "repo-archived",
+                    repo,
+                    "removed from the configuration"
+                ),
+                Log::Unarchived(repo) => tracing::info!(event = "repo-unarchived", repo),
+            }
+        }
+    }
+
+    pub fn abandoned(self) {
+        // Directories of rows that were never committed: remove them, they hold nothing.
+        for path in self.created {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
 /// ADR 0026: make `repo`, `repo_redirect`, `repo_permission` and the declared
 /// `mirror` columns equal the configuration, matching rows by key only. Run after
 /// user reconciliation, under the state lock; a refusal writes nothing.
@@ -33,43 +65,32 @@ pub async fn reconcile_repos(
     state_dir: &Path,
     store: &impl GitStore,
     declared: &BTreeMap<String, RepoConfig>,
-) -> Result<(), String> {
+) -> Result<Applied, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| format!("repository reconciliation: {err}"))?
         .as_millis() as i64;
-    let mut created = Vec::new();
-    let mut logs = Vec::new();
+    let mut applied = Applied {
+        created: Vec::new(),
+        logs: Vec::new(),
+    };
     let result = apply(
         writer,
         state_dir,
         store,
         declared,
         now,
-        &mut created,
-        &mut logs,
+        &mut applied.created,
+        &mut applied.logs,
     )
     .await;
-    if let Err(err) = result {
-        // Directories of rows that were never committed: remove them, they hold nothing.
-        for path in created {
-            let _ = std::fs::remove_dir_all(path);
-        }
-        return Err(format!("repository reconciliation: {err}"));
-    }
-    for log in logs {
-        match log {
-            Log::Created(repo) => tracing::info!(event = "repo-created", repo),
-            Log::Renamed(repo, from) => tracing::info!(event = "repo-renamed", repo, from),
-            Log::Archived(repo) => tracing::warn!(
-                event = "repo-archived",
-                repo,
-                "removed from the configuration"
-            ),
-            Log::Unarchived(repo) => tracing::info!(event = "repo-unarchived", repo),
+    match result {
+        Ok(()) => Ok(applied),
+        Err(err) => {
+            applied.abandoned();
+            Err(format!("repository reconciliation: {err}"))
         }
     }
-    Ok(())
 }
 
 async fn apply(
