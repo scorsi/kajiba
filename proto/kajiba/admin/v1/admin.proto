@@ -10,6 +10,9 @@ service AdminService {
   // Map repository public ids (directory names under repos/) to names, archived
   // repositories included and marked (0012, 0026). Ordered by <owner>/<name>.
   rpc ListRepos(ListReposRequest) returns (ListReposResponse);
+  // Import the branches and tags of a path, bundle or URL into a declared, empty
+  // repository; the refs become `push` events by `system` (0003, 0026).
+  rpc Import(ImportRequest) returns (ImportResponse);
 }
 
 message EnrollRequest {
@@ -35,4 +38,16 @@ message Repo {
   string owner = 2;
   string name = 3;
   bool archived = 4;
+}
+
+message ImportRequest {
+  // <owner>/<name>
+  string repo = 1;
+  // An absolute path to a bare repository or a bundle, or a URL.
+  string source = 2;
+}
+
+message ImportResponse {
+  // Number of imported refs.
+  uint32 refs = 1;
 }

@@ -321,7 +321,7 @@ fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
     })
 }
 
-mod correlation;
+pub mod correlation;
 pub mod cursor;
 pub mod local;
 

@@ -34,6 +34,9 @@ pub(in crate::transport) async fn admin(dir: &Path, users: &str) -> Admin {
         writer: crate::db::Writer::new(writer.into()),
         public_url: PUBLIC_URL.into(),
         enrollment_ttl: Duration::from_secs(15 * 60),
+        gate: Arc::default(),
+        bus: Arc::default(),
+        state_dir: dir.into(),
     }
 }
 
@@ -313,7 +316,7 @@ async fn list_repos_maps_ids_to_names_by_pages_and_marks_archived() {
             ("00000000000000000000000001", "bob/zeta".into(), false),
         ]
     );
-    let mut client = client(&dir.socket()).await.unwrap();
+    let mut client = client(&dir.socket(), None).await.unwrap();
     let mut page_token = String::new();
     let mut paged = Vec::new();
     loop {

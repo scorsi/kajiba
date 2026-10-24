@@ -33,15 +33,21 @@ fn request_id() -> std::io::Result<String> {
         .collect())
 }
 
+/// The request id, for handlers that record it (a correlation id, 0022).
+#[derive(Clone)]
+pub struct RequestId(pub String);
+
 pub(super) async fn request(
     State(metrics): State<Arc<Registry>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let method = match request.uri().path() {
         "/healthz" => "healthz",
         "/readyz" => "readyz",
         "/kajiba.admin.v1.AdminService/Enroll" => "/kajiba.admin.v1.AdminService/Enroll",
+        "/kajiba.admin.v1.AdminService/ListRepos" => "/kajiba.admin.v1.AdminService/ListRepos",
+        "/kajiba.admin.v1.AdminService/Import" => "/kajiba.admin.v1.AdminService/Import",
         "/kajiba.v1.HealthService/Check" => "/kajiba.v1.HealthService/Check",
         "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo" => {
             "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
@@ -51,6 +57,9 @@ pub(super) async fn request(
     let started = Instant::now();
     let request_id = request_id().map_err(|err| request_id_failed(method, started, &err))?;
     let span = tracing::info_span!("request", request_id = %request_id);
+    request
+        .extensions_mut()
+        .insert(RequestId(request_id.clone()));
     let kind = Kind::from_content_type(
         request
             .headers()

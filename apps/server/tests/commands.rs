@@ -46,11 +46,7 @@ fn usage_errors_exit_two() {
 
 #[test]
 fn placeholders_fail_with_distinct_exit_code_and_clear_error() {
-    for args in [
-        vec!["admin", "import", "alice/demo", "demo.bundle"],
-        vec!["hook", "pre-receive"],
-        vec!["hook", "post-receive"],
-    ] {
+    for args in [vec!["hook", "pre-receive"], vec!["hook", "post-receive"]] {
         let output = run(&args);
         assert_eq!(output.status.code(), Some(3), "{args:?}: {output:?}");
         assert!(output.stdout.is_empty(), "{args:?}: {output:?}");

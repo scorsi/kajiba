@@ -10,8 +10,6 @@ pub mod enrollment;
 // Production handlers follow in later milestones.
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod events;
-// The gate's callers (import, then hooks) follow in later tasks.
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod pushes;
 pub mod repos;
 pub mod users;
@@ -115,6 +113,7 @@ mod tests {
     mod enrollment;
     mod events;
     mod identity;
+    mod import;
     mod pushes;
     mod repos;
     mod repositories;

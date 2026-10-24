@@ -3,6 +3,7 @@ use kajiba_core::{config::ServerConfig, log};
 use std::{path::PathBuf, process::ExitCode};
 
 mod db;
+mod import;
 mod metrics;
 mod state;
 mod transport;
@@ -58,7 +59,7 @@ enum ConfigCommand {
 enum AdminCommand {
     /// Revoke a user's passkeys, sessions and runtime PATs, then print an enrollment link.
     Enroll { user: String },
-    /// Import a repository from a path, bundle or URL (not implemented yet).
+    /// Import the branches and tags of a path, bundle or URL into a declared, empty repository.
     Import { repo: String, source: String },
     /// Administer repositories (not implemented yet).
     Repo {
@@ -161,6 +162,9 @@ async fn main() -> ExitCode {
                 writer: writer.clone(),
                 public_url: config.http.public_url.clone(),
                 enrollment_ttl: config.auth.enrollment_ttl,
+                gate: gate.clone(),
+                bus: bus.clone(),
+                state_dir: config.state_dir.clone(),
             };
             health.started(readers.clone());
             return match tokio::select! {
@@ -191,7 +195,14 @@ async fn main() -> ExitCode {
                 return admin_enroll(std::path::Path::new(transport::local::SOCKET_PATH), user)
                     .await;
             }
-            AdminCommand::Import { .. } => "admin import",
+            AdminCommand::Import { repo, source } => {
+                return admin_import(
+                    std::path::Path::new(transport::local::SOCKET_PATH),
+                    repo,
+                    source,
+                )
+                .await;
+            }
             AdminCommand::Repo {
                 command: RepoCommand::List,
             } => {
@@ -220,6 +231,25 @@ async fn admin_enroll(path: &std::path::Path, user: String) -> ExitCode {
                 None => err.to_string(),
             };
             log::error("fatal", &format!("admin enroll: {message}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn admin_import(path: &std::path::Path, repo: String, source: String) -> ExitCode {
+    // The server resolves paths from its own working directory: pass them absolute.
+    let source = match std::fs::canonicalize(&source) {
+        Ok(absolute) => absolute.to_string_lossy().into_owned(),
+        Err(_) => source,
+    };
+    match transport::local::import(path, repo.clone(), source).await {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(err) => {
+            let message = match err.downcast_ref::<tonic::Status>() {
+                Some(status) => status.message().to_owned(),
+                None => err.to_string(),
+            };
+            log::error("fatal", &format!("admin import {repo}: {message}"));
             ExitCode::FAILURE
         }
     }

@@ -3,7 +3,8 @@ use crate::metrics::Registry;
 use axum::middleware;
 use hyper_util::rt::TokioIo;
 use kajiba_proto::admin::v1::{
-    EnrollRequest, EnrollResponse, ListReposRequest, ListReposResponse, Repo,
+    EnrollRequest, EnrollResponse, ImportRequest, ImportResponse, ListReposRequest,
+    ListReposResponse, Repo,
     admin_service_client::AdminServiceClient,
     admin_service_server::{AdminService, AdminServiceServer},
 };
@@ -53,6 +54,9 @@ pub struct Admin {
     pub writer: crate::db::Writer,
     pub public_url: String,
     pub enrollment_ttl: Duration,
+    pub gate: Arc<crate::db::pushes::Gate>,
+    pub bus: Arc<crate::db::events::EventBus>,
+    pub state_dir: PathBuf,
 }
 
 fn refused(code: tonic::Code, reason: &str, message: String) -> Status {
@@ -157,6 +161,52 @@ impl AdminService for Admin {
                 .collect(),
             next_page_token,
         }))
+    }
+
+    async fn import(
+        &self,
+        request: Request<ImportRequest>,
+    ) -> Result<Response<ImportResponse>, Status> {
+        use crate::import::Error;
+        let correlation_id = request
+            .extensions()
+            .get::<correlation::RequestId>()
+            .map(|id| id.0.clone())
+            .unwrap_or_default();
+        let ImportRequest { repo, source } = request.into_inner();
+        let refs = crate::import::import(
+            &self.writer,
+            &self.gate,
+            &self.bus,
+            &self.state_dir,
+            &repo,
+            &source,
+            &correlation_id,
+        )
+        .await
+        .map_err(|err| match err {
+            // The repository argument is never echoed (ADR 0022); the CLI shows it.
+            Error::NotFound => refused(
+                tonic::Code::NotFound,
+                "REPO_NOT_FOUND",
+                "no declared repository by this name".into(),
+            ),
+            Error::NotEmpty(message) => {
+                refused(tonic::Code::FailedPrecondition, "INVALID_STATE", message)
+            }
+            Error::NoDefaultBranch(head) => refused(
+                tonic::Code::FailedPrecondition,
+                "INVALID_STATE",
+                format!("the source has no {head}"),
+            ),
+            Error::Source(message) => refused(
+                tonic::Code::FailedPrecondition,
+                "INVALID_STATE",
+                format!("source: {message}"),
+            ),
+            Error::Internal(message) => Status::internal(format!("import: {message}")),
+        })?;
+        Ok(Response::new(ImportResponse { refs: refs as u32 }))
     }
 }
 
@@ -304,17 +354,21 @@ impl Service<axum::http::Uri> for Connector {
 
 async fn client(
     path: &Path,
+    timeout: Option<Duration>,
 ) -> Result<AdminServiceClient<tonic::transport::Channel>, Box<dyn std::error::Error>> {
-    let channel = tonic::transport::Endpoint::from_static("http://localhost")
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(5))
+    let mut endpoint = tonic::transport::Endpoint::from_static("http://localhost")
+        .connect_timeout(Duration::from_secs(5));
+    if let Some(timeout) = timeout {
+        endpoint = endpoint.timeout(timeout);
+    }
+    let channel = endpoint
         .connect_with_connector(Connector(path.into()))
         .await?;
     Ok(AdminServiceClient::new(channel))
 }
 
 pub async fn enroll(path: &Path, user: String) -> Result<String, Box<dyn std::error::Error>> {
-    Ok(client(path)
+    Ok(client(path, Some(Duration::from_secs(5)))
         .await?
         .enroll(EnrollRequest { user })
         .await?
@@ -322,9 +376,23 @@ pub async fn enroll(path: &Path, user: String) -> Result<String, Box<dyn std::er
         .url)
 }
 
+/// No request timeout: fetching a large repository takes as long as it takes.
+pub async fn import(
+    path: &Path,
+    repo: String,
+    source: String,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    Ok(client(path, None)
+        .await?
+        .import(ImportRequest { repo, source })
+        .await?
+        .into_inner()
+        .refs)
+}
+
 /// Every page, in name order.
 pub async fn list_repos(path: &Path) -> Result<Vec<Repo>, Box<dyn std::error::Error>> {
-    let mut client = client(path).await?;
+    let mut client = client(path, Some(Duration::from_secs(5))).await?;
     let mut repos = Vec::new();
     let mut page_token = String::new();
     loop {

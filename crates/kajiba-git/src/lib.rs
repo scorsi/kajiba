@@ -112,6 +112,46 @@ pub trait GitStore {
     /// `git <service> <options> <repo>`, to be spawned by the transport (SSH, HTTP
     /// with `--stateless-rpc`).
     fn transport(&self, service: Service, repo: &Path, options: &[&str]) -> Command;
+    /// The branches and tags (`refs/heads/*`, `refs/tags/*`) of a path, bundle or
+    /// URL, sorted by name; blocking.
+    fn remote_refs(&self, source: &str) -> Result<Vec<Ref>>;
+    /// Fetches exactly these ids into these refs of `repo`, all or none
+    /// (`git fetch --atomic`, no tag following); blocking.
+    fn fetch(&self, repo: &Path, source: &str, refs: &[Ref]) -> Result<()>;
+}
+
+/// The git binary without system or user configuration, never prompting.
+fn git() -> Command {
+    let mut command = Command::new("git");
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command
+}
+
+fn run(mut command: Command, stdin: &str) -> Result<String> {
+    use std::io::Write;
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|err| Error::Git(format!("git: {err}")))?;
+    // Writing can fail if git exits early; its status reports why.
+    let _ = child
+        .stdin
+        .take()
+        .map(|mut input| input.write_all(stdin.as_bytes()));
+    let output = child
+        .wait_with_output()
+        .map_err(|err| Error::Git(format!("git: {err}")))?;
+    if !output.status.success() {
+        return Err(Error::Git(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|err| Error::Git(err.to_string()))
 }
 
 /// The gix + `git` binary implementation.
@@ -328,6 +368,46 @@ impl GitStore for Gix {
             .args(options)
             .arg(repo);
         command
+    }
+
+    fn remote_refs(&self, source: &str) -> Result<Vec<Ref>> {
+        let mut command = git();
+        command.args(["ls-remote", "--refs", "--", source]);
+        let mut refs = Vec::new();
+        for line in run(command, "")?.lines() {
+            let (target, name) = line
+                .split_once('\t')
+                .ok_or_else(|| Error::Git(format!("unexpected ls-remote line: {line}")))?;
+            if name.starts_with("refs/heads/") || name.starts_with("refs/tags/") {
+                kajiba_core::names::validate_ref(name)
+                    .map_err(|err| Error::Git(format!("{name}: {err}")))?;
+                refs.push(Ref {
+                    name: name.to_owned(),
+                    target: target.to_owned(),
+                });
+            }
+        }
+        refs.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(refs)
+    }
+
+    fn fetch(&self, repo: &Path, source: &str, refs: &[Ref]) -> Result<()> {
+        let mut command = git();
+        command.arg("--git-dir").arg(repo).args([
+            "fetch",
+            "--atomic",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--quiet",
+            "--stdin",
+            "--",
+            source,
+        ]);
+        let refspecs: String = refs
+            .iter()
+            .map(|r| format!("{}:{}\n", r.target, r.name))
+            .collect();
+        run(command, &refspecs).map(drop)
     }
 }
 

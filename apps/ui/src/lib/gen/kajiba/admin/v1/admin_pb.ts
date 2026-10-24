@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file kajiba/admin/v1/admin.proto.
  */
 export const file_kajiba_admin_v1_admin: GenFile = /*@__PURE__*/
-  fileDesc("ChtrYWppYmEvYWRtaW4vdjEvYWRtaW4ucHJvdG8SD2thamliYS5hZG1pbi52MSIdCg1FbnJvbGxSZXF1ZXN0EgwKBHVzZXIYASABKAkiHQoORW5yb2xsUmVzcG9uc2USCwoDdXJsGAEgASgJIjkKEExpc3RSZXBvc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiUgoRTGlzdFJlcG9zUmVzcG9uc2USJAoFcmVwb3MYASADKAsyFS5rYWppYmEuYWRtaW4udjEuUmVwbxIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiSAoEUmVwbxIRCglwdWJsaWNfaWQYASABKAkSDQoFb3duZXIYAiABKAkSDAoEbmFtZRgDIAEoCRIQCghhcmNoaXZlZBgEIAEoCDKtAQoMQWRtaW5TZXJ2aWNlEkkKBkVucm9sbBIeLmthamliYS5hZG1pbi52MS5FbnJvbGxSZXF1ZXN0Gh8ua2FqaWJhLmFkbWluLnYxLkVucm9sbFJlc3BvbnNlElIKCUxpc3RSZXBvcxIhLmthamliYS5hZG1pbi52MS5MaXN0UmVwb3NSZXF1ZXN0GiIua2FqaWJhLmFkbWluLnYxLkxpc3RSZXBvc1Jlc3BvbnNlYgZwcm90bzM");
+  fileDesc("ChtrYWppYmEvYWRtaW4vdjEvYWRtaW4ucHJvdG8SD2thamliYS5hZG1pbi52MSIdCg1FbnJvbGxSZXF1ZXN0EgwKBHVzZXIYASABKAkiHQoORW5yb2xsUmVzcG9uc2USCwoDdXJsGAEgASgJIjkKEExpc3RSZXBvc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiUgoRTGlzdFJlcG9zUmVzcG9uc2USJAoFcmVwb3MYASADKAsyFS5rYWppYmEuYWRtaW4udjEuUmVwbxIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiSAoEUmVwbxIRCglwdWJsaWNfaWQYASABKAkSDQoFb3duZXIYAiABKAkSDAoEbmFtZRgDIAEoCRIQCghhcmNoaXZlZBgEIAEoCCItCg1JbXBvcnRSZXF1ZXN0EgwKBHJlcG8YASABKAkSDgoGc291cmNlGAIgASgJIh4KDkltcG9ydFJlc3BvbnNlEgwKBHJlZnMYASABKA0y+AEKDEFkbWluU2VydmljZRJJCgZFbnJvbGwSHi5rYWppYmEuYWRtaW4udjEuRW5yb2xsUmVxdWVzdBofLmthamliYS5hZG1pbi52MS5FbnJvbGxSZXNwb25zZRJSCglMaXN0UmVwb3MSIS5rYWppYmEuYWRtaW4udjEuTGlzdFJlcG9zUmVxdWVzdBoiLmthamliYS5hZG1pbi52MS5MaXN0UmVwb3NSZXNwb25zZRJJCgZJbXBvcnQSHi5rYWppYmEuYWRtaW4udjEuSW1wb3J0UmVxdWVzdBofLmthamliYS5hZG1pbi52MS5JbXBvcnRSZXNwb25zZWIGcHJvdG8z");
 
 /**
  * @generated from message kajiba.admin.v1.EnrollRequest
@@ -123,6 +123,51 @@ export const RepoSchema: GenMessage<Repo> = /*@__PURE__*/
   messageDesc(file_kajiba_admin_v1_admin, 4);
 
 /**
+ * @generated from message kajiba.admin.v1.ImportRequest
+ */
+export type ImportRequest = Message<"kajiba.admin.v1.ImportRequest"> & {
+  /**
+   * <owner>/<name>
+   *
+   * @generated from field: string repo = 1;
+   */
+  repo: string;
+
+  /**
+   * An absolute path to a bare repository or a bundle, or a URL.
+   *
+   * @generated from field: string source = 2;
+   */
+  source: string;
+};
+
+/**
+ * Describes the message kajiba.admin.v1.ImportRequest.
+ * Use `create(ImportRequestSchema)` to create a new message.
+ */
+export const ImportRequestSchema: GenMessage<ImportRequest> = /*@__PURE__*/
+  messageDesc(file_kajiba_admin_v1_admin, 5);
+
+/**
+ * @generated from message kajiba.admin.v1.ImportResponse
+ */
+export type ImportResponse = Message<"kajiba.admin.v1.ImportResponse"> & {
+  /**
+   * Number of imported refs.
+   *
+   * @generated from field: uint32 refs = 1;
+   */
+  refs: number;
+};
+
+/**
+ * Describes the message kajiba.admin.v1.ImportResponse.
+ * Use `create(ImportResponseSchema)` to create a new message.
+ */
+export const ImportResponseSchema: GenMessage<ImportResponse> = /*@__PURE__*/
+  messageDesc(file_kajiba_admin_v1_admin, 6);
+
+/**
  * Host-local administration, authorized by Unix peer credentials (0014).
  *
  * @generated from service kajiba.admin.v1.AdminService
@@ -149,6 +194,17 @@ export const AdminService: GenService<{
     methodKind: "unary";
     input: typeof ListReposRequestSchema;
     output: typeof ListReposResponseSchema;
+  },
+  /**
+   * Import the branches and tags of a path, bundle or URL into a declared, empty
+   * repository; the refs become `push` events by `system` (0003, 0026).
+   *
+   * @generated from rpc kajiba.admin.v1.AdminService.Import
+   */
+  import: {
+    methodKind: "unary";
+    input: typeof ImportRequestSchema;
+    output: typeof ImportResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_kajiba_admin_v1_admin, 0);
