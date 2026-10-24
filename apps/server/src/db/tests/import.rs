@@ -494,6 +494,7 @@ async fn crash_child() {
         &state_dir,
         "alice/demo",
         &source,
+        "",
         "request-1",
     )
     .await;
@@ -561,6 +562,7 @@ async fn a_killed_import_converts_once_after_restart() {
                     &state.dir.0,
                     "alice/demo",
                     source.to_str().unwrap(),
+                    "",
                     "request-1"
                 )
                 .await
