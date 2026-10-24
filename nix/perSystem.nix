@@ -196,6 +196,10 @@
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
           };
+          nixos-git-http = import ./tests/git-http.nix {
+            inherit pkgs testLib;
+            kajibaServerPackage = config.packages.kajiba-server;
+          };
         }
       );
 
