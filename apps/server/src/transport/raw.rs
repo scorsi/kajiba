@@ -1,35 +1,47 @@
 //! `/raw/<owner>/<name>/<ref>/<path>` (ADR 0005, 0021, 0026): a file at a branch,
 //! tag or commit, the machine download path; refused for an archived repository.
 
-use super::repos::Repos;
+use super::{
+    repos::Repos,
+    stream::{self, STREAM_IDLE, STREAM_LIFETIME},
+};
 use axum::{
     Router,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
 };
 use kajiba_git::{Error, GitStore, Gix};
+use std::time::Duration;
+use tokio::sync::OwnedSemaphorePermit;
 
 const BLOB_LIMIT: u64 = 16 << 20;
-
-// Keep the permit with the allocation, including after handler cancellation.
-struct Blob {
-    data: Vec<u8>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
-}
-
-impl AsRef<[u8]> for Blob {
-    fn as_ref(&self) -> &[u8] {
-        &self.data
-    }
-}
+/// Bytes handed to HTTP per chunk; copied, so the blob allocation ends with the permit.
+const CHUNK: usize = 64 << 10;
 
 pub fn routes(repos: Repos) -> Router {
     Router::new()
         .route("/raw/:owner/:name/*spec", get(raw))
         .with_state(repos)
+}
+
+/// The blob in bounded chunks under the upload-pack bounds (ADR 0040, 0043): the
+/// permit is released when the body ends or when the first bound fires.
+fn body(data: Vec<u8>, permit: OwnedSemaphorePermit, idle: Duration, lifetime: Duration) -> Body {
+    stream::supervised(permit, |chunks| async move {
+        let transfer = async {
+            for chunk in data.chunks(CHUNK) {
+                tokio::time::timeout(idle, stream::send(&chunks, Bytes::copy_from_slice(chunk)))
+                    .await??;
+            }
+            Ok(())
+        };
+        tokio::time::timeout(lifetime, transfer)
+            .await
+            .unwrap_or_else(|err| Err(err.into()))
+    })
 }
 
 async fn raw(
@@ -48,23 +60,21 @@ async fn raw(
         Ok(permit) => permit,
         Err(response) => return response,
     };
+    // The permit travels with the blocking work and its allocation, including after
+    // handler cancellation.
     let blob = tokio::task::spawn_blocking(move || {
         let (commit, file) = Gix.resolve(&path, &spec)?;
-        Gix.blob(&path, &commit, file, BLOB_LIMIT).map(|data| {
-            Bytes::from_owner(Blob {
-                data,
-                _permit: permit,
-            })
-        })
+        Gix.blob(&path, &commit, file, BLOB_LIMIT)
+            .map(|data| (data, permit))
     })
     .await;
     match blob {
-        Ok(Ok(data)) => (
+        Ok(Ok((data, permit))) => (
             [
                 (header::CONTENT_TYPE, "application/octet-stream"),
                 (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             ],
-            data,
+            body(data, permit, STREAM_IDLE, STREAM_LIFETIME),
         )
             .into_response(),
         Ok(Err(Error::NotFound)) => (StatusCode::NOT_FOUND, "file not found\n").into_response(),

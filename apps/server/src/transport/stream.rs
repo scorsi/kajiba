@@ -1,4 +1,5 @@
-//! A bounded response channel supervises git even when HTTP stops polling the body.
+//! A bounded response channel supervises git and raw bodies even when HTTP stops
+//! polling them (ADR 0040, 0043).
 use axum::body::{Body, Bytes};
 use http_body::{Body as HttpBody, Frame};
 use std::{
@@ -15,15 +16,21 @@ use tokio::{
     time::{Instant, timeout, timeout_at},
 };
 
-type Chunk = (Bytes, oneshot::Sender<()>);
+/// Without bytes handed to the HTTP transport, a streaming body ends.
+pub(super) const STREAM_IDLE: Duration = Duration::from_secs(60);
+/// Whatever its progress, a streaming body ends.
+pub(super) const STREAM_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
-struct GitBody {
+type Chunk = (Bytes, oneshot::Sender<()>);
+pub(super) type Sender = mpsc::Sender<Chunk>;
+
+struct Supervised {
     chunks: mpsc::Receiver<Chunk>,
     completion: oneshot::Receiver<io::Result<()>>,
     finished: bool,
 }
 
-impl HttpBody for GitBody {
+impl HttpBody for Supervised {
     type Data = Bytes;
     type Error = io::Error;
 
@@ -49,7 +56,7 @@ impl HttpBody for GitBody {
     }
 }
 
-async fn send(chunks: &mpsc::Sender<Chunk>, bytes: Bytes) -> io::Result<()> {
+pub(super) async fn send(chunks: &Sender, bytes: Bytes) -> io::Result<()> {
     let (consumed, received) = oneshot::channel();
     chunks
         .send((bytes, consumed))
@@ -57,6 +64,29 @@ async fn send(chunks: &mpsc::Sender<Chunk>, bytes: Bytes) -> io::Result<()> {
         .map_err(io::Error::other)?;
     // Progress means HTTP polled a chunk, not merely that git wrote into its pipe.
     received.await.map_err(io::Error::other)
+}
+
+/// A body fed by `transfer` from its own task, which holds `permit` until it returns;
+/// its result ends the body as a clean EOF or an error.
+pub(super) fn supervised<F>(
+    permit: OwnedSemaphorePermit,
+    transfer: impl FnOnce(Sender) -> F,
+) -> Body
+where
+    F: Future<Output = io::Result<()>> + Send + 'static,
+{
+    let (chunks, receiver) = mpsc::channel(1);
+    let (completion, completed) = oneshot::channel();
+    let transfer = transfer(chunks);
+    tokio::spawn(async move {
+        let _permit = permit;
+        let _ = completion.send(transfer.await);
+    });
+    Body::new(Supervised {
+        chunks: receiver,
+        completion: completed,
+        finished: false,
+    })
 }
 
 pub(super) fn body(
@@ -67,10 +97,7 @@ pub(super) fn body(
     idle: Duration,
     lifetime: Duration,
 ) -> Body {
-    let (chunks, receiver) = mpsc::channel(1);
-    let (completion, completed) = oneshot::channel();
-    tokio::spawn(async move {
-        let _permit = permit;
+    supervised(permit, |chunks| async move {
         let mut stdout = child.stdout.take().expect("piped git stdout");
         let stdin = child.stdin.take();
         let transfer = async {
@@ -117,12 +144,7 @@ pub(super) fn body(
             // kill() also reaps; kill_on_drop remains the fallback during runtime shutdown.
             let _ = child.kill().await;
         }
-        let _ = completion.send(result);
-    });
-    Body::new(GitBody {
-        chunks: receiver,
-        completion: completed,
-        finished: false,
+        result
     })
 }
 

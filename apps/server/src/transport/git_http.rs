@@ -2,6 +2,7 @@
 //! Pushes go over SSH (0004).
 
 use super::repos::Repos;
+use super::stream::{self, STREAM_IDLE, STREAM_LIFETIME};
 use axum::{
     Router,
     body::Bytes,
@@ -11,13 +12,7 @@ use axum::{
     routing::{any, get, post},
 };
 use kajiba_git::{GitStore, Gix, Service};
-use std::time::Duration;
 use std::{collections::HashMap, process::Stdio};
-
-mod stream;
-
-const STREAM_IDLE: Duration = Duration::from_secs(60);
-const STREAM_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
 pub fn routes(repos: Repos) -> Router {
     Router::new()

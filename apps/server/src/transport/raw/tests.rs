@@ -1,5 +1,7 @@
 use super::super::repos::tests::{DEMO, Fixture, git};
 use axum::{body::Body, http};
+use std::{sync::Arc, time::Duration};
+use tokio::{sync::Semaphore, time::timeout};
 use tonic::codegen::Service;
 
 async fn get(fixture: &Fixture, path: &str) -> (u16, String) {
@@ -141,17 +143,90 @@ async fn raw_blob_size_limit_and_permit_follow_the_allocation() {
         .unwrap();
     assert_eq!(response.status(), http::StatusCode::OK);
     assert_eq!(response.headers()["x-content-type-options"], "nosniff");
-    let bytes = axum::body::to_bytes(response.into_body(), limit)
-        .await
-        .unwrap();
-    assert_eq!(bytes.len(), limit);
+    // Unread so far: the permit stays with the blob.
     assert_eq!(
         fixture.repos.0.public_reads.available_permits(),
         super::super::PUBLIC_READS - 1
     );
-    drop(bytes);
-    assert_eq!(
-        fixture.repos.0.public_reads.available_permits(),
-        super::super::PUBLIC_READS
+    let bytes = axum::body::to_bytes(response.into_body(), limit)
+        .await
+        .unwrap();
+    assert_eq!(bytes.len(), limit);
+    let _all = timeout(
+        Duration::from_secs(5),
+        fixture
+            .repos
+            .0
+            .public_reads
+            .acquire_many(super::super::PUBLIC_READS as u32),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
+async fn frame(
+    response: &mut Body,
+) -> Option<Result<http_body::Frame<axum::body::Bytes>, axum::Error>> {
+    std::future::poll_fn(|cx| http_body::Body::poll_frame(std::pin::Pin::new(&mut *response), cx))
+        .await
+}
+
+#[tokio::test]
+async fn raw_bodies_expire_unread_and_past_the_deadline_releasing_their_permit() {
+    let budget = Arc::new(Semaphore::new(1));
+    let data = vec![7u8; 3 * super::CHUNK + 1];
+    // Never polled: the idle bound frees the permit and the body ends in error.
+    let response = super::body(
+        data.clone(),
+        budget.clone().try_acquire_owned().unwrap(),
+        Duration::from_millis(100),
+        Duration::from_secs(20),
     );
+    let permit = timeout(Duration::from_secs(5), budget.clone().acquire_owned())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(axum::body::to_bytes(response, usize::MAX).await.is_err());
+
+    // Read whole: every byte, then the permit.
+    let response = super::body(
+        data.clone(),
+        permit,
+        Duration::from_secs(5),
+        Duration::from_secs(20),
+    );
+    assert_eq!(
+        axum::body::to_bytes(response, usize::MAX).await.unwrap(),
+        data
+    );
+    let permit = timeout(Duration::from_secs(5), budget.clone().acquire_owned())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // A reader slower than the absolute deadline gets an error, not a clean EOF.
+    let mut response = super::body(
+        data,
+        permit,
+        Duration::from_secs(5),
+        Duration::from_millis(100),
+    );
+    assert!(frame(&mut response).await.unwrap().is_ok());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let ended = timeout(Duration::from_secs(5), async {
+        loop {
+            match frame(&mut response).await {
+                Some(Ok(_)) => continue,
+                ended => break ended,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(ended, Some(Err(_))));
+    let _released = timeout(Duration::from_secs(5), budget.acquire())
+        .await
+        .unwrap()
+        .unwrap();
 }
