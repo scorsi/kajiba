@@ -37,7 +37,7 @@ pub fn page_size(size: i32) -> Result<i64, Status> {
     }
 }
 
-fn invalid_field(field: &str, message: &str) -> Status {
+pub fn invalid_field(field: &str, message: &str) -> Status {
     let mut details = tonic_types::ErrorDetails::new();
     details.set_error_info("INVALID_FIELD", "kajiba", std::collections::HashMap::new());
     details.add_bad_request_violation(field, message);

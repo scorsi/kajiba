@@ -59,7 +59,7 @@ pub struct Admin {
     pub state_dir: PathBuf,
 }
 
-fn refused(code: tonic::Code, reason: &str, message: String) -> Status {
+pub(super) fn refused(code: tonic::Code, reason: &str, message: String) -> Status {
     let mut details = tonic_types::ErrorDetails::new();
     details.set_error_info(reason, "kajiba", std::collections::HashMap::new());
     <Status as tonic_types::StatusExt>::with_error_details(code, message, details)

@@ -394,3 +394,53 @@ async fn apply(
     }
     tx.commit().await.map_err(sql)
 }
+
+/// A repository found by `<owner>/<name>` (ADR 0021, 0026).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Found {
+    pub id: i64,
+    pub public_id: String,
+    pub owner: String,
+    pub name: String,
+    pub archived: bool,
+    /// Found through a previous name, not the current one.
+    pub redirected: bool,
+}
+
+/// The row holding the name, active or archived, then a redirect, which may lead to
+/// an archived repository. Names resolve case-insensitively; an invalid one finds nothing.
+pub async fn find(
+    readers: &sqlx::SqlitePool,
+    owner: &str,
+    name: &str,
+) -> Result<Option<Found>, sqlx::Error> {
+    use kajiba_core::names::validate_name;
+    let (Ok(owner), Ok(name)) = (validate_name(owner), validate_name(name)) else {
+        return Ok(None);
+    };
+    let found: Option<(i64, String, String, String, bool, bool)> = sqlx::query_as(
+        "SELECT repo.id, repo.public_id, owner.name, repo.name, repo.archived_at IS NOT NULL, 0
+         FROM repo JOIN user owner ON owner.id = repo.owner_id
+         WHERE owner.name = ?1 AND repo.name = ?2
+         UNION ALL
+         SELECT repo.id, repo.public_id, owner.name, repo.name, repo.archived_at IS NOT NULL, 1
+         FROM repo_redirect JOIN repo ON repo.id = repo_redirect.repo_id
+         JOIN user owner ON owner.id = repo.owner_id
+         WHERE repo_redirect.owner_name = ?1 AND repo_redirect.name = ?2
+         ORDER BY 6 LIMIT 1",
+    )
+    .bind(owner)
+    .bind(name)
+    .fetch_optional(readers)
+    .await?;
+    Ok(
+        found.map(|(id, public_id, owner, name, archived, redirected)| Found {
+            id,
+            public_id,
+            owner,
+            name,
+            archived,
+            redirected,
+        }),
+    )
+}

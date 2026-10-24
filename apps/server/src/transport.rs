@@ -15,6 +15,7 @@ use kajiba_proto::v1::{
     CheckRequest, CheckResponse,
     check_response::ServingStatus,
     health_service_server::{HealthService, HealthServiceServer},
+    repo_service_server::RepoServiceServer,
 };
 use sqlx::SqlitePool;
 use std::{
@@ -85,6 +86,7 @@ fn router(
     registry: Arc<Registry>,
 ) -> Result<Router, tonic_reflection::server::Error> {
     let mut app = Routes::new(HealthServiceServer::new(health.clone()))
+        .add_service(RepoServiceServer::new(repos::Repos(health.clone())))
         .into_axum_router()
         .route("/healthz", get(|| async { "OK" }))
         .route(
@@ -324,6 +326,7 @@ fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
 pub mod correlation;
 pub mod cursor;
 pub mod local;
+pub mod repos;
 
 #[cfg(test)]
 mod tests;

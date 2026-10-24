@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package kajiba.v1;
+
+// Declared repositories, read-only (0026): no method creates, renames or deletes
+// one. Public repositories only until private ones exist (0013).
+service RepoService {
+  // By public id, or by <owner>/<name>: the repository holding the name (active or
+  // archived), then a redirect. REPO_NOT_FOUND otherwise.
+  rpc GetRepo(GetRepoRequest) returns (GetRepoResponse);
+  // Active and archived repositories, ordered by <owner>/<name> (0020).
+  rpc ListRepos(ListReposRequest) returns (ListReposResponse);
+}
+
+message GetRepoRequest {
+  oneof repo {
+    string public_id = 1;
+    // <owner>/<name>, current or previous.
+    string name = 2;
+  }
+}
+
+message GetRepoResponse {
+  Repo repo = 1;
+}
+
+message ListReposRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListReposResponse {
+  repeated Repo repos = 1;
+  string next_page_token = 2;
+}
+
+// The declared fields of a repository (0026).
+message Repo {
+  string public_id = 1;
+  string owner = 2;
+  string name = 3;
+  string description = 4;
+  Visibility visibility = 5;
+  string default_branch = 6;
+  bool ci_enabled = 7;
+  // <owner>/<name> pairs that redirect to this repository.
+  repeated string previous_names = 8;
+  // Declared permissions; the owner is admin implicitly.
+  repeated Permission permissions = 9;
+  repeated Mirror mirrors = 10;
+  // Removed from the configuration: read-only, no git transport or /raw/.
+  bool archived = 11;
+}
+
+enum Visibility {
+  VISIBILITY_UNSPECIFIED = 0;
+  VISIBILITY_PUBLIC = 1;
+}
+
+message Permission {
+  string user = 1;
+  Role role = 2;
+}
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_READ = 1;
+  ROLE_WRITE = 2;
+  ROLE_ADMIN = 3;
+}
+
+// Mirror configuration only; its sync status belongs to MirrorService (0011).
+message Mirror {
+  string remote_url = 1;
+  // A mirror.credentials name, never the secret.
+  string credential = 2;
+  bool enabled = 3;
+}

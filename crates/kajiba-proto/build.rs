@@ -5,7 +5,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .build_server(true)
         .build_client(true)
-        .compile_protos(&["../../proto/kajiba/v1/health.proto"], &["../../proto"])?;
+        .compile_protos(
+            &[
+                "../../proto/kajiba/v1/health.proto",
+                "../../proto/kajiba/v1/repo.proto",
+            ],
+            &["../../proto"],
+        )?;
     tonic_build::configure().compile_protos(
         &["../../proto/kajiba/admin/v1/admin.proto"],
         &["../../proto"],
