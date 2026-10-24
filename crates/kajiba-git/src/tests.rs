@@ -152,6 +152,19 @@ fn set_head_is_idempotent_and_replaces_head_atomically() {
 }
 
 #[test]
+fn run_kills_a_child_past_its_deadline() {
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", "exec sleep 30"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let started = std::time::Instant::now();
+    let err = run(command, "", Duration::from_millis(200)).unwrap_err();
+    assert!(err.to_string().contains("did not finish"), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[test]
 fn refs_match_the_git_binary() {
     let f = fixture("refs");
     let expected = git(

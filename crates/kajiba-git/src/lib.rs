@@ -5,7 +5,8 @@
 
 use std::fmt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
@@ -124,6 +125,11 @@ pub trait GitStore {
     fn fetch(&self, repo: &Path, source: &str, refs: &[Ref]) -> Result<()>;
 }
 
+/// Deadline of one git child of an import (`ls-remote`, then `fetch`): a hung
+/// source must not pin the repository's admission gate (ADR 0003). Past it the
+/// child is killed and the import fails.
+pub const IMPORT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
 /// The git binary without system or user configuration, never prompting.
 fn git() -> Command {
     let mut command = Command::new("git");
@@ -131,31 +137,66 @@ fn git() -> Command {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     command
 }
 
-fn run(mut command: Command, stdin: &str) -> Result<String> {
-    use std::io::Write;
+fn run(mut command: Command, stdin: &str, deadline: Duration) -> Result<String> {
+    use std::io::{Read, Write};
+    use std::sync::mpsc::{RecvTimeoutError, channel};
     let mut child = command
-        .stdin(std::process::Stdio::piped())
+        .stdin(Stdio::piped())
         .spawn()
         .map_err(|err| Error::Git(format!("git: {err}")))?;
+    let mut input = child.stdin.take().expect("piped");
+    let mut stdout = child.stdout.take().expect("piped");
+    let mut stderr = child.stderr.take().expect("piped");
+    // The watchdog owns the child: past the deadline it kills it, then reaps it.
+    let (done, finished) = channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        let timed_out = matches!(
+            finished.recv_timeout(deadline),
+            Err(RecvTimeoutError::Timeout)
+        );
+        if timed_out {
+            let _ = child.kill();
+        }
+        child.wait().map(|status| (status, timed_out))
+    });
+    // stderr is drained apart so a chatty git never blocks on it while reading stdin.
+    let (errors, collected) = channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stderr.read_to_end(&mut buffer);
+        let _ = errors.send(buffer);
+    });
     // Writing can fail if git exits early; its status reports why.
-    let _ = child
-        .stdin
-        .take()
-        .map(|mut input| input.write_all(stdin.as_bytes()));
-    let output = child
-        .wait_with_output()
+    let _ = input.write_all(stdin.as_bytes());
+    drop(input);
+    let mut output = Vec::new();
+    let _ = stdout.read_to_end(&mut output);
+    drop(done);
+    let (status, timed_out) = watchdog
+        .join()
+        .map_err(|_| Error::Git("git: watchdog panicked".into()))?
         .map_err(|err| Error::Git(format!("git: {err}")))?;
-    if !output.status.success() {
+    if timed_out {
+        return Err(Error::Git(format!(
+            "git did not finish within {} s",
+            deadline.as_secs()
+        )));
+    }
+    if !status.success() {
+        // A surviving grandchild may hold stderr open: do not wait on it forever.
+        let stderr = collected
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_default();
         return Err(Error::Git(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            String::from_utf8_lossy(&stderr).trim().to_owned(),
         ));
     }
-    String::from_utf8(output.stdout).map_err(|err| Error::Git(err.to_string()))
+    String::from_utf8(output).map_err(|err| Error::Git(err.to_string()))
 }
 
 /// The gix + `git` binary implementation.
@@ -412,7 +453,7 @@ impl GitStore for Gix {
         let mut command = git();
         command.args(["ls-remote", "--refs", "--", source]);
         let mut refs = Vec::new();
-        for line in run(command, "")?.lines() {
+        for line in run(command, "", IMPORT_TIMEOUT)?.lines() {
             let (target, name) = line
                 .split_once('\t')
                 .ok_or_else(|| Error::Git(format!("unexpected ls-remote line: {line}")))?;
@@ -445,7 +486,7 @@ impl GitStore for Gix {
             .iter()
             .map(|r| format!("{}:{}\n", r.target, r.name))
             .collect();
-        run(command, &refspecs).map(drop)
+        run(command, &refspecs, IMPORT_TIMEOUT).map(drop)
     }
 }
 

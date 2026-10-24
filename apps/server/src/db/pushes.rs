@@ -106,14 +106,40 @@ impl Gate {
         self.running.lock().unwrap().remove(&repo_id);
     }
 
-    /// Converts every eligible row, in `id` order: at startup, after an admitted
-    /// process exits and on a timer. Archived repositories resume when unarchived.
+    /// Converts every eligible row, in `id` order: at startup and on a timer.
+    /// Archived repositories resume when unarchived.
     pub async fn reconcile(
         &self,
         writer: &mut SqliteConnection,
         bus: &EventBus,
         state_dir: &Path,
         store: &impl GitStore,
+    ) -> Result<(), String> {
+        self.reconcile_rows(writer, bus, state_dir, store, None)
+            .await
+    }
+
+    /// Converts the rows of one repository, after its admitted process exits:
+    /// another repository's broken row must not fail this completion.
+    pub async fn reconcile_repo(
+        &self,
+        writer: &mut SqliteConnection,
+        bus: &EventBus,
+        state_dir: &Path,
+        store: &impl GitStore,
+        repo_id: i64,
+    ) -> Result<(), String> {
+        self.reconcile_rows(writer, bus, state_dir, store, Some(repo_id))
+            .await
+    }
+
+    async fn reconcile_rows(
+        &self,
+        writer: &mut SqliteConnection,
+        bus: &EventBus,
+        state_dir: &Path,
+        store: &impl GitStore,
+        only: Option<i64>,
     ) -> Result<(), String> {
         type Pending = (
             i64,
@@ -130,8 +156,10 @@ impl Gate {
                     principal_id, principal.name, correlation_id, updates
              FROM pending_push JOIN repo ON repo.id = repo_id JOIN user owner ON owner.id = repo.owner_id
              LEFT JOIN user principal ON principal.id = principal_id
-             WHERE repo.archived_at IS NULL ORDER BY pending_push.id",
+             WHERE repo.archived_at IS NULL AND (?1 IS NULL OR repo.id = ?1)
+             ORDER BY pending_push.id",
         )
+        .bind(only)
         .fetch_all(&mut *writer)
         .await
         .map_err(|err| format!("push reconciliation: {err}"))?;

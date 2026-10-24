@@ -1,8 +1,16 @@
 use super::repos::{State, git};
-use crate::db::{Writer, events::EventBus, pushes::Gate};
-use crate::import::{Error, import};
+use crate::db::{
+    Writer,
+    events::EventBus,
+    pushes::{Gate, Refused},
+};
+use crate::import::{Error, import, supervise};
 use kajiba_git::{GitStore, Gix, Ref};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 const DECLARED: &str = "[repos.demo]\nowner='alice'\ndescription=''\n\
      [repos.other]\nowner='alice'\ndescription=''\n\
@@ -12,8 +20,8 @@ const DECLARED: &str = "[repos.demo]\nowner='alice'\ndescription=''\n\
 struct Import {
     state_dir: PathBuf,
     writer: Writer,
-    gate: Gate,
-    bus: EventBus,
+    gate: Arc<Gate>,
+    bus: Arc<EventBus>,
     _state: State,
 }
 
@@ -34,8 +42,8 @@ impl Import {
         Self {
             state_dir,
             writer: Writer::new(writer.into()),
-            gate: Gate::default(),
-            bus: EventBus::default(),
+            gate: Arc::default(),
+            bus: Arc::default(),
             _state: state,
         }
     }
@@ -272,5 +280,118 @@ fn source_reasons_drop_url_credentials_and_stay_bounded() {
             .chars()
             .count(),
         200
+    );
+}
+
+#[tokio::test]
+async fn a_dropped_import_future_still_releases_the_gate_and_reconciles() {
+    let import = Import::new().await;
+    let source = source(&import.state_dir, "main");
+    let refs = Gix.remote_refs(source.to_str().unwrap()).unwrap();
+    let target = import.path("demo").await;
+    let updates: Vec<_> = refs
+        .iter()
+        .map(|r| crate::db::pushes::RefUpdate {
+            name: r.name.clone(),
+            old: crate::db::pushes::ZERO.into(),
+            new: r.target.clone(),
+        })
+        .collect();
+    import
+        .gate
+        .admit(
+            &mut *import.writer.lock().await,
+            1,
+            None,
+            "request-1",
+            &updates,
+        )
+        .await
+        .unwrap();
+    // The fetch blocks until released; meanwhile the RPC future is dropped.
+    let (release, blocked) = std::sync::mpsc::channel::<()>();
+    let fetch = {
+        let (target, source, refs) = (target.clone(), source.clone(), refs.clone());
+        move || {
+            blocked.recv().unwrap();
+            Gix.fetch(&target, source.to_str().unwrap(), &refs)
+        }
+    };
+    drop(supervise(
+        import.writer.clone(),
+        import.gate.clone(),
+        import.bus.clone(),
+        import.state_dir.clone(),
+        1,
+        fetch,
+    ));
+    let refused = import
+        .gate
+        .admit(&mut *import.writer.lock().await, 1, None, "request-2", &[])
+        .await;
+    assert!(matches!(refused, Err(Refused::InProgress)), "{refused:?}");
+    release.send(()).unwrap();
+    for _ in 0..200 {
+        if import
+            .strings("SELECT correlation_id FROM pending_push")
+            .await
+            .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        import
+            .strings("SELECT kind FROM event WHERE principal_kind = 'system'")
+            .await
+            .len(),
+        4
+    );
+    assert_eq!(Gix.refs(&target).unwrap().len(), 4);
+    // The gate is released: a new mutation is admitted.
+    import
+        .gate
+        .admit(&mut *import.writer.lock().await, 1, None, "request-3", &[])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn another_repository_s_broken_row_does_not_fail_the_import() {
+    let import = Import::new().await;
+    let source = source(&import.state_dir, "main");
+    sqlx::query(
+        "INSERT INTO pending_push (repo_id, principal_id, correlation_id, updates, created_at)
+         VALUES ((SELECT id FROM repo WHERE config_key = 'other'), NULL, 'stale', 'garbage', 0)",
+    )
+    .execute(&mut *import.writer.lock().await)
+    .await
+    .unwrap();
+    assert_eq!(
+        import
+            .run("alice/demo", source.to_str().unwrap())
+            .await
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        import
+            .strings("SELECT correlation_id FROM pending_push")
+            .await,
+        ["stale"]
+    );
+    // The full pass still reports it.
+    assert!(
+        import
+            .gate
+            .reconcile(
+                &mut *import.writer.lock().await,
+                &import.bus,
+                &import.state_dir,
+                &Gix
+            )
+            .await
+            .is_err()
     );
 }

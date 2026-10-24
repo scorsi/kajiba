@@ -2,11 +2,15 @@
 //! empty repository, through the admission gate of ADR 0003.
 
 use crate::db::{
+    Writer,
     events::EventBus,
     pushes::{Gate, RefUpdate, Refused, ZERO},
 };
 use kajiba_git::{GitStore, Gix};
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[derive(Debug)]
 pub enum Error {
@@ -23,9 +27,9 @@ pub enum Error {
 
 /// Returns the number of imported refs. Refusals write nothing.
 pub async fn import(
-    writer: &crate::db::Writer,
-    gate: &Gate,
-    bus: &EventBus,
+    writer: &Writer,
+    gate: &Arc<Gate>,
+    bus: &Arc<EventBus>,
     state_dir: &Path,
     repo: &str,
     source: &str,
@@ -83,16 +87,43 @@ pub async fn import(
     }
 
     let (target, owned, wanted) = (path.clone(), source.to_owned(), refs.clone());
-    let fetched = tokio::task::spawn_blocking(move || Gix.fetch(&target, &owned, &wanted)).await;
-    gate.exited(repo_id);
-    gate.reconcile(&mut *writer.lock().await, bus, state_dir, &Gix)
-        .await
-        .map_err(Error::Internal)?;
-    fetched
-        .map_err(|err| Error::Internal(err.to_string()))?
-        .map_err(|err| Error::Source(reason(&err.to_string(), source)))?;
+    let fetched = supervise(
+        writer.clone(),
+        gate.clone(),
+        bus.clone(),
+        state_dir.to_owned(),
+        repo_id,
+        move || Gix.fetch(&target, &owned, &wanted),
+    )
+    .await
+    .map_err(|err| Error::Internal(err.to_string()))?
+    .map_err(Error::Internal)?;
+    fetched.map_err(|err| Error::Source(reason(&err.to_string(), source)))?;
     tracing::info!(event = "repo-imported", repo, refs = refs.len());
     Ok(refs.len())
+}
+
+/// Runs the admitted mutation in a task of its own, then releases the gate and
+/// reconciles the repository: a dropped RPC future (client gone) never pins the
+/// repository until restart (ADR 0003). The outer error is internal, the inner one
+/// is the mutation's.
+pub(crate) fn supervise(
+    writer: Writer,
+    gate: Arc<Gate>,
+    bus: Arc<EventBus>,
+    state_dir: PathBuf,
+    repo_id: i64,
+    mutate: impl FnOnce() -> kajiba_git::Result<()> + Send + 'static,
+) -> tokio::task::JoinHandle<Result<kajiba_git::Result<()>, String>> {
+    tokio::spawn(async move {
+        let mutated = tokio::task::spawn_blocking(mutate)
+            .await
+            .map_err(|err| err.to_string());
+        gate.exited(repo_id);
+        gate.reconcile_repo(&mut *writer.lock().await, &bus, &state_dir, &Gix, repo_id)
+            .await?;
+        mutated
+    })
 }
 
 /// Git's stderr may echo a source URL with its credentials: drop the userinfo of
