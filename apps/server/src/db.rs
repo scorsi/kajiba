@@ -60,6 +60,7 @@ mod tests {
     };
 
     mod identity;
+    mod repositories;
 
     struct TempDir(PathBuf);
 
@@ -97,7 +98,13 @@ mod tests {
         .fetch_all(&mut writer)
         .await
         .unwrap();
-        assert_eq!(history.len(), 2);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[2].0, 3);
+        assert!(history[2].2);
+        assert_eq!(
+            history[2].3,
+            MIGRATOR.iter().nth(2).unwrap().checksum.as_ref()
+        );
         assert_eq!(history[1].0, 2);
         assert!(history[1].2);
         assert_eq!(
@@ -132,6 +139,10 @@ mod tests {
                 "_sqlx_migrations",
                 "api_token",
                 "enrollment_token",
+                "mirror",
+                "repo",
+                "repo_permission",
+                "repo_redirect",
                 "session",
                 "ssh_key",
                 "user",
@@ -235,7 +246,7 @@ mod tests {
                 .fetch_all(&mut writer)
                 .await
                 .unwrap();
-        assert_eq!(versions, [1, 2]);
+        assert_eq!(versions, [1, 2, 3]);
         readers.close().await;
         writer.close().await.unwrap();
     }
