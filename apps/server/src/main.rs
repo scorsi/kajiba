@@ -60,7 +60,14 @@ enum AdminCommand {
     /// Revoke a user's passkeys, sessions and runtime PATs, then print an enrollment link.
     Enroll { user: String },
     /// Import the branches and tags of a path, bundle or URL into a declared, empty repository.
-    Import { repo: String, source: String },
+    Import {
+        repo: String,
+        /// An absolute path, or a URL without credentials (no userinfo, query or fragment).
+        source: String,
+        /// File holding `user:token` or a token for an http(s) source; not readable by others.
+        #[arg(long)]
+        credentials_file: Option<PathBuf>,
+    },
     /// Administer repositories (not implemented yet).
     Repo {
         #[command(subcommand)]
@@ -184,11 +191,16 @@ async fn main() -> ExitCode {
                 return admin_enroll(std::path::Path::new(transport::local::SOCKET_PATH), user)
                     .await;
             }
-            AdminCommand::Import { repo, source } => {
+            AdminCommand::Import {
+                repo,
+                source,
+                credentials_file,
+            } => {
                 return admin_import(
                     std::path::Path::new(transport::local::SOCKET_PATH),
                     repo,
                     source,
+                    credentials_file,
                 )
                 .await;
             }
@@ -225,13 +237,29 @@ async fn admin_enroll(path: &std::path::Path, user: String) -> ExitCode {
     }
 }
 
-async fn admin_import(path: &std::path::Path, repo: String, source: String) -> ExitCode {
+async fn admin_import(
+    path: &std::path::Path,
+    repo: String,
+    source: String,
+    credentials_file: Option<PathBuf>,
+) -> ExitCode {
     // The server resolves paths from its own working directory: pass them absolute.
     let source = match std::fs::canonicalize(&source) {
         Ok(absolute) => absolute.to_string_lossy().into_owned(),
         Err(_) => source,
     };
-    match transport::local::import(path, repo.clone(), source).await {
+    // Read here, sent in the request: a credential never appears in any command line.
+    let credentials = match &credentials_file {
+        Some(file) => match kajiba_core::config::read_secret(file, "--credentials-file") {
+            Ok(secret) => secret,
+            Err(err) => {
+                log::error("fatal", &format!("admin import {repo}: {err}"));
+                return ExitCode::FAILURE;
+            }
+        },
+        None => String::new(),
+    };
+    match transport::local::import(path, repo.clone(), source, credentials).await {
         Ok(_) => ExitCode::SUCCESS,
         Err(err) => {
             let message = match err.downcast_ref::<tonic::Status>() {
@@ -327,6 +355,21 @@ mod tests {
                 AdminCommand::Import {
                     repo: "alice/demo".into(),
                     source: "https://example.org/demo.git".into(),
+                    credentials_file: None,
+                },
+            ),
+            (
+                vec![
+                    "import",
+                    "alice/demo",
+                    "https://example.org/demo.git",
+                    "--credentials-file",
+                    "/run/secrets/import",
+                ],
+                AdminCommand::Import {
+                    repo: "alice/demo".into(),
+                    source: "https://example.org/demo.git".into(),
+                    credentials_file: Some("/run/secrets/import".into()),
                 },
             ),
             (

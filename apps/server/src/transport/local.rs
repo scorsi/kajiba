@@ -173,7 +173,11 @@ impl AdminService for Admin {
             .get::<correlation::RequestId>()
             .map(|id| id.0.clone())
             .unwrap_or_default();
-        let ImportRequest { repo, source } = request.into_inner();
+        let ImportRequest {
+            repo,
+            source,
+            credentials,
+        } = request.into_inner();
         let refs = crate::import::import(
             &self.writer,
             &self.gate,
@@ -181,6 +185,7 @@ impl AdminService for Admin {
             &self.state_dir,
             &repo,
             &source,
+            &credentials,
             &correlation_id,
         )
         .await
@@ -381,10 +386,15 @@ pub async fn import(
     path: &Path,
     repo: String,
     source: String,
+    credentials: String,
 ) -> Result<u32, Box<dyn std::error::Error>> {
     Ok(client(path, None)
         .await?
-        .import(ImportRequest { repo, source })
+        .import(ImportRequest {
+            repo,
+            source,
+            credentials,
+        })
         .await?
         .into_inner()
         .refs)

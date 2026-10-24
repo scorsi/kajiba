@@ -478,6 +478,21 @@ impl Drop for TempDir {
 }
 
 #[test]
+fn read_secret_follows_the_secret_file_rules_and_drops_the_newline() {
+    use kajiba_core::config::read_secret;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("read-secret");
+    let secret = dir.private_file("secret");
+    std::fs::write(&secret, "alice:DO-NOT-PRINT\n").unwrap();
+    assert_eq!(read_secret(&secret, "f").unwrap(), "alice:DO-NOT-PRINT");
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let error = read_secret(&secret, "f").unwrap_err();
+    assert!(error.contains("readable or writable by others"), "{error}");
+    assert!(!error.contains("DO-NOT-PRINT"), "{error}");
+    assert!(read_secret(&dir.0.join("absent"), "f").is_err());
+}
+
+#[test]
 fn secret_files_must_not_be_accessible_to_others_and_symlinks_are_followed() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     let dir = TempDir::new("modes");

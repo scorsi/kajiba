@@ -43,8 +43,12 @@ message Repo {
 message ImportRequest {
   // <owner>/<name>
   string repo = 1;
-  // An absolute path to a bare repository or a bundle, or a URL.
+  // An absolute path to a bare repository or a bundle, or a URL without userinfo,
+  // query or fragment (0041, 0044).
   string source = 2;
+  // `user:token` or a token alone, for an http(s) source; read by the CLI from
+  // `--credentials-file`, never logged (0044).
+  string credentials = 3;
 }
 
 message ImportResponse {

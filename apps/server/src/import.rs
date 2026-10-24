@@ -26,6 +26,7 @@ pub enum Error {
 }
 
 /// Returns the number of imported refs. Refusals write nothing.
+#[expect(clippy::too_many_arguments)]
 pub async fn import(
     writer: &Writer,
     gate: &Arc<Gate>,
@@ -33,12 +34,10 @@ pub async fn import(
     state_dir: &Path,
     repo: &str,
     source: &str,
+    credentials: &str,
     correlation_id: &str,
 ) -> Result<usize, Error> {
-    // The server would resolve a relative path from its own working directory.
-    if !source.contains("://") && !Path::new(source).is_absolute() {
-        return Err(Error::Source("not an absolute path or a URL".into()));
-    }
+    check_source(source).map_err(|err| Error::Source(err.into()))?;
     let valid = |name: &str| kajiba_core::names::validate_name(name).map_err(|_| Error::NotFound);
     let (owner, name) = repo.split_once('/').ok_or(Error::NotFound)?;
     let (owner, name) = (valid(owner)?, valid(name)?);
@@ -55,8 +54,8 @@ pub async fn import(
     .ok_or(Error::NotFound)?;
     let path = state_dir.join(format!("repos/{public_id}.git"));
 
-    let owned = source.to_owned();
-    let refs = tokio::task::spawn_blocking(move || Gix.remote_refs(&owned))
+    let (owned, secret) = (source.to_owned(), credentials.to_owned());
+    let refs = tokio::task::spawn_blocking(move || Gix.remote_refs(&owned, &secret))
         .await
         .map_err(|err| Error::Internal(err.to_string()))?
         .map_err(|err| Error::Source(reason(&err.to_string(), source)))?;
@@ -91,14 +90,19 @@ pub async fn import(
     }
     checkpoint("admitted");
 
-    let (target, owned, wanted) = (path.clone(), source.to_owned(), refs.clone());
+    let (target, owned, secret, wanted) = (
+        path.clone(),
+        source.to_owned(),
+        credentials.to_owned(),
+        refs.clone(),
+    );
     let fetched = supervise(
         writer.clone(),
         gate.clone(),
         bus.clone(),
         state_dir.to_owned(),
         repo_id,
-        move || Gix.fetch(&target, &owned, &wanted),
+        move || Gix.fetch(&target, &owned, &secret, &wanted),
     )
     .await
     .map_err(|err| Error::Internal(err.to_string()))?
@@ -106,6 +110,30 @@ pub async fn import(
     fetched.map_err(|err| Error::Source(reason(&err.to_string(), source)))?;
     tracing::info!(event = "repo-imported", repo, refs = refs.len());
     Ok(refs.len())
+}
+
+/// An absolute path, or a URL that cannot carry a credential: no userinfo (an ssh
+/// user name excepted), query or fragment (ADR 0041, 0044). The CLI's original
+/// arguments stay readable by every local user for the whole import.
+pub fn check_source(source: &str) -> Result<(), &'static str> {
+    let Some((scheme, rest)) = source.split_once("://") else {
+        // The server would resolve a relative path from its own working directory.
+        return if Path::new(source).is_absolute() {
+            Ok(())
+        } else {
+            Err("not an absolute path or a URL")
+        };
+    };
+    if rest.contains(['?', '#']) {
+        return Err("a query or fragment in the source is refused; use --credentials-file");
+    }
+    let authority = rest.split('/').next().unwrap_or(rest);
+    match authority.rsplit_once('@') {
+        Some((user, _)) if scheme != "ssh" || user.contains(':') => {
+            Err("credentials in the source are refused; use --credentials-file")
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Runs the admitted mutation in a task of its own, then releases the gate and

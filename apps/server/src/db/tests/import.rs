@@ -56,6 +56,7 @@ impl Import {
             &self.state_dir,
             repo,
             source,
+            "",
             "request-1",
         )
         .await
@@ -188,6 +189,11 @@ async fn refusals_write_nothing() {
             &PathBuf::from("relative/source.git"),
             "source",
         ),
+        (
+            "alice/other",
+            &PathBuf::from("https://user:secret@127.0.0.1:9/demo.git"),
+            "source",
+        ),
     ] {
         let error = import.run(repo, from.to_str().unwrap()).await.unwrap_err();
         let matched = match (&error, check) {
@@ -207,7 +213,7 @@ async fn refusals_write_nothing() {
 async fn a_crash_during_import_is_reconciled_at_restart() {
     let import = Import::new().await;
     let source = source(&import.state_dir, "main");
-    let refs = Gix.remote_refs(source.to_str().unwrap()).unwrap();
+    let refs = Gix.remote_refs(source.to_str().unwrap(), "").unwrap();
     let target = import.path("demo").await;
     // The server dies after the fetch, before reconciliation.
     let updates: Vec<_> = refs
@@ -229,7 +235,8 @@ async fn a_crash_during_import_is_reconciled_at_restart() {
         )
         .await
         .unwrap();
-    Gix.fetch(&target, source.to_str().unwrap(), &refs).unwrap();
+    Gix.fetch(&target, source.to_str().unwrap(), "", &refs)
+        .unwrap();
     // The connections die with the server; the new instance reopens the file.
     let (reopened, _) = crate::db::open(&import.state_dir.join("db/kajiba.sqlite"))
         .await
@@ -262,6 +269,47 @@ async fn a_crash_during_import_is_reconciled_at_restart() {
         import.run("alice/demo", source.to_str().unwrap()).await,
         Err(Error::NotEmpty(_))
     ));
+}
+
+#[test]
+fn sources_carrying_credentials_are_refused() {
+    use crate::import::check_source;
+    for source in [
+        "/srv/source.git",
+        "file:///srv/source.bundle",
+        "https://example.org/demo.git",
+        "git://example.org/demo.git",
+        "ssh://git@example.org:2222/demo.git",
+    ] {
+        assert_eq!(check_source(source), Ok(()), "{source}");
+    }
+    for (source, refused) in [
+        ("relative/source.git", "not an absolute path"),
+        (
+            "https://alice@example.org/demo.git",
+            "credentials in the source",
+        ),
+        (
+            "https://alice:token@example.org/demo.git",
+            "credentials in the source",
+        ),
+        (
+            "git://alice@example.org/demo.git",
+            "credentials in the source",
+        ),
+        (
+            "ssh://git:token@example.org/demo.git",
+            "credentials in the source",
+        ),
+        (
+            "https://example.org/demo.git?token=abc",
+            "a query or fragment",
+        ),
+        ("https://example.org/demo.git#token", "a query or fragment"),
+    ] {
+        let err = check_source(source).unwrap_err();
+        assert!(err.contains(refused), "{source}: {err}");
+    }
 }
 
 #[test]
@@ -300,7 +348,7 @@ fn source_reasons_drop_url_credentials_and_stay_bounded() {
 async fn a_dropped_import_future_still_releases_the_gate_and_reconciles() {
     let import = Import::new().await;
     let source = source(&import.state_dir, "main");
-    let refs = Gix.remote_refs(source.to_str().unwrap()).unwrap();
+    let refs = Gix.remote_refs(source.to_str().unwrap(), "").unwrap();
     let target = import.path("demo").await;
     let updates: Vec<_> = refs
         .iter()
@@ -327,7 +375,7 @@ async fn a_dropped_import_future_still_releases_the_gate_and_reconciles() {
         let (target, source, refs) = (target.clone(), source.clone(), refs.clone());
         move || {
             blocked.recv().unwrap();
-            Gix.fetch(&target, source.to_str().unwrap(), &refs)
+            Gix.fetch(&target, source.to_str().unwrap(), "", &refs)
         }
     };
     drop(supervise(

@@ -377,13 +377,18 @@ async fn import_never_returns_or_logs_source_credentials() {
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .filter(|line| line["event"] == "fatal")
             .collect();
-        assert_eq!(fatal.len(), 2, "{stderr}");
-        for line in fatal {
+        assert_eq!(fatal.len(), 4, "{stderr}");
+        for line in &fatal[..3] {
             assert!(
                 line.to_string().contains("the source cannot be read"),
                 "{line}"
             );
         }
+        assert!(
+            fatal[3].to_string().contains("--credentials-file"),
+            "{}",
+            fatal[3]
+        );
         return;
     }
     kajiba_core::log::init("debug").unwrap();
@@ -405,15 +410,36 @@ async fn import_never_returns_or_logs_source_credentials() {
     .unwrap()
     .committed();
     let server = tokio::spawn(local.serve(admin, Arc::default(), std::future::pending()));
+    let socket = dir.socket();
+    let import = |source: &str, credentials_file: Option<PathBuf>| {
+        crate::admin_import(
+            &socket,
+            "alice/demo".into(),
+            source.into(),
+            credentials_file,
+        )
+    };
+    // Credentials in the source are refused before any git child runs.
     for source in [
         "https://user:secret@127.0.0.1:9/demo.git",
-        // git echoes this one raw: "unable to look up user:secret@127.0.0.1:9".
         "git://user:secret@127.0.0.1:9/demo.git",
     ] {
-        assert_eq!(
-            crate::admin_import(&dir.socket(), "alice/demo".into(), source.into()).await,
-            std::process::ExitCode::FAILURE
-        );
+        assert_eq!(import(source, None).await, std::process::ExitCode::FAILURE);
     }
+    // Credentials from a file reach git's environment only; git's failure never echoes them.
+    use std::os::unix::fs::PermissionsExt;
+    let file = dir.0.join("credentials");
+    std::fs::write(&file, "user:secret\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        import("https://127.0.0.1:9/demo.git", Some(file.clone())).await,
+        std::process::ExitCode::FAILURE
+    );
+    // A file readable by others is refused unread.
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        import("https://127.0.0.1:9/demo.git", Some(file)).await,
+        std::process::ExitCode::FAILURE
+    );
     server.abort();
 }

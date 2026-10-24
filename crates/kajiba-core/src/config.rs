@@ -504,8 +504,8 @@ pub fn read_config(path: &Path) -> Result<String, String> {
     Ok(input)
 }
 
-fn open_file(path: &Path, field: &str) -> Result<(), String> {
-    let (_, metadata) = open_regular(path, field)?;
+fn open_file(path: &Path, field: &str) -> Result<File, String> {
+    let (file, metadata) = open_regular(path, field)?;
     // A symlink (secret manager) is followed: the mode checked is the secret's own.
     if metadata.permissions().mode() & 0o006 != 0 {
         return Err(format!(
@@ -513,7 +513,27 @@ fn open_file(path: &Path, field: &str) -> Result<(), String> {
             path.display()
         ));
     }
-    Ok(())
+    Ok(file)
+}
+
+/// Largest secret file read (a credential is a few hundred bytes).
+pub const MAX_SECRET_BYTES: u64 = 4096;
+
+/// Reads a secret file under the same rules as the configuration's secret files
+/// (`open_file`), without its trailing newline.
+pub fn read_secret(path: &Path, field: &str) -> Result<String, String> {
+    let file = open_file(path, field)?;
+    let mut secret = String::new();
+    file.take(MAX_SECRET_BYTES + 1)
+        .read_to_string(&mut secret)
+        .map_err(|err| format!("{field} ({}): {err}", path.display()))?;
+    if secret.len() as u64 > MAX_SECRET_BYTES {
+        return Err(format!(
+            "{field} ({}): larger than {MAX_SECRET_BYTES} bytes",
+            path.display()
+        ));
+    }
+    Ok(secret.trim_end_matches(['\n', '\r']).to_owned())
 }
 
 /// ADR 0026's `config check` rules; names are normalized to lowercase in place.
@@ -757,7 +777,7 @@ impl RunnerConfig {
     }
 
     pub fn check_files(&self) -> Result<(), String> {
-        open_file(&self.token_file, "token_file")
+        open_file(&self.token_file, "token_file").map(drop)
     }
 }
 

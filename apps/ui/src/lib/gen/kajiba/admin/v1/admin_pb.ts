@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file kajiba/admin/v1/admin.proto.
  */
 export const file_kajiba_admin_v1_admin: GenFile = /*@__PURE__*/
-  fileDesc("ChtrYWppYmEvYWRtaW4vdjEvYWRtaW4ucHJvdG8SD2thamliYS5hZG1pbi52MSIdCg1FbnJvbGxSZXF1ZXN0EgwKBHVzZXIYASABKAkiHQoORW5yb2xsUmVzcG9uc2USCwoDdXJsGAEgASgJIjkKEExpc3RSZXBvc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiUgoRTGlzdFJlcG9zUmVzcG9uc2USJAoFcmVwb3MYASADKAsyFS5rYWppYmEuYWRtaW4udjEuUmVwbxIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiSAoEUmVwbxIRCglwdWJsaWNfaWQYASABKAkSDQoFb3duZXIYAiABKAkSDAoEbmFtZRgDIAEoCRIQCghhcmNoaXZlZBgEIAEoCCItCg1JbXBvcnRSZXF1ZXN0EgwKBHJlcG8YASABKAkSDgoGc291cmNlGAIgASgJIh4KDkltcG9ydFJlc3BvbnNlEgwKBHJlZnMYASABKA0y+AEKDEFkbWluU2VydmljZRJJCgZFbnJvbGwSHi5rYWppYmEuYWRtaW4udjEuRW5yb2xsUmVxdWVzdBofLmthamliYS5hZG1pbi52MS5FbnJvbGxSZXNwb25zZRJSCglMaXN0UmVwb3MSIS5rYWppYmEuYWRtaW4udjEuTGlzdFJlcG9zUmVxdWVzdBoiLmthamliYS5hZG1pbi52MS5MaXN0UmVwb3NSZXNwb25zZRJJCgZJbXBvcnQSHi5rYWppYmEuYWRtaW4udjEuSW1wb3J0UmVxdWVzdBofLmthamliYS5hZG1pbi52MS5JbXBvcnRSZXNwb25zZWIGcHJvdG8z");
+  fileDesc("ChtrYWppYmEvYWRtaW4vdjEvYWRtaW4ucHJvdG8SD2thamliYS5hZG1pbi52MSIdCg1FbnJvbGxSZXF1ZXN0EgwKBHVzZXIYASABKAkiHQoORW5yb2xsUmVzcG9uc2USCwoDdXJsGAEgASgJIjkKEExpc3RSZXBvc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiUgoRTGlzdFJlcG9zUmVzcG9uc2USJAoFcmVwb3MYASADKAsyFS5rYWppYmEuYWRtaW4udjEuUmVwbxIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiSAoEUmVwbxIRCglwdWJsaWNfaWQYASABKAkSDQoFb3duZXIYAiABKAkSDAoEbmFtZRgDIAEoCRIQCghhcmNoaXZlZBgEIAEoCCJCCg1JbXBvcnRSZXF1ZXN0EgwKBHJlcG8YASABKAkSDgoGc291cmNlGAIgASgJEhMKC2NyZWRlbnRpYWxzGAMgASgJIh4KDkltcG9ydFJlc3BvbnNlEgwKBHJlZnMYASABKA0y+AEKDEFkbWluU2VydmljZRJJCgZFbnJvbGwSHi5rYWppYmEuYWRtaW4udjEuRW5yb2xsUmVxdWVzdBofLmthamliYS5hZG1pbi52MS5FbnJvbGxSZXNwb25zZRJSCglMaXN0UmVwb3MSIS5rYWppYmEuYWRtaW4udjEuTGlzdFJlcG9zUmVxdWVzdBoiLmthamliYS5hZG1pbi52MS5MaXN0UmVwb3NSZXNwb25zZRJJCgZJbXBvcnQSHi5rYWppYmEuYWRtaW4udjEuSW1wb3J0UmVxdWVzdBofLmthamliYS5hZG1pbi52MS5JbXBvcnRSZXNwb25zZWIGcHJvdG8z");
 
 /**
  * @generated from message kajiba.admin.v1.EnrollRequest
@@ -134,11 +134,20 @@ export type ImportRequest = Message<"kajiba.admin.v1.ImportRequest"> & {
   repo: string;
 
   /**
-   * An absolute path to a bare repository or a bundle, or a URL.
+   * An absolute path to a bare repository or a bundle, or a URL without userinfo,
+   * query or fragment (0041, 0044).
    *
    * @generated from field: string source = 2;
    */
   source: string;
+
+  /**
+   * `user:token` or a token alone, for an http(s) source; read by the CLI from
+   * `--credentials-file`, never logged (0044).
+   *
+   * @generated from field: string credentials = 3;
+   */
+  credentials: string;
 };
 
 /**
