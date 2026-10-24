@@ -54,7 +54,8 @@ impl Fixture {
 
 impl Fixture {
     /// Fills a declared repository: `files` committed on `main`, then each extra
-    /// branch and tag on that commit, pushed with the git binary.
+    /// branch and tag on its own empty commit, each the child of the previous one
+    /// (distinct ids: a fetch wants each), pushed with the git binary.
     pub(in crate::transport) async fn fill(
         &self,
         repo: &str,
@@ -79,8 +80,20 @@ impl Fixture {
         }
         git(&work, &["add", "-A"]);
         git(&work, &["commit", "-q", "-m", "init"]);
+        let mut parent = git(&work, &["rev-parse", "HEAD"]);
         for name in refs {
-            git(&work, &["update-ref", name, "HEAD"]);
+            parent = git(
+                &work,
+                &[
+                    "commit-tree",
+                    "HEAD^{tree}",
+                    "-p",
+                    parent.trim(),
+                    "-m",
+                    name,
+                ],
+            );
+            git(&work, &["update-ref", name, parent.trim()]);
         }
         git(
             &work,
