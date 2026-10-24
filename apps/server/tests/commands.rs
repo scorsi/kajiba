@@ -191,7 +191,7 @@ fn invalid_config_is_structured_for_check_and_startup() {
 }
 
 #[test]
-fn serve_emits_start_with_version() {
+fn serve_emits_start_and_applied_migration_versions() {
     use std::io::BufRead;
     use std::process::Stdio;
 
@@ -216,13 +216,15 @@ fn serve_emits_start_with_version() {
     let stderr = child.stderr.take().unwrap();
     let (send, receive) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        std::io::BufReader::new(stderr)
-            .read_line(&mut text)
-            .unwrap();
-        let _ = send.send(text);
+        let mut reader = std::io::BufReader::new(stderr);
+        for _ in 0..2 {
+            let mut text = String::new();
+            reader.read_line(&mut text).unwrap();
+            let _ = send.send(text);
+        }
     });
     let line = receive.recv_timeout(std::time::Duration::from_secs(5));
+    let migration = receive.recv_timeout(std::time::Duration::from_secs(5));
     let _ = child.kill();
     child.wait().unwrap();
     std::fs::remove_dir_all(dir).unwrap();
@@ -231,6 +233,10 @@ fn serve_emits_start_with_version() {
     assert_eq!(line["event"], "start");
     assert_eq!(line["level"], "info");
     assert_eq!(line["version"], include_str!("../../../VERSION").trim());
+    let migration: serde_json::Value = serde_json::from_str(&migration.unwrap()).unwrap();
+    assert_eq!(migration["event"], "migration-applied");
+    assert_eq!(migration["level"], "info");
+    assert_eq!(migration["version"], 1);
 }
 
 #[test]
@@ -264,6 +270,7 @@ fn serve_refuses_held_state_lock_with_fatal_error() {
         format!("another instance holds {}", lock_path.display())
     );
     assert!(!dir.join("repos").exists());
+    assert!(!dir.join("db/kajiba.sqlite").exists());
     drop(lock);
     std::fs::remove_dir_all(dir).unwrap();
 }

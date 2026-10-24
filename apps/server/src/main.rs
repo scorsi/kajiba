@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use kajiba_core::{config::ServerConfig, log};
 use std::{path::PathBuf, process::ExitCode};
 
+mod db;
 mod state;
 
 // Exit codes: 0 success (including help/version), 1 runtime error, 2 usage error
@@ -111,6 +112,13 @@ async fn main() -> ExitCode {
             tracing::info!(event = "start", version = env!("CARGO_PKG_VERSION"));
             let _state_lock = match state::prepare(&config.state_dir) {
                 Ok(lock) => lock,
+                Err(err) => {
+                    log::error("fatal", &err);
+                    return ExitCode::FAILURE;
+                }
+            };
+            let _database = match db::open(&config.state_dir.join("db/kajiba.sqlite")).await {
+                Ok(database) => database,
                 Err(err) => {
                     log::error("fatal", &err);
                     return ExitCode::FAILURE;

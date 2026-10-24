@@ -13,6 +13,7 @@ axum.workspace = true
 clap.workspace = true
 kajiba-core = { path = "../../crates/kajiba-core" }
 kajiba-proto = { path = "../../crates/kajiba-proto" }
+sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

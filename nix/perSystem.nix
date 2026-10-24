@@ -20,6 +20,8 @@
             (craneLib.fileset.commonCargoSources ../crates)
             ../crates/kajiba-core/tests/fixtures
             (craneLib.fileset.commonCargoSources ../apps/server)
+            ../apps/server/migrations
+            ../apps/server/tests/fixtures
             (craneLib.fileset.commonCargoSources ../apps/runner)
             (craneLib.fileset.commonCargoSources ../apps/cli)
             ../Cargo.toml
