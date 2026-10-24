@@ -47,6 +47,7 @@ pub enum Kind {
     Grpc,
     GrpcWeb,
     GitHttp,
+    Raw,
     Other = 5,
 }
 impl Kind {

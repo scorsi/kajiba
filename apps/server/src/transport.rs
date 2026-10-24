@@ -89,6 +89,7 @@ fn router(
         .add_service(RepoServiceServer::new(repos::Repos(health.clone())))
         .into_axum_router()
         .merge(git_http::routes(repos::Repos(health.clone())))
+        .merge(raw::routes(repos::Repos(health.clone())))
         .route("/healthz", get(|| async { "OK" }))
         .route(
             "/readyz",
@@ -328,6 +329,7 @@ pub mod correlation;
 pub mod cursor;
 pub mod git_http;
 pub mod local;
+pub mod raw;
 pub mod repos;
 
 #[cfg(test)]

@@ -55,6 +55,7 @@ pub(super) async fn request(
             "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
         }
         // Route classes, never the raw path (0022).
+        path if path.starts_with("/raw/") => "raw",
         path if path.ends_with(".git/info/refs") => "git-info-refs",
         path if path.ends_with(".git/git-upload-pack") => "git-upload-pack",
         _ => "other",
@@ -67,6 +68,7 @@ pub(super) async fn request(
         .insert(RequestId(request_id.clone()));
     let kind = match method {
         "git-info-refs" | "git-upload-pack" => Kind::GitHttp,
+        "raw" => Kind::Raw,
         _ => Kind::from_content_type(
             request
                 .headers()
