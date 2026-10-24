@@ -277,3 +277,73 @@ async fn cli_prints_the_link_and_logs_enrollment_without_the_token() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn list_repos_maps_ids_to_names_by_pages_and_marks_archived() {
+    let dir = SocketDir::new();
+    let local = Local::bind(&dir.socket(), Arc::default()).unwrap();
+    let admin = admin(&dir.0, "[users.alice]\n[users.bob]").await;
+    sqlx::query(
+        "INSERT INTO repo (public_id, config_key, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, archived_at)
+         SELECT column1, column2, (SELECT id FROM user WHERE name = column3), column2, 'public', 0, 'main', '', 0, column4
+         FROM (VALUES ('00000000000000000000000001', 'zeta', 'bob', NULL),
+                      ('00000000000000000000000002', 'demo', 'alice', 5),
+                      ('00000000000000000000000003', 'tools', 'alice', NULL))",
+    )
+    .execute(&mut *admin.writer.lock().await)
+    .await
+    .unwrap();
+    let server = tokio::spawn(local.serve(admin, Arc::default(), std::future::pending()));
+    let all = list_repos(&dir.socket()).await.unwrap();
+    let names: Vec<_> = all
+        .iter()
+        .map(|r| {
+            (
+                r.public_id.as_str(),
+                format!("{}/{}", r.owner, r.name),
+                r.archived,
+            )
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("00000000000000000000000002", "alice/demo".into(), true),
+            ("00000000000000000000000003", "alice/tools".into(), false),
+            ("00000000000000000000000001", "bob/zeta".into(), false),
+        ]
+    );
+    let mut client = client(&dir.socket()).await.unwrap();
+    let mut page_token = String::new();
+    let mut paged = Vec::new();
+    loop {
+        let page = client
+            .list_repos(ListReposRequest {
+                page_size: 1,
+                page_token,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(page.repos.len() <= 1);
+        paged.extend(page.repos);
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        page_token = page.next_page_token;
+    }
+    assert_eq!(paged, all);
+    let status = client
+        .list_repos(ListReposRequest {
+            page_size: 1,
+            page_token: "garbage".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::InvalidArgument);
+    assert_eq!(
+        status.get_error_details().error_info().unwrap().reason,
+        "INVALID_FIELD"
+    );
+    server.abort();
+}

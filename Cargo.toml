@@ -10,6 +10,8 @@ repository = "https://github.com/scorsi/kajiba"
 
 [workspace.dependencies]
 axum = "0.7"
+# Already transitive (sqlx, tonic): opaque list cursors (0020).
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 # GitStore reads (0003); tree diff needs `blob-diff`.
 gix = { version = "0.90", default-features = false, features = ["sha1", "blob-diff"] }

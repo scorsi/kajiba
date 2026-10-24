@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file kajiba/admin/v1/admin.proto.
  */
 export const file_kajiba_admin_v1_admin: GenFile = /*@__PURE__*/
-  fileDesc("ChtrYWppYmEvYWRtaW4vdjEvYWRtaW4ucHJvdG8SD2thamliYS5hZG1pbi52MSIdCg1FbnJvbGxSZXF1ZXN0EgwKBHVzZXIYASABKAkiHQoORW5yb2xsUmVzcG9uc2USCwoDdXJsGAEgASgJMlkKDEFkbWluU2VydmljZRJJCgZFbnJvbGwSHi5rYWppYmEuYWRtaW4udjEuRW5yb2xsUmVxdWVzdBofLmthamliYS5hZG1pbi52MS5FbnJvbGxSZXNwb25zZWIGcHJvdG8z");
+  fileDesc("ChtrYWppYmEvYWRtaW4vdjEvYWRtaW4ucHJvdG8SD2thamliYS5hZG1pbi52MSIdCg1FbnJvbGxSZXF1ZXN0EgwKBHVzZXIYASABKAkiHQoORW5yb2xsUmVzcG9uc2USCwoDdXJsGAEgASgJIjkKEExpc3RSZXBvc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiUgoRTGlzdFJlcG9zUmVzcG9uc2USJAoFcmVwb3MYASADKAsyFS5rYWppYmEuYWRtaW4udjEuUmVwbxIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiSAoEUmVwbxIRCglwdWJsaWNfaWQYASABKAkSDQoFb3duZXIYAiABKAkSDAoEbmFtZRgDIAEoCRIQCghhcmNoaXZlZBgEIAEoCDKtAQoMQWRtaW5TZXJ2aWNlEkkKBkVucm9sbBIeLmthamliYS5hZG1pbi52MS5FbnJvbGxSZXF1ZXN0Gh8ua2FqaWJhLmFkbWluLnYxLkVucm9sbFJlc3BvbnNlElIKCUxpc3RSZXBvcxIhLmthamliYS5hZG1pbi52MS5MaXN0UmVwb3NSZXF1ZXN0GiIua2FqaWJhLmFkbWluLnYxLkxpc3RSZXBvc1Jlc3BvbnNlYgZwcm90bzM");
 
 /**
  * @generated from message kajiba.admin.v1.EnrollRequest
@@ -47,6 +47,82 @@ export const EnrollResponseSchema: GenMessage<EnrollResponse> = /*@__PURE__*/
   messageDesc(file_kajiba_admin_v1_admin, 1);
 
 /**
+ * @generated from message kajiba.admin.v1.ListReposRequest
+ */
+export type ListReposRequest = Message<"kajiba.admin.v1.ListReposRequest"> & {
+  /**
+   * @generated from field: int32 page_size = 1;
+   */
+  pageSize: number;
+
+  /**
+   * @generated from field: string page_token = 2;
+   */
+  pageToken: string;
+};
+
+/**
+ * Describes the message kajiba.admin.v1.ListReposRequest.
+ * Use `create(ListReposRequestSchema)` to create a new message.
+ */
+export const ListReposRequestSchema: GenMessage<ListReposRequest> = /*@__PURE__*/
+  messageDesc(file_kajiba_admin_v1_admin, 2);
+
+/**
+ * @generated from message kajiba.admin.v1.ListReposResponse
+ */
+export type ListReposResponse = Message<"kajiba.admin.v1.ListReposResponse"> & {
+  /**
+   * @generated from field: repeated kajiba.admin.v1.Repo repos = 1;
+   */
+  repos: Repo[];
+
+  /**
+   * @generated from field: string next_page_token = 2;
+   */
+  nextPageToken: string;
+};
+
+/**
+ * Describes the message kajiba.admin.v1.ListReposResponse.
+ * Use `create(ListReposResponseSchema)` to create a new message.
+ */
+export const ListReposResponseSchema: GenMessage<ListReposResponse> = /*@__PURE__*/
+  messageDesc(file_kajiba_admin_v1_admin, 3);
+
+/**
+ * @generated from message kajiba.admin.v1.Repo
+ */
+export type Repo = Message<"kajiba.admin.v1.Repo"> & {
+  /**
+   * @generated from field: string public_id = 1;
+   */
+  publicId: string;
+
+  /**
+   * @generated from field: string owner = 2;
+   */
+  owner: string;
+
+  /**
+   * @generated from field: string name = 3;
+   */
+  name: string;
+
+  /**
+   * @generated from field: bool archived = 4;
+   */
+  archived: boolean;
+};
+
+/**
+ * Describes the message kajiba.admin.v1.Repo.
+ * Use `create(RepoSchema)` to create a new message.
+ */
+export const RepoSchema: GenMessage<Repo> = /*@__PURE__*/
+  messageDesc(file_kajiba_admin_v1_admin, 4);
+
+/**
  * Host-local administration, authorized by Unix peer credentials (0014).
  *
  * @generated from service kajiba.admin.v1.AdminService
@@ -62,6 +138,17 @@ export const AdminService: GenService<{
     methodKind: "unary";
     input: typeof EnrollRequestSchema;
     output: typeof EnrollResponseSchema;
+  },
+  /**
+   * Map repository public ids (directory names under repos/) to names, archived
+   * repositories included and marked (0012, 0026). Ordered by <owner>/<name>.
+   *
+   * @generated from rpc kajiba.admin.v1.AdminService.ListRepos
+   */
+  listRepos: {
+    methodKind: "unary";
+    input: typeof ListReposRequestSchema;
+    output: typeof ListReposResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_kajiba_admin_v1_admin, 0);

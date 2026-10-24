@@ -7,6 +7,9 @@ service AdminService {
   // Revoke the user's passkeys, sessions and runtime PATs, then issue a
   // single-use passkey enrollment link (0014).
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  // Map repository public ids (directory names under repos/) to names, archived
+  // repositories included and marked (0012, 0026). Ordered by <owner>/<name>.
+  rpc ListRepos(ListReposRequest) returns (ListReposResponse);
 }
 
 message EnrollRequest {
@@ -15,4 +18,21 @@ message EnrollRequest {
 
 message EnrollResponse {
   string url = 1;
+}
+
+message ListReposRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListReposResponse {
+  repeated Repo repos = 1;
+  string next_page_token = 2;
+}
+
+message Repo {
+  string public_id = 1;
+  string owner = 2;
+  string name = 3;
+  bool archived = 4;
 }

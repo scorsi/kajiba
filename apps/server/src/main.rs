@@ -69,9 +69,7 @@ enum AdminCommand {
 
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 enum RepoCommand {
-    /// Create a repository (not implemented yet).
-    Create { repo: String },
-    /// Map repository IDs to names (not implemented yet).
+    /// Map repository IDs (directories under repos/) to names; archived ones are marked.
     List,
 }
 
@@ -194,10 +192,11 @@ async fn main() -> ExitCode {
                     .await;
             }
             AdminCommand::Import { .. } => "admin import",
-            AdminCommand::Repo { command } => match command {
-                RepoCommand::Create { .. } => "admin repo create",
-                RepoCommand::List => "admin repo list",
-            },
+            AdminCommand::Repo {
+                command: RepoCommand::List,
+            } => {
+                return admin_repo_list(std::path::Path::new(transport::local::SOCKET_PATH)).await;
+            }
         },
         Command::Hook { command } => match command {
             HookCommand::PreReceive => "hook pre-receive",
@@ -224,6 +223,31 @@ async fn admin_enroll(path: &std::path::Path, user: String) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+async fn admin_repo_list(path: &std::path::Path) -> ExitCode {
+    match transport::local::list_repos(path).await {
+        Ok(repos) => {
+            for repo in repos {
+                println!("{}", repo_line(&repo));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            let message = match err.downcast_ref::<tonic::Status>() {
+                Some(status) => status.message().to_owned(),
+                None => err.to_string(),
+            };
+            log::error("fatal", &format!("admin repo list: {message}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `<public id>\t<owner>/<name>`, then `\tarchived` for an archived repository.
+fn repo_line(repo: &kajiba_proto::admin::v1::Repo) -> String {
+    let archived = if repo.archived { "\tarchived" } else { "" };
+    format!("{}\t{}/{}{archived}", repo.public_id, repo.owner, repo.name)
 }
 
 fn load_config(path: &std::path::Path, files: bool) -> Result<ServerConfig, String> {
@@ -287,14 +311,6 @@ mod tests {
                 },
             ),
             (
-                vec!["repo", "create", "alice/demo"],
-                AdminCommand::Repo {
-                    command: RepoCommand::Create {
-                        repo: "alice/demo".into(),
-                    },
-                },
-            ),
-            (
                 vec!["repo", "list"],
                 AdminCommand::Repo {
                     command: RepoCommand::List,
@@ -308,6 +324,22 @@ mod tests {
                 Command::Admin { command }
             );
         }
+    }
+
+    #[test]
+    fn repo_lines_map_ids_to_names_and_mark_archived() {
+        let mut repo = kajiba_proto::admin::v1::Repo {
+            public_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            owner: "alice".into(),
+            name: "demo".into(),
+            archived: false,
+        };
+        assert_eq!(repo_line(&repo), "01ARZ3NDEKTSV4RRFFQ69G5FAV\talice/demo");
+        repo.archived = true;
+        assert_eq!(
+            repo_line(&repo),
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV\talice/demo\tarchived"
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@ use crate::metrics::Registry;
 use axum::middleware;
 use hyper_util::rt::TokioIo;
 use kajiba_proto::admin::v1::{
-    EnrollRequest, EnrollResponse,
+    EnrollRequest, EnrollResponse, ListReposRequest, ListReposResponse, Repo,
     admin_service_client::AdminServiceClient,
     admin_service_server::{AdminService, AdminServiceServer},
 };
@@ -113,6 +113,49 @@ impl AdminService for Admin {
                 "{}/auth/enroll#{token}",
                 self.public_url.trim_end_matches('/')
             ),
+        }))
+    }
+
+    async fn list_repos(
+        &self,
+        request: Request<ListReposRequest>,
+    ) -> Result<Response<ListReposResponse>, Status> {
+        use super::cursor;
+        const METHOD: &str = "admin.ListRepos";
+        let request = request.into_inner();
+        let size = cursor::page_size(request.page_size)?;
+        let (key, id) = cursor::decode(METHOD, &request.page_token)?.unwrap_or_default();
+        let mut rows: Vec<(i64, String, String, String, bool)> = sqlx::query_as(
+            "SELECT repo.id, repo.public_id, owner.name, repo.name, repo.archived_at IS NOT NULL
+             FROM repo JOIN user owner ON owner.id = repo.owner_id
+             WHERE (owner.name || '/' || repo.name, repo.id) > (?1, ?2)
+             ORDER BY owner.name || '/' || repo.name, repo.id LIMIT ?3",
+        )
+        .bind(key)
+        .bind(id)
+        .bind(size + 1)
+        .fetch_all(&mut *self.writer.lock().await)
+        .await
+        .map_err(|err| Status::internal(format!("list repositories: {err}")))?;
+        let more = rows.len() as i64 > size;
+        rows.truncate(size as usize);
+        let next_page_token = match rows.last() {
+            Some((id, _, owner, name, _)) if more => {
+                cursor::encode(METHOD, &format!("{owner}/{name}"), *id)
+            }
+            _ => String::new(),
+        };
+        Ok(Response::new(ListReposResponse {
+            repos: rows
+                .into_iter()
+                .map(|(_, public_id, owner, name, archived)| Repo {
+                    public_id,
+                    owner,
+                    name,
+                    archived,
+                })
+                .collect(),
+            next_page_token,
         }))
     }
 }
@@ -259,17 +302,45 @@ impl Service<axum::http::Uri> for Connector {
     }
 }
 
-pub async fn enroll(path: &Path, user: String) -> Result<String, Box<dyn std::error::Error>> {
+async fn client(
+    path: &Path,
+) -> Result<AdminServiceClient<tonic::transport::Channel>, Box<dyn std::error::Error>> {
     let channel = tonic::transport::Endpoint::from_static("http://localhost")
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(5))
         .connect_with_connector(Connector(path.into()))
         .await?;
-    Ok(AdminServiceClient::new(channel)
+    Ok(AdminServiceClient::new(channel))
+}
+
+pub async fn enroll(path: &Path, user: String) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(client(path)
+        .await?
         .enroll(EnrollRequest { user })
         .await?
         .into_inner()
         .url)
+}
+
+/// Every page, in name order.
+pub async fn list_repos(path: &Path) -> Result<Vec<Repo>, Box<dyn std::error::Error>> {
+    let mut client = client(path).await?;
+    let mut repos = Vec::new();
+    let mut page_token = String::new();
+    loop {
+        let page = client
+            .list_repos(ListReposRequest {
+                page_size: 200,
+                page_token,
+            })
+            .await?
+            .into_inner();
+        repos.extend(page.repos);
+        if page.next_page_token.is_empty() {
+            return Ok(repos);
+        }
+        page_token = page.next_page_token;
+    }
 }
 
 #[cfg(test)]
