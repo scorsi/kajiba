@@ -54,7 +54,7 @@ pub async fn reconcile_users(
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
-            // ADR 0025: re-declaring the user requires a fresh enrollment.
+            // ADR 0028: re-declaring the user requires a fresh enrollment.
             for statement in [
                 "DELETE FROM session WHERE user_id = ?",
                 "DELETE FROM enrollment_token WHERE user_id = ?",

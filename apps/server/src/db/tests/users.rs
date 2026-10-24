@@ -145,7 +145,7 @@ async fn removal_revokes_its_sessions_runtime_pats_passkeys_and_links_and_return
             ("outside".into(), "cli".into(), None),
         ]
     );
-    // Repositories and declared keys stay; passkeys and pending links go (ADR 0025).
+    // Repositories and declared keys stay; passkeys and pending links go (ADR 0028).
     for (table, expected) in [
         ("repo", 1),
         ("ssh_key", 1),

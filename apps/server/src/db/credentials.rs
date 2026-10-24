@@ -98,7 +98,7 @@ pub async fn reconcile_credentials(
                     .bind(&key_type).bind(&line).bind(id).bind(&key_type).bind(&line)
                     .execute(&mut *tx).await?;
             } else {
-                // ADR 0025: a declared key wins over a runtime key with the same fingerprint and usage.
+                // ADR 0028: a declared key wins over a runtime key with the same fingerprint and usage.
                 let runtime: Option<(i64, String)> = sqlx::query_as(
                     "SELECT ssh_key.id, user.name FROM ssh_key JOIN user ON user.id = ssh_key.user_id
                      WHERE usage = ? AND fingerprint = ? AND ssh_key.source = 'runtime'",

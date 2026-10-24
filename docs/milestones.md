@@ -73,19 +73,34 @@ Ordered tasks; each is closable in one sitting with its unit tests, in one or a 
 
 ---
 
-## J2 — Read-only git hosting
+## J2 — Declared repositories, read-only git hosting
 
-**Deliverable**: bare repositories created on the host, clonable over smart HTTP, browsable through the API; Nix can use them as inputs.
+**Deliverable**: repositories declared in the configuration are reconciled at startup (created, renamed with redirects, archived when removed with their content kept in place, unarchived when re-declared), filled by `admin import`, clonable over smart HTTP and through `/raw/`, browsable through a read-only API; Nix can use them as inputs (0026).
 
-Content: `RepoService` Get/List only (public repositories, no mutation before J4); repositories created by `kajiba-server admin repo create` and `admin import <owner>/<name> <path|bundle|url>` over the local socket (0021); `repos/<public id>.git` layout (0012); shared name validator from J1 extended with ref/path validation, ref resolution (0021); `GitStore` boundary with gix (refs, tree, blob, log, diff) and git spawn for transport (0003); smart HTTP and `/raw/` routes (0005, 0021); rename (admin command) and redirects (0021); error mapping and pagination of 0020 on the first RPCs.
+Ordered tasks; each is closable in one sitting with its unit tests, in one or a few commits, and leaves `nix flake check` green.
 
-**Acceptance criteria** (`nixos-git-http`)
+1. **Repository configuration** (0019, 0026): `repos.<key>` with `owner`, `name`, `description`, `visibility`, `default_branch`, `ci_enabled`, `previous_names`, `permissions.<user>`, `mirrors[]` (`remote_url`, `credential`, `enabled`); `config check` rules of 0026 (declared owner and permission users, unique current names, previous names neither current nor repeated, declared credentials, unique remote per repository). Tests: a full example loads; each refusal names its field.
+2. **Module options for repositories** (0015, 0026): `services.kajiba-server.repos` mirroring task 1, written to the generated file and checked at build time. Check `module-eval` evaluates declared repositories and rejects an unknown option.
+3. **Schema: declared repositories** (docs/schema.md, 0026): migration adding `repo.config_key` (unique index) and `repo.archived_at` by `ADD COLUMN` (the existing `UNIQUE(owner_id, name)` stays and covers archived rows, so `repo` is not rebuilt), and making `pending_push.principal_id` nullable (`system`). Tests: key uniqueness, an archived row's name refused for another row, a `system` pending row accepted, migration history updated.
+4. **Ref and path validation** (0021): ref names (`git check-ref-format` rules) and paths (no `..`, no empty segment, no NUL) in the shared validator. Tests: valid and invalid refs and paths, boundaries.
+5. **`GitStore` with gix** (0003): bare init with `HEAD` on the default branch, refs, tree, blob, log, diff; git spawn for transport. Tests on a fixture repository; one gix / `git` binary parity test on refs.
+6. **Ref resolution** (0021): `<ref>/<path>` resolution (longest branch, then tag, then full commit id) on `GitStore`. Tests: `feature/x/README.md` is branch `feature/x`, tag fallback, commit id, unknown ref.
+7. **Repository reconciliation** (0012, 0026): at startup, matching by key: creation (init in `tmp/`, rename, commit), rename (owner/name updated, `public_id` and directory unchanged), redirects equal to `previous_names`, permissions and mirror configuration rows, archival (`archived_at` set, row, directory and redirects kept in place, permissions deleted, queued and running runs cancelled, mirrors stopped; a retained `pending_push` row stays), unarchival of the same key (same row, same directory, content intact); a declaration, rename or previous name taking a current or previous name of an archived repository aborts startup naming both keys; the orphan sweep counts every row, archived included; `repo-created`, `repo-renamed`, `repo-archived`, `repo-unarchived`. Tests: each case, mirror runtime state kept across a configuration rerun, no-op rerun writes nothing, an archived row keeps its directory, runs and mirror status, another key taking its name or one of its previous names is refused, its redirects still resolve, the same key re-declared unarchives the same row with its refs intact.
+8. **Admission gate and push reconciliation** (0003): per-repository admission, `pending_push` row before any ref mutation, ordered conversion into `push` events after the mutating process exits, retained row on an unexpected value, recovery at startup and on a timer; no hook yet. Tests: applied, not applied, partial, creation and deletion; crash after ref update → one event after restart; admission refused while a row is pending.
+9. **Admin commands** (0012, 0021, 0026): `admin repo list` maps public ids to names and marks archived repositories; the `admin repo create` placeholder is deleted. Tests: list output; `repo create` is an unknown subcommand.
+10. **`admin import`** (0021, 0026): path, bundle or URL into a declared empty repository (never an archived one) through the gate of task 8, `refs/heads/*` and `refs/tags/*` only, `push` events by `system`, `repo-imported`. Tests: import preserves refs, tags and `HEAD`; undeclared target, non-empty target and missing default branch refused with nothing written; a crash during import is reconciled.
+11. **`RepoService` Get/List** (0020, 0026): read-only, public repositories; List returns active and archived repositories, archived ones marked; Get by `public_id` or by name (the row holding the name, active or archived, then a redirect, which may lead to an archived repository), opaque-cursor pagination by name, `REPO_NOT_FOUND`; declared fields, permissions and mirror configuration in the response. Tests: pagination stability, redirect, archived repository by `public_id` and by name, not found, no mutating method in the service.
+12. **Smart HTTP** (0003, 0005, 0021): `info/refs` and `git-upload-pack` through `git upload-pack --stateless-rpc`, redirects resolved transparently, clean 404, archived repository refused (403, "archived"); UI route `/<owner>/<name>` answers 301 for a previous name. Tests: clone through the router in a test, unknown repository 404, redirect.
+13. **`/raw/`** (0005, 0021): `/raw/<owner>/<name>/<ref>/<path>` with task 6's resolution and task 4's validation. Tests: file, nested branch, tag, commit id, invalid path refused, missing file 404, archived repository refused (403).
+14. **`nixos-git-http`** (0015, 0021, 0022, 0026): `alice/demo` declared in the test's NixOS configuration; `admin import` of a bundle → `git clone http://forge/alice/demo.git` identical (same refs, same `HEAD`); `nix flake prefetch git+http://forge/alice/demo.git` succeeds; `/raw/alice/demo/main/flake.nix` returns the file; `/raw/alice/demo/feature/x/README.md` resolves branch `feature/x`; clone of an undeclared repository → clean 404; a second import into `alice/demo` refused. Closing test: `nixos-git-http`.
+15. **`nixos-repo-lifecycle`** (0012, 0021, 0026, 0032): configurations switched in the test (specialisations): rename with the old name in `previous_names` → old name clones, UI route 301, same directory; removal → repository archived, `repo-archived` logged, directory still in place and nothing in `tmp/orphans/`, clone and `/raw/` refused as archived (by name and by the old redirected name), `RepoService.Get` by `public_id`, by name and by the old name answers with the repository marked archived and its tree still browsable, UI route of the old name still 301; another key declared with the archived name, or with its old name → startup refused naming both keys; the original key re-declared → same `public_id`, unarchived, clone identical to the original with no `admin import`; a stray directory under `repos/` → moved to `tmp/orphans/` with `repo-orphaned`. Closing test: `nixos-repo-lifecycle`.
 
-- Import of a bundle → `git clone http://forge/alice/demo.git` identical (same refs, same HEAD); `nix flake prefetch git+http://forge/alice/demo.git` succeeds; `/raw/alice/demo/main/flake.nix` returns the file; `/raw/alice/demo/feature/x/README.md` resolves branch `feature/x`; `git clone` of a nonexistent repository → clean 404.
-- Rename → old name clones successfully, UI route answers 301.
-- `GitStore` unit tests: tree, blob, log, diff on a fixture repository; one gix / `git` binary parity test on refs. Validator unit tests (refs, paths; name validation delivered in J1).
+**Acceptance criteria**
 
-**Delegable**: repository fixtures, parity tests, route boilerplate.
+- The two nixosTests above pass; every check of tasks 1–13 passes on all systems where it runs.
+- No RPC, CLI command or admin command creates, renames or deletes a repository.
+
+**Delegable**: repository fixtures, parity tests, route boilerplate, reconciliation cases.
 
 ---
 
@@ -93,7 +108,7 @@ Content: `RepoService` Get/List only (public repositories, no mutation before J4
 
 **Deliverable**: `git push` over SSH, controlled by permissions and ref rules, with mandatory signatures.
 
-Content: dedicated sshd instance in the module, `AuthorizedKeysCommand` → `kajiba-server ssh-keys`, `kajiba-server serve-ssh` (0004); keys come from the configuration (0014), no key-mutating RPC; `kajiba-server hook pre-receive|post-receive` → `kajiba.hook.v1` over the local socket, global `core.hooksPath`, `pending_push` durability (0003); read/write/admin RBAC + `is_admin`, repository permissions set by `admin` commands until J4 (0014); ref rules (0013); signature algorithm of 0014; `push` events (0017); `/readyz` now checks the sshd integration. `AuthorizedKeysCommand` prints only the canonical stored key (`ssh_key.public_key`, no comment), never the configured line.
+Content: dedicated sshd instance in the module, `AuthorizedKeysCommand` → `kajiba-server ssh-keys`, `kajiba-server serve-ssh` (0004); keys come from the configuration (0014), no key-mutating RPC; `kajiba-server hook pre-receive|post-receive` → `kajiba.hook.v1` over the local socket, global `core.hooksPath`, joining J2's admission gate and `pending_push` reconciliation (0003, 0026); read/write/admin RBAC + `is_admin`, repository permissions from the configuration (0014, 0026); ref rules of 0013/0014, fixed by the product, per-pattern rules declared only (0026); signature algorithm of 0014; `push` events (0017); `/readyz` now checks the sshd integration. `AuthorizedKeysCommand` prints only the canonical stored key (`ssh_key.public_key`, no comment), never the configured line.
 
 **Acceptance criteria** (`nixos-git-ssh`, classic ed25519 keys)
 
@@ -104,6 +119,7 @@ Content: dedicated sshd instance in the module, `AuthorizedKeysCommand` → `kaj
 - Server stopped → push refused with an explicit message, no partial state.
 - Server killed between ref update and `PostReceive` → after restart the `push` event exists exactly once; a second push to that repository is refused until reconciliation, then accepted, with both events in order. Cover partial success, creation, deletion, failed updates and a surviving `receive-pack`; an unexpected ref value retains its pending row and blocks admission.
 - SSH command other than `git-upload-pack`/`git-receive-pack` → refused.
+- Clone, fetch or push of an archived repository over SSH → refused with a message saying it is archived (0026).
 
 **Delegable**: nixosTest scenarios, generation of key fixtures and signed commits, hook stdin parsing.
 
@@ -111,14 +127,14 @@ Content: dedicated sshd instance in the module, `AuthorizedKeysCommand` → `kaj
 
 ## J4 — Web and API authentication, minimal CLI
 
-**Deliverable**: passkey login, personal tokens, protected gRPC/grpc-web API, a Rust CLI able to create a repository.
+**Deliverable**: passkey login, personal tokens, protected gRPC/grpc-web API, a Rust CLI able to list repositories.
 
-Content: WebAuthn enrollment through the `admin enroll` link and login (webauthn-rs), cookie sessions, lifecycle values of 0014; runtime PATs (create/list/revoke; declared ones read-only); single auth interceptor with per-method scopes; tonic-web + restricted CORS (0020); `RepoService.Create` and permission RPCs behind authentication; `kajiba` CLI (Rust): `login` (stores the PAT file), `repo list|create`, `--json`, version header and 0023 matrix (0007); Playwright harness and `nix run .#e2e` (0015) with a minimal login page ahead of J5's UI.
+Content: WebAuthn enrollment through the `admin enroll` link and login (webauthn-rs), cookie sessions, lifecycle values of 0014; runtime PATs (create/list/revoke; declared ones read-only); single auth interceptor with per-method scopes; tonic-web + restricted CORS (0020); `RepoService` Get/List behind authentication, still read-only (0026); `kajiba` CLI (Rust): `login` (stores the PAT file), `repo list|get`, `--json`, version header and 0023 matrix (0007); Playwright harness and `nix run .#e2e` (0015) with a minimal login page ahead of J5's UI.
 
 **Acceptance criteria**
 
 - Unauthenticated call → `UNAUTHENTICATED` / `CREDENTIAL_INVALID`; missing scope → `PERMISSION_DENIED` / `SCOPE_MISSING`; modifying a declared token → `FAILED_PRECONDITION` / `DECLARED_IN_CONFIG`; a method without a scope option fails a unit test.
-- `nixos-cli`: the CLI creates a repository with a declared PAT, lists it, then clones it (J2); expired PAT → refused; CLI of another `0.minor` → `VERSION_INCOMPATIBLE`.
+- `nixos-cli`: the CLI lists a declared repository with a declared PAT, then clones it (J2); expired PAT → refused; CLI of another `0.minor` → `VERSION_INCOMPATIBLE`.
 - `e2e` (WebAuthn virtual authenticator): enrollment through the `admin enroll` link, logout, login again, session invalidated after expiry; a second `admin enroll` revokes the passkey; wrong-origin ceremony refused.
 - `buf breaking` runs (informational before 1.0); `proto-generated` stays clean.
 
@@ -135,7 +151,7 @@ Content: adapter-static SPA, connect-web client, bundle injected into the server
 **Acceptance criteria**
 
 - `nix build .#kajiba-server` contains the bundle; the server serves the UI on `/` with no external directory.
-- `e2e`: after login, browse `alice/demo`, open a file, view a branch's history, switch ref; declared keys and tokens shown read-only.
+- `e2e`: after login, browse `alice/demo`, open a file, view a branch's history, switch ref; declared keys and tokens, repository settings, permissions and mirror configuration shown read-only, with no edit control (0026).
 - In the devShell, `pnpm dev` against a local server (passkey login) and against a remote URL (PAT injected by the proxy) works without recompiling Rust (documented in CONTRIBUTING).
 - Budget: initial bundle < 300 KB compressed, measured in CI.
 
@@ -147,11 +163,11 @@ Content: adapter-static SPA, connect-web client, bundle injected into the server
 
 **Deliverable**: a runner declared in Nix runs `nix flake check` on every trusted push; live logs in the UI and the CLI; manual trigger.
 
-Content: `kajiba.runner.v1` bidirectional stream, declarative enrollment by shared secret, capabilities, attempts, server-owned leases, sequenced logs, reconnection (0008); `kajiba-runner` with the `Executor` trait and the `nix` backend, runner-host requirements checked at startup (0009); `run/job/job_attempt/step/log_chunk` model; `ci` bus handler: push on a trusted ref by `local` → run; manual `TriggerRun(sha)`; `RunService` with log streaming; CLI `ci run|watch|logs`; UI: run list, run page with logs; short retention (0010); `nixosModules.runner`; `darwinModules.runner` exported and evaluated by `module-eval` (darwin execution is J13).
+Content: `kajiba.runner.v1` bidirectional stream, declarative enrollment by shared secret, runner rows and capabilities declared in the server configuration (0026), attempts, server-owned leases, sequenced logs, reconnection (0008); `kajiba-runner` with the `Executor` trait and the `nix` backend, runner-host requirements checked at startup (0009); `run/job/job_attempt/step/log_chunk` model; `ci` bus handler: push on a trusted ref by `local` → run; manual `TriggerRun(sha)`; `RunService` with log streaming; CLI `ci run|watch|logs`; UI: run list, run page with logs; short retention (0010); `nixosModules.runner`; `darwinModules.runner` exported and evaluated by `module-eval` (darwin execution is J13).
 
 **Acceptance criteria** (`nixos-ci`, nodes `forge` + `runner`, Nix closure preloaded)
 
-- The runner connects with the declared secret, shows up with its capabilities; wrong secret → refused; different `0.minor` → refused (0023); a runner host with `sandbox = false` refuses to start.
+- The runner connects with the declared secret, shows up with its declared capabilities; wrong secret → refused; a capability beyond the declaration → refused (`runner-refused`, reason `capabilities`); different `0.minor` → refused (0023); a runner host with `sandbox = false` refuses to start.
 - Signed push on `main` of a repository with CI enabled → run created, executed, success; failing `flake check` → run failed with logs.
 - Push on `refs/contrib/*` (injected in test by the forge) → no run; manual `TriggerRun` on that sha → run.
 - `kajiba-server` restart during a job → the runner reconnects, the job finishes, the result is recorded exactly once; no log chunk lost or duplicated.
@@ -166,9 +182,9 @@ Content: `kajiba.runner.v1` bidirectional stream, declarative enrollment by shar
 
 ## J7 — Mirroring to GitHub
 
-**Deliverable**: flagged repositories are mirrored to GitHub, queued, with unlimited retries and reconciliation.
+**Deliverable**: declared mirrors are pushed to GitHub, queued, with unlimited retries and reconciliation; GitHub targets are created and kept configured (0027).
 
-Content: `MirrorService` (per-repo enablement, remote, credential name), `mirror` bus handler, coalesced queue in the DB, capped backoff, reconciliation timer, explicit refspecs with scoped `--prune` (0011); per-mirror status in the UI and `kajiba mirror status`.
+Content: mirrors from the configuration (0026), read-only `MirrorService` (status), `mirror` bus handler, coalesced queue in the DB, capped backoff, reconciliation timer, explicit refspecs with scoped `--prune` (0011); GitHub target preparation (create if missing, description, homepage, visibility, archived, issues/wiki/projects/discussions/pull requests/Actions disabled; never delete or rename), `github` mirror fields, `mirror.prepared_digest`, `mirror-prepared` (0027); the token permissions marked "to verify in J7" in 0027 checked first; per-mirror status in the UI and `kajiba mirror status`.
 
 **Acceptance criteria** (`nixos-mirror`, node `remote` = bare repo behind sshd or HTTP basic, simulating GitHub)
 
@@ -178,6 +194,7 @@ Content: `MirrorService` (per-repo enablement, remote, credential name), `mirror
 - Reconciliation timer: ref modified by hand on `remote` → corrected on the next pass.
 - Mirror enabled on a `remote` already identical → no ref updated.
 - Credential absent or unreadable → explicit error in the status, no crash.
+- GitHub target preparation against a fake GitHub API on `remote`: missing repository created, then pushed; drifted description, visibility or archived corrected on the next reconciliation pass; Actions and pull requests disabled; no delete or rename call ever sent; preparation failure → mirror error, no push; archived target prepared, never pushed.
 
 **Delegable**: test `remote` node, outage simulation, coalescing tests.
 
@@ -219,16 +236,17 @@ Content: deployment guide in the README (module options, persisted paths for an 
 
 ## J10 — Import from another forge via `admin import`
 
-**Deliverable**: repositories of an existing forge move to kajiba with their history, their GitHub mirrors are adopted without disruption, and flakes resolve their inputs from kajiba with the mirror as fallback.
+**Deliverable**: repositories of an existing forge move to kajiba with their history, their GitHub mirrors are adopted without disruption, and flakes resolve their inputs from kajiba with the mirror as fallback; a deployment that used koseki can stop using it at the end of this milestone (0027).
 
-Content: `admin import` from a URL (all branches and tags, annotated tags kept), batch import from a list; mirror adoption (0011); documented URL change for flake inputs (0021); repositories that need private visibility wait for private repositories (0013).
+Content: `admin import` from a URL into declared empty repositories (0026; all branches and tags, annotated tags kept), batch import from a list; mirror adoption (0011); documented URL change for flake inputs (0021); repositories that need private visibility wait for private repositories (0013); koseki migration note (each entry → a repository and mirror declaration, 0027): a deployment migrates its entries and stops using koseki at the end of the milestone (resources released from its state without destroy; until then it declares no `github` table for a koseki-managed repository).
 
 **Acceptance criteria** (`nixos-import`, node `oldforge` = git server simulating the previous forge, `remote` = GitHub simulation)
 
-- Every imported repository: same refs, same HEAD and same tags as on `oldforge`.
+- Every imported repository, declared in the configuration beforehand: same refs, same HEAD and same tags as on `oldforge`.
 - Mirror enabled after import on a `remote` already in sync → no ref updated, no force-push.
 - `nix flake prefetch` from kajiba and from `remote` give the same `narHash`.
 - A push on kajiba after import triggers CI and reaches `remote`.
+- A set of koseki-shaped entries translated per 0027 passes `config check`; their mirrors adopt existing targets with no repository created.
 
 **Delegable**: import script, ref comparison.
 

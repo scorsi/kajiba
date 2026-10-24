@@ -115,7 +115,7 @@ pub struct UserConfig {
 }
 
 /// A declared personal access token. The token must carry at least 128 bits of randomness
-/// (ADR 0025): only its hash is declared, so validation cannot check it. ADR 0014's format
+/// (ADR 0028): only its hash is declared, so validation cannot check it. ADR 0014's format
 /// (`kjb_` + 32 random bytes in base64url) has 256; generate one and its hash with
 /// `t="kjb_$(head -c 32 /dev/urandom | basenc --base64url | tr -d '=')"; echo "$t"; printf %s "$t" | sha256sum`.
 #[derive(Debug, Deserialize)]

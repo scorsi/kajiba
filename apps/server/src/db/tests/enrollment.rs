@@ -133,7 +133,7 @@ async fn unknown_or_disabled_user_is_refused_without_writes() {
     setup(&mut writer).await;
     issue(&mut writer, "bob", TTL, 500).await.unwrap();
     // Removing bob from the configuration disables him and deletes his sessions, passkeys and
-    // pending link, and revokes his runtime PATs (ADR 0025).
+    // pending link, and revokes his runtime PATs (ADR 0028).
     reconcile(&mut writer, &declared("[users.alice]"))
         .await
         .unwrap();
