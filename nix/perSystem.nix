@@ -104,6 +104,20 @@
               touch $out
             '';
 
+        product-wording =
+          pkgs.runCommand "product-wording"
+            {
+              src = lib.fileset.toSource {
+                root = ../.;
+                fileset = lib.fileset.difference ../. ../docs;
+              };
+            }
+            ''
+              bash ${./checks/product-wording.sh} "$src"
+              bash ${./checks/product-wording-test.sh} ${./checks/product-wording.sh}
+              touch $out
+            '';
+
         buf-lint = pkgs.runCommand "buf-lint" { nativeBuildInputs = [ pkgs.buf ]; } ''
           export HOME=$TMPDIR
           cd ${../proto}

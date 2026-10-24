@@ -1,5 +1,5 @@
 # Stub module: kajiba-runner has no protocol to speak yet (J6, 0008). Exists now so the flake
-# output shape is stable for sekkeizu.
+# output shape is stable for the deployment repository.
 {
   config,
   lib,

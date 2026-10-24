@@ -1,5 +1,5 @@
 {
-  description = "kajiba (鍛冶場, the forge) — a personal git forge: hosting, CI, mirroring";
+  description = "kajiba (鍛冶場, the forge) — a self-hosted git forge: hosting, CI, mirroring";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";

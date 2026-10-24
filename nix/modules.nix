@@ -1,5 +1,4 @@
-# kajiba exports a flakeModule-shaped set of nixosModules/darwinModules, like the other repos
-# in the ecosystem (0015): sekkeizu will import these once it hosts kajiba (J9).
+# kajiba exports NixOS and Darwin modules for the deployment repository (0015).
 {
   flake = {
     nixosModules = {

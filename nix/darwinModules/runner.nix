@@ -1,4 +1,4 @@
-# Stub module: same as nixosModules.runner, for a runner hosted on jiban (darwin, J13).
+# Stub module: same as nixosModules.runner, for a runner hosted on macOS (J13).
 {
   config,
   lib,
