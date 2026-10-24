@@ -5,6 +5,10 @@ use sqlx::{
 };
 use std::{path::Path, time::Duration};
 
+// The journal API is consumed by the dispatcher in J1 task 18.
+#[cfg_attr(not(test), allow(dead_code))]
+pub mod events;
+
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 // The caller must hold the state lock for the lifetime of both handles.
@@ -59,6 +63,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
+    mod events;
     mod identity;
     mod repositories;
 
@@ -98,7 +103,13 @@ mod tests {
         .fetch_all(&mut writer)
         .await
         .unwrap();
-        assert_eq!(history.len(), 3);
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[3].0, 4);
+        assert!(history[3].2);
+        assert_eq!(
+            history[3].3,
+            MIGRATOR.iter().nth(3).unwrap().checksum.as_ref()
+        );
         assert_eq!(history[2].0, 3);
         assert!(history[2].2);
         assert_eq!(
@@ -139,7 +150,10 @@ mod tests {
                 "_sqlx_migrations",
                 "api_token",
                 "enrollment_token",
+                "event",
+                "handler_checkpoint",
                 "mirror",
+                "pending_push",
                 "repo",
                 "repo_permission",
                 "repo_redirect",
@@ -246,7 +260,7 @@ mod tests {
                 .fetch_all(&mut writer)
                 .await
                 .unwrap();
-        assert_eq!(versions, [1, 2, 3]);
+        assert_eq!(versions, [1, 2, 3, 4]);
         readers.close().await;
         writer.close().await.unwrap();
     }
