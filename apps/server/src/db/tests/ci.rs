@@ -314,7 +314,8 @@ async fn ci_foreign_keys_refuse_missing_parents_and_protect_referenced_rows() {
         .await;
     }
     refuses(&mut writer, "DELETE FROM runner WHERE id = 1", "1811").await;
-    refuses(&mut writer, "DELETE FROM event WHERE id = 1", "787").await;
+    // The append-only trigger (migration 7) refuses before the run.event_id foreign key.
+    refuses(&mut writer, "DELETE FROM event WHERE id = 1", "1811").await;
     refuses(&mut writer, "DELETE FROM user WHERE id = 2", "787").await;
     readers.close().await;
     writer.close().await.unwrap();

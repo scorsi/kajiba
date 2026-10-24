@@ -180,6 +180,18 @@ in
           "AF_INET6"
         ]
       && lib.elem "@system-service" unit.SystemCallFilter
+      && unit.ProcSubset == "pid"
+      && unit.PrivateIPC
+      && unit.SocketBindDeny == "any"
+      &&
+        unit.SocketBindAllow == [
+          "tcp:8081"
+          "tcp:9431"
+        ]
+      && unit.LimitCORE == 0
+      && unit.LimitNOFILE == 8192
+      && unit.TasksMax == 1024
+      && unit.MemoryMax == "2G"
       && unit.LogRateLimitIntervalSec == "30s"
       && unit.LogRateLimitBurst == 30000
       && lib.hasSuffix " http://127.0.0.1:8081/readyz" unit.ExecStartPost
@@ -205,6 +217,7 @@ in
         "kajiba-dumps"
       ]
       && systemd.tmpfiles.settings."10-kajiba-server" == { }
+      && unit.SocketBindAllow == [ "tcp:8080" ]
       && lib.hasSuffix " http://127.0.0.1:8080/readyz" unit.ExecStartPost
       && systemd.services.kajiba-server.restartTriggers == [ environment.etc."kajiba/server.toml".source ]
       && lib.elem inputs.self.packages.${linux}.kajiba-server environment.systemPackages;

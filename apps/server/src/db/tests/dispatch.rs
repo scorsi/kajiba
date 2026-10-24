@@ -448,8 +448,8 @@ async fn metrics_count_each_failed_attempt_once_and_lag_tracks_checkpoints() {
     let bus = Arc::new(EventBus::default());
     let first = append(&mut writer, 1).await;
     let second = append(&mut writer, 2).await;
-    // Sequence gaps must not inflate lag, and stored names cannot create metric labels.
-    sqlx::query("UPDATE event SET id = id + 10; INSERT INTO handler_checkpoint (handler, last_event_id, updated_at) VALUES ('private', 0, 0)")
+    // Stored names cannot create metric labels.
+    sqlx::query("INSERT INTO handler_checkpoint (handler, last_event_id, updated_at) VALUES ('private', 0, 0)")
         .execute(&mut writer).await.unwrap();
     assert_eq!(crate::metrics::handler_lag(&readers).await.unwrap(), [2; 4]);
     let mut app = crate::metrics::router(Arc::default(), readers.clone(), bus.clone());
@@ -492,13 +492,13 @@ async fn metrics_count_each_failed_attempt_once_and_lag_tracks_checkpoints() {
     );
     handler.fail = false;
     assert!(bus.dispatch_next(&mut writer, &mut handler).await.unwrap());
-    assert_eq!(checkpoint(&readers, "ci").await, Some(first + 10));
+    assert_eq!(checkpoint(&readers, "ci").await, Some(first));
     assert_eq!(
         crate::metrics::handler_lag(&readers).await.unwrap(),
         [1, 2, 2, 2]
     );
     assert!(bus.dispatch_next(&mut writer, &mut handler).await.unwrap());
-    assert_eq!(checkpoint(&readers, "ci").await, Some(second + 10));
+    assert_eq!(checkpoint(&readers, "ci").await, Some(second));
     assert!(!bus.dispatch_next(&mut writer, &mut handler).await.unwrap());
     assert_eq!(
         crate::metrics::handler_lag(&readers).await.unwrap(),

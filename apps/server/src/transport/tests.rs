@@ -223,7 +223,8 @@ async fn http_and_grpc_share_one_ephemeral_port() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = router(state.health.clone(), false, Arc::default()).unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (_stop, stopped) = watch::channel(false);
+    let server = tokio::spawn(serve_tcp(listener, app, PUBLIC, stopped));
     let http = tokio::task::spawn_blocking(move || {
         use std::io::{Read, Write};
         let mut stream =
@@ -588,13 +589,90 @@ async fn requests_update_metrics_after_body_completion_including_grpc_trailers()
     assert!(after.contains("kajiba_requests_total{kind=\"grpc\",code=\"OK\"} 1\n"));
     assert!(after.contains("kajiba_request_duration_seconds_count{kind=\"grpc\"} 1\n"));
     assert!(after.contains("kajiba_request_duration_seconds_count{kind=\"other\"} 1\n"));
+    // Unknown routes: HTTP 404 for plain requests, gRPC UNIMPLEMENTED for gRPC callers.
     let response = app
         .call(http::Request::get("/metrics").body(Body::empty()).unwrap())
         .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(response.headers().get("grpc-status").is_none());
+    let response = grpc(&mut app, "/kajiba.v1.Unknown/Call", CheckRequest {}).await;
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["grpc-status"], "12");
-    assert_ne!(
-        response.headers()["content-type"],
-        crate::metrics::CONTENT_TYPE
+    assert_eq!(response.headers()["content-type"], "application/grpc");
+}
+
+#[tokio::test]
+async fn slow_headers_are_cut_and_the_connection_cap_holds_until_then() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new().route("/", axum::routing::get(|| async { "OK" }));
+    let limits = Limits {
+        connections: 1,
+        header_read: Duration::from_millis(300),
+    };
+    let (stop, stopped) = watch::channel(false);
+    let server = tokio::spawn(serve_tcp(listener, app, limits, stopped));
+    tokio::task::spawn_blocking(move || {
+        use std::io::{Read, Write};
+        let started = std::time::Instant::now();
+        // A slowloris client holds the only permit with an unfinished request head.
+        let mut slow = std::net::TcpStream::connect(addr).unwrap();
+        slow.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        slow.write_all(b"GET / HTTP/1.1\r\nHost: exa").unwrap();
+        // The kernel queues the second connection; the server accepts it only once a permit frees.
+        let mut next = std::net::TcpStream::connect(addr).unwrap();
+        next.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        next.write_all(b"GET / HTTP/1.1\r\nHost: example.org\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut rest = Vec::new();
+        let _ = slow.read_to_end(&mut rest);
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "slow head was not cut"
+        );
+        let mut response = String::new();
+        next.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    })
+    .await
+    .unwrap();
+    stop.send_replace(true);
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn non_streaming_routes_time_out_with_http_or_grpc_status() {
+    let mut app = Router::new()
+        .route(
+            "/slow",
+            axum::routing::any(|| async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                "late"
+            }),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            Duration::from_millis(50),
+            request_timeout,
+        ));
+    assert_eq!(get(&mut app, "/slow").await, StatusCode::REQUEST_TIMEOUT);
+    let response = grpc(&mut app, "/slow", CheckRequest {}).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["grpc-status"], "4");
+}
+
+#[test]
+fn only_persistent_accept_errors_back_off() {
+    for kind in [
+        std::io::ErrorKind::ConnectionAborted,
+        std::io::ErrorKind::ConnectionReset,
+    ] {
+        assert_eq!(accept_backoff(&kind.into()), None);
+    }
+    // EMFILE: retrying at once would spin a core.
+    assert_eq!(
+        accept_backoff(&std::io::Error::from_raw_os_error(24)),
+        Some(Duration::from_secs(1))
     );
 }

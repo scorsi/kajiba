@@ -59,6 +59,15 @@ async fn events_append_and_read_strictly_after_id_in_sequence_order() {
         .unwrap();
     transaction.rollback().await.unwrap();
     assert_eq!(events_after(&readers, 0).await.unwrap(), rows);
+    // Append-only in the database too (migration 7): 1811 is SQLITE_CONSTRAINT_TRIGGER.
+    for sql in [
+        "UPDATE event SET payload = '{}'",
+        "UPDATE event SET id = id + 10",
+        "DELETE FROM event",
+    ] {
+        refuses(&mut writer, sql, "1811").await;
+    }
+    assert_eq!(events_after(&readers, 0).await.unwrap(), rows);
     readers.close().await;
     writer.close().await.unwrap();
 }
@@ -148,7 +157,9 @@ async fn events_schema_columns_nullability_keys_and_index() {
                 refuses(
                     &mut writer,
                     &format!("UPDATE {table} SET {name} = NULL"),
-                    "1299",
+                    // The append-only trigger refuses every event UPDATE first; notnull is
+                    // asserted above.
+                    if table == "event" { "1811" } else { "1299" },
                 )
                 .await;
             }

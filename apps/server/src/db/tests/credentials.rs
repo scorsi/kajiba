@@ -63,12 +63,8 @@ async fn adds_keys_and_tokens_with_schema_encodings_and_noop_performs_no_write()
         assert_eq!(row.5, "config");
         assert!(row.6 > 0);
         assert_eq!(row.7, None);
-        let line = if row.1 == "auth" {
-            format!("{AUTH} user@example.org")
-        } else {
-            SIGNING.into()
-        };
-        assert_eq!(row.3, line);
+        // The declared comment is dropped: only the canonical key is stored.
+        assert_eq!(row.3, if row.1 == "auth" { AUTH } else { SIGNING });
         let expected = if row.1 == "auth" {
             "SHA256:bbXpuKG6zhzdmnxq256TlqzFBzRl2f6OOg722cYNbU8"
         } else {
@@ -109,7 +105,7 @@ async fn changes_scopes_expiry_and_key_comment_without_replacing_identity() {
         .execute(&mut writer)
         .await
         .unwrap();
-    let mut expected_keys = keys(&mut writer).await;
+    let expected_keys = keys(&mut writer).await;
     let mut expected_tokens = tokens(&mut writer).await;
     let alice = config.get_mut("alice").unwrap();
     alice.ssh_keys[0] = format!("{AUTH} changed@example.org");
@@ -119,13 +115,7 @@ async fn changes_scopes_expiry_and_key_comment_without_replacing_identity() {
         kajiba_core::config::Scope::Admin,
     ];
     token.expires = None;
-    let changed_line = alice.ssh_keys[0].clone();
     reconcile_credentials(&mut writer, &config).await.unwrap();
-    expected_keys
-        .iter_mut()
-        .find(|row| row.1 == "auth")
-        .unwrap()
-        .3 = changed_line;
     expected_tokens[0].3 = "repo:write admin".into();
     expected_tokens[0].6 = None;
     assert_eq!(keys(&mut writer).await, expected_keys);

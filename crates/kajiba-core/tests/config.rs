@@ -304,6 +304,18 @@ fn required_fields_urls_and_ranges_are_checked() {
         );
         runner_error(&RUNNER.replace("https://forge.example.org", value), "url");
     }
+    for value in [
+        "https://forge.example.org/x",
+        "https://forge.example.org/x/",
+        "https://forge.example.org?y",
+        "https://forge.example.org/?",
+    ] {
+        server_error(
+            &SERVER.replace("https://forge.example.org", value),
+            "http.public_url",
+        );
+    }
+    ServerConfig::parse(&MINIMAL.replace("example.org", "example.org/")).unwrap();
     let ipv6 = ServerConfig::parse(&MINIMAL.replace("forge.example.org", "[::1]:8080")).unwrap();
     assert_eq!(ipv6.ssh.host.as_deref(), Some("[::1]"));
     server_error(&SERVER.replace("port = 2222", "port = 65536"), "ssh.port");
@@ -356,6 +368,10 @@ fn openssh_keys_parse_and_can_produce_sha256_fingerprints() {
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA",
             "ssh-unknown AAAAC3NzaC1lZDI1NTE5AAAA",
             "ssh-ed25519 !!!!",
+            // TOML escapes: a newline/CR/DEL in the comment must never reach the store.
+            format!("{original} a\\nssh-ed25519 evil").as_str(),
+            format!("{original} a\\rb").as_str(),
+            format!("{original} a\\u007Fb").as_str(),
         ] {
             let error = ServerConfig::parse(&SERVER.replace(original, value)).unwrap_err();
             assert!(error.contains(&format!("users.alice.{kind}[0]")), "{error}");

@@ -92,6 +92,17 @@ pkgs.testers.runNixOSTest {
         assert applied(events) == migrations, f"applied {applied(events)} != {migrations}: {events}"
         assert "ready" in {event["event"] for event in events}, f"no ready line: {events}"
 
+    with subtest("resource limits apply to the running unit"):
+        assert machine.succeed(f"systemctl show -P TasksMax {unit}").strip() == "1024"
+        assert machine.succeed(f"systemctl show -P MemoryMax {unit}").strip() == str(2 * 1024**3)
+        pid = machine.succeed(f"systemctl show -P MainPID {unit}").strip()
+        limits = {
+            line[:26].strip(): line[26:].split()[:2]
+            for line in machine.succeed(f"cat /proc/{pid}/limits").splitlines()[1:]
+        }
+        assert limits["Max core file size"] == ["0", "0"], f"limits: {limits}"
+        assert limits["Max open files"] == ["8192", "8192"], f"limits: {limits}"
+
     with subtest("declared user and SSH key reconciled into the database"):
         first = identity()
         assert without_ids(first) == ["alice", "1", "config", "1", "auth", "ssh-ed25519", "1", "config"], f"identity row: {first}"

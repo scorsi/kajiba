@@ -295,6 +295,20 @@ in
           "@system-service"
           "~@privileged"
         ];
+        ProcSubset = "pid";
+        PrivateIPC = true;
+        # Only the configured listeners may bind (the local socket is AF_UNIX, not filtered).
+        SocketBindDeny = "any";
+        SocketBindAllow = map (addr: "tcp:${lib.last (lib.splitString ":" addr)}") (
+          [ listen ] ++ lib.optional (cfg.metrics.listen != null) cfg.metrics.listen
+        );
+
+        # Resource limits: no core dump may keep an in-memory enrollment token; the server
+        # itself caps public connections at 1024.
+        LimitCORE = 0;
+        LimitNOFILE = lib.mkDefault 8192;
+        TasksMax = lib.mkDefault 1024;
+        MemoryMax = lib.mkDefault "2G";
 
         # Per-request logging (nisshi 0009).
         LogRateLimitIntervalSec = lib.mkDefault "30s";

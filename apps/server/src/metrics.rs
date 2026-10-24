@@ -201,7 +201,8 @@ pub async fn handler_lag(readers: &SqlitePool) -> Result<[i64; 4], sqlx::Error> 
     let mut transaction = readers.begin().await?;
     let mut lag = [0; 4];
     for (index, name) in HANDLERS.iter().enumerate() {
-        lag[index] = sqlx::query_scalar("SELECT COUNT(*) FROM event WHERE id > COALESCE((SELECT last_event_id FROM handler_checkpoint WHERE handler = ?), 0)")
+        // Ids are dense (append-only, enforced by migration 7): a difference, not a table scan.
+        lag[index] = sqlx::query_scalar("SELECT MAX(0, COALESCE((SELECT MAX(id) FROM event), 0) - COALESCE((SELECT last_event_id FROM handler_checkpoint WHERE handler = ?), 0))")
             .bind(name).fetch_one(&mut *transaction).await?;
     }
     transaction.commit().await?;

@@ -1,5 +1,5 @@
 use sqlx::{Connection, SqliteConnection};
-use std::time::Duration;
+use std::{io::Read, time::Duration};
 
 #[derive(Debug)]
 pub enum Error {
@@ -48,10 +48,12 @@ pub async fn issue(
     ] {
         sqlx::query(statement).bind(id).execute(&mut *tx).await?;
     }
-    // 32 bytes from SQLite's CSPRNG, as for public IDs; no extra dependency.
-    let token: String = sqlx::query_scalar("SELECT lower(hex(randomblob(32)))")
-        .fetch_one(&mut *tx)
-        .await?;
+    // A bearer secret: 32 bytes from the kernel CSPRNG (SQLite's randomblob is only pseudo-random).
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .map_err(sqlx::Error::Io)?;
+    let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     sqlx::query(
         "INSERT INTO enrollment_token (user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
     )

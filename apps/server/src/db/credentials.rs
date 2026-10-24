@@ -19,7 +19,12 @@ pub async fn reconcile_credentials(
     for (name, user) in declared {
         for (usage, lines) in [("auth", &user.ssh_keys), ("signing", &user.signing_keys)] {
             for line in lines {
-                let key = parse_ssh_key(line).map_err(|err| {
+                let mut key = parse_ssh_key(line).map_err(|err| {
+                    format!("credential reconciliation: users.{name}.{usage}: {err}")
+                })?;
+                // Store the canonical form only: the comment never reaches authorized_keys.
+                key.set_comment("");
+                let canonical = key.to_openssh().map_err(|err| {
                     format!("credential reconciliation: users.{name}.{usage}: {err}")
                 })?;
                 keys.insert(
@@ -28,7 +33,7 @@ pub async fn reconcile_credentials(
                         usage.to_owned(),
                         key.fingerprint(Default::default()).to_string(),
                     ),
-                    (key.algorithm().to_string(), line.clone()),
+                    (key.algorithm().to_string(), canonical),
                 );
             }
         }

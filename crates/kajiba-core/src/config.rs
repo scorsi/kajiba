@@ -374,6 +374,19 @@ impl ServerConfig {
         let mut config: Self = parse(input)?;
         crate::log::filter(&config.log.level, None)?;
         let host = url_host(&config.http.public_url, "http.public_url")?;
+        // Links are built as `<public_url>/auth/...`: a path or query would break them.
+        let public_url = &config.http.public_url;
+        if public_url.contains('?')
+            || !matches!(
+                public_url
+                    .parse::<Uri>()
+                    .map(|uri| uri.path().to_owned())
+                    .as_deref(),
+                Ok("" | "/")
+            )
+        {
+            return Err("http.public_url: must not contain a path or query".into());
+        }
         if let Some(host) = &config.ssh.host {
             validate_host(host, "ssh.host")?;
         } else {
@@ -508,6 +521,10 @@ impl RunnerConfig {
 
 /// Parse the same OpenSSH key types accepted by configuration validation.
 pub fn parse_ssh_key(key: &str) -> Result<ssh_key::PublicKey, String> {
+    // A newline in the comment would inject a second authorized_keys line.
+    if key.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+        return Err("OpenSSH public key contains a control character".into());
+    }
     if !matches!(
         key.split_whitespace().next(),
         Some(

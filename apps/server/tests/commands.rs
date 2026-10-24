@@ -219,7 +219,7 @@ fn serve_emits_start_migrations_and_orphan_warning() {
     let (send, receive) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         let mut reader = std::io::BufReader::new(stderr);
-        for _ in 0..8 {
+        for _ in 0..9 {
             let mut text = String::new();
             reader.read_line(&mut text).unwrap();
             let _ = send.send(text);
@@ -227,7 +227,7 @@ fn serve_emits_start_migrations_and_orphan_warning() {
     });
     let line = receive.recv_timeout(std::time::Duration::from_secs(5));
     let migration = receive.recv_timeout(std::time::Duration::from_secs(5));
-    let later: Vec<_> = (0..6)
+    let later: Vec<_> = (0..7)
         .map(|_| receive.recv_timeout(std::time::Duration::from_secs(5)))
         .collect();
     let _ = child.kill();
@@ -249,14 +249,14 @@ fn serve_emits_start_migrations_and_orphan_warning() {
         .into_iter()
         .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
         .collect();
-    for (line, version) in later[..5].iter().zip([2, 3, 4, 5, 6]) {
+    for (line, version) in later[..6].iter().zip([2, 3, 4, 5, 6, 7]) {
         assert_eq!(line["event"], "migration-applied");
         assert_eq!(line["version"], version);
     }
-    assert_eq!(later[5]["event"], "repo-orphaned");
-    assert_eq!(later[5]["level"], "warn");
-    assert_eq!(later[5]["path"], orphan.to_str().unwrap());
-    assert_eq!(later[5]["destination"], destination.to_str().unwrap());
+    assert_eq!(later[6]["event"], "repo-orphaned");
+    assert_eq!(later[6]["level"], "warn");
+    assert_eq!(later[6]["path"], orphan.to_str().unwrap());
+    assert_eq!(later[6]["destination"], destination.to_str().unwrap());
     assert_eq!(contents.unwrap(), "preserve orphan");
     assert!(!orphan_exists);
 }

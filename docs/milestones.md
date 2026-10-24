@@ -93,7 +93,7 @@ Content: `RepoService` Get/List only (public repositories, no mutation before J4
 
 **Deliverable**: `git push` over SSH, controlled by permissions and ref rules, with mandatory signatures.
 
-Content: dedicated sshd instance in the module, `AuthorizedKeysCommand` → `kajiba-server ssh-keys`, `kajiba-server serve-ssh` (0004); keys come from the configuration (0014), no key-mutating RPC; `kajiba-server hook pre-receive|post-receive` → `kajiba.hook.v1` over the local socket, global `core.hooksPath`, `pending_push` durability (0003); read/write/admin RBAC + `is_admin`, repository permissions set by `admin` commands until J4 (0014); ref rules (0013); signature algorithm of 0014; `push` events (0017); `/readyz` now checks the sshd integration.
+Content: dedicated sshd instance in the module, `AuthorizedKeysCommand` → `kajiba-server ssh-keys`, `kajiba-server serve-ssh` (0004); keys come from the configuration (0014), no key-mutating RPC; `kajiba-server hook pre-receive|post-receive` → `kajiba.hook.v1` over the local socket, global `core.hooksPath`, `pending_push` durability (0003); read/write/admin RBAC + `is_admin`, repository permissions set by `admin` commands until J4 (0014); ref rules (0013); signature algorithm of 0014; `push` events (0017); `/readyz` now checks the sshd integration. `AuthorizedKeysCommand` prints only the canonical stored key (`ssh_key.public_key`, no comment), never the configured line.
 
 **Acceptance criteria** (`nixos-git-ssh`, classic ed25519 keys)
 

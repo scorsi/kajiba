@@ -8,7 +8,9 @@ use kajiba_proto::admin::v1::{
     admin_service_server::{AdminService, AdminServiceServer},
 };
 use std::{
-    fs, io,
+    fs,
+    future::Future,
+    io,
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     pin::Pin,
@@ -93,6 +95,7 @@ pub(super) struct Local {
     identity: (u64, u64),
     allowed_uids: Vec<u32>,
     serving: Arc<AtomicBool>,
+    backoff: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl Local {
@@ -130,6 +133,7 @@ impl Local {
             // The service runs as kajiba; use its socket's UID without a user database lookup.
             allowed_uids: vec![0, metadata.uid()],
             serving,
+            backoff: None,
         };
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         Ok(local)
@@ -168,12 +172,25 @@ impl Stream for Local {
     type Item = io::Result<UnixStream>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
         loop {
-            let (stream, _) = ready!(self.listener.poll_accept(cx))?;
+            if let Some(backoff) = &mut this.backoff {
+                ready!(backoff.as_mut().poll(cx));
+                this.backoff = None;
+            }
+            // Never yield Err: tonic would re-poll a still-failing listener at once.
+            let stream = match ready!(this.listener.poll_accept(cx)) {
+                Ok((stream, _)) => stream,
+                Err(err) => {
+                    this.backoff = super::accept_backoff(&err)
+                        .map(|delay| Box::pin(tokio::time::sleep(delay)));
+                    continue;
+                }
+            };
             // Fail closed before any HTTP/2 or RPC processing, including credential lookup errors.
             if stream
                 .peer_cred()
-                .is_ok_and(|cred| self.allows_uid(cred.uid()))
+                .is_ok_and(|cred| this.allows_uid(cred.uid()))
             {
                 return Poll::Ready(Some(Ok(stream)));
             }
