@@ -20,10 +20,7 @@ use sqlx::SqlitePool;
 use std::{
     io,
     path::PathBuf,
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 use tokio::sync::{Semaphore, watch};
@@ -33,7 +30,7 @@ use tonic::{Request, Response, Status, service::Routes};
 pub struct Health {
     database: Arc<OnceLock<SqlitePool>>,
     state_dir: PathBuf,
-    local_serving: Arc<AtomicBool>,
+    local_serving: Arc<local::Serving>,
 }
 
 impl Health {
@@ -57,7 +54,7 @@ impl Health {
         let Some(database) = self.database.get() else {
             return false;
         };
-        self.local_serving.load(Ordering::Acquire)
+        self.local_serving.ready()
             && ["repos", "db", "ci/logs", "ci/artifacts", "tmp"]
                 .iter()
                 .all(|name| self.state_dir.join(name).is_dir())

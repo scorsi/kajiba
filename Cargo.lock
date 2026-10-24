@@ -954,6 +954,7 @@ name = "kajiba-core"
 version = "0.1.0"
 dependencies = [
  "http",
+ "libc",
  "serde",
  "serde_json",
  "ssh-key",

@@ -161,14 +161,8 @@ async fn removes_declared_items_including_absent_users_and_preserves_runtime_row
             .unwrap();
         assert_eq!(changes(&mut writer).await, before);
     }
-    // Re-add declared rows, then remove the whole user directly.
-    reconcile_credentials(&mut writer, &config)
-        .await
-        .unwrap_err(); // runtime signing key collision
-    sqlx::query("DELETE FROM ssh_key WHERE source = 'runtime'")
-        .execute(&mut writer)
-        .await
-        .unwrap();
+    // Re-add declared rows (the declared signing key replaces the runtime one), then remove
+    // the whole user directly.
     reconcile_credentials(&mut writer, &config).await.unwrap();
     reconcile_credentials(&mut writer, &declared(""))
         .await
@@ -261,7 +255,7 @@ async fn permits_shared_fingerprint_across_usages_and_moves_config_keys_between_
 }
 
 #[tokio::test]
-async fn runtime_collisions_are_refused_without_adopting_or_modifying_rows() {
+async fn runtime_token_collisions_are_refused_without_adopting_or_modifying_rows() {
     let dir = TempDir::new();
     let (mut writer, readers) = open(&dir.database()).await.unwrap();
     let config = config();
@@ -273,7 +267,6 @@ async fn runtime_collisions_are_refused_without_adopting_or_modifying_rows() {
     let original_tokens = tokens(&mut writer).await;
     // Exercise each unique boundary independently, including token name and hash.
     for input in [
-        format!("[users.alice]\nssh_keys=['{AUTH}']"),
         format!(
             "[users.alice.tokens.ci]\nsha256='{}'\nscopes=['admin']",
             "00".repeat(32)
@@ -292,6 +285,58 @@ async fn runtime_collisions_are_refused_without_adopting_or_modifying_rows() {
     }
     assert_eq!(keys(&mut writer).await, original_keys);
     assert_eq!(tokens(&mut writer).await, original_tokens);
+    readers.close().await;
+    writer.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn declared_key_replaces_a_runtime_key_with_the_same_fingerprint_and_usage() {
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    let both = declared(&format!(
+        "[users.alice]\nssh_keys=['{AUTH}']\nsigning_keys=['{SIGNING}']\n[users.bob]"
+    ));
+    reconcile_users(&mut writer, &both).await.unwrap();
+    reconcile_credentials(&mut writer, &both).await.unwrap();
+    // bob added both keys at runtime; alice's auth key stays declared.
+    sqlx::query("UPDATE ssh_key SET source = 'runtime', user_id = (SELECT id FROM user WHERE name = 'bob') WHERE usage = 'signing'")
+        .execute(&mut writer).await.unwrap();
+    sqlx::query("DELETE FROM ssh_key WHERE usage = 'auth'")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO ssh_key (public_id, user_id, usage, key_type, public_key, fingerprint, source, created_at)
+        SELECT '00000000000000000000000099', id, 'signing', 'ssh-ed25519', 'other', 'SHA256:other', 'runtime', 0 FROM user WHERE name = 'bob'")
+        .execute(&mut writer).await.unwrap();
+    // Startup does not abort: the declared signing key wins, the unrelated runtime key stays.
+    reconcile_credentials(&mut writer, &both).await.unwrap();
+    let owners: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT user.name, usage, ssh_key.source, public_key FROM ssh_key JOIN user ON user.id = user_id ORDER BY user.name, usage",
+    )
+    .fetch_all(&mut writer)
+    .await
+    .unwrap();
+    assert_eq!(
+        owners,
+        [
+            ("alice".into(), "auth".into(), "config".into(), AUTH.into()),
+            (
+                "alice".into(),
+                "signing".into(),
+                "config".into(),
+                SIGNING.into()
+            ),
+            (
+                "bob".into(),
+                "signing".into(),
+                "runtime".into(),
+                "other".into()
+            ),
+        ]
+    );
+    let before = changes(&mut writer).await;
+    reconcile_credentials(&mut writer, &both).await.unwrap();
+    assert_eq!(changes(&mut writer).await, before);
     readers.close().await;
     writer.close().await.unwrap();
 }
@@ -326,8 +371,8 @@ async fn users_and_credentials_reconcile_in_one_transaction() {
     let (mut writer, readers) = open(&dir.database()).await.unwrap();
     let mut config = config();
     crate::db::reconcile(&mut writer, &config).await.unwrap();
-    // A runtime key now collides with alice's declared key, after bob would be added.
-    sqlx::query("UPDATE ssh_key SET source = 'runtime' WHERE usage = 'auth'")
+    // A runtime token now collides with alice's declared token, after bob would be added.
+    sqlx::query("UPDATE api_token SET source = 'runtime'")
         .execute(&mut writer)
         .await
         .unwrap();

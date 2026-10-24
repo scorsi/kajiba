@@ -13,6 +13,8 @@ axum = "0.7"
 clap = { version = "4", features = ["derive"] }
 http = "1"
 http-body = "1"
+# Already transitive (tokio): O_NONBLOCK for configuration and secret file opens.
+libc = "0.2"
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "server-auto", "service"] }
 prost = "0.13"
 serde_json = "1"

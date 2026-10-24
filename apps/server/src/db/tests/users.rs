@@ -112,7 +112,7 @@ async fn credentials(writer: &mut SqliteConnection) {
 }
 
 #[tokio::test]
-async fn removal_revokes_only_its_sessions_and_runtime_pats_and_return_reenables() {
+async fn removal_revokes_its_sessions_runtime_pats_passkeys_and_links_and_return_reenables() {
     let dir = TempDir::new();
     let (mut writer, readers) = open(&dir.database()).await.unwrap();
     let initial = declared("[users.alice]\nis_admin=true\n[users.bob]");
@@ -145,12 +145,18 @@ async fn removal_revokes_only_its_sessions_and_runtime_pats_and_return_reenables
             ("outside".into(), "cli".into(), None),
         ]
     );
-    for table in ["repo", "ssh_key", "webauthn_credential", "enrollment_token"] {
+    // Repositories and declared keys stay; passkeys and pending links go (ADR 0025).
+    for (table, expected) in [
+        ("repo", 1),
+        ("ssh_key", 1),
+        ("webauthn_credential", 0),
+        ("enrollment_token", 0),
+    ] {
         let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
             .fetch_one(&mut writer)
             .await
             .unwrap();
-        assert_eq!(count, 1, "{table}");
+        assert_eq!(count, expected, "{table}");
     }
     let before = changes(&mut writer).await;
     reconcile_users(&mut writer, &remaining).await.unwrap();

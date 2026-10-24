@@ -202,9 +202,7 @@ in
       && systemd.tmpfiles.settings."10-kajiba-server"."/srv/kajiba-dumps".d.user == "kajiba"
       &&
         services.kajiba-server.persistedPaths == [
-          "/srv/kajiba/repos"
-          "/srv/kajiba/db"
-          "/srv/kajiba/ci"
+          "/srv/kajiba"
           "/srv/kajiba-dumps"
         ];
     assert
@@ -266,6 +264,20 @@ in
     assert evaluationFails {
       services.kajiba-server.mirror.credentials.github.tokenFile = lib.mkForce ./module.nix;
     };
+    # A store path, literal or interpolated (with string context), is world-readable.
+    assert lib.all
+      (
+        tokenFile:
+        evaluationFails { services.kajiba-server.runners.build-1.tokenFile = lib.mkForce tokenFile; }
+      )
+      [
+        "${builtins.storeDir}/00000000000000000000000000000000-secret"
+        "${pkgs.writeText "kajiba-secret" "DO-NOT-PRINT"}"
+      ];
+    assert
+      !evaluationFails {
+        services.kajiba-server.runners.build-1.tokenFile = lib.mkForce "/run/secrets/nix-store-lookalike";
+      };
     pkgs.runCommand "kajiba-module-eval" { } ''
       cmp ${configFile { }} ${expected}
       # Defaults stay in the code (0019): only the required public URL is written.

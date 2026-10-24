@@ -116,7 +116,11 @@ async fn socket_permissions_stale_recovery_and_path_safety() {
 async fn readiness_tracks_local_listener_and_admin_command_reaches_the_service() {
     let state = super::super::tests::State::new();
     state.start().await;
-    state.health.local_serving.store(false, Ordering::Release);
+    state
+        .health
+        .local_serving
+        .on
+        .store(false, Ordering::Release);
     let dir = SocketDir::new();
     let local = Local::bind(&dir.socket(), state.health.local_serving.clone()).unwrap();
     let mut app = super::super::router(state.health.clone(), false, Arc::default()).unwrap();
@@ -131,6 +135,24 @@ async fn readiness_tracks_local_listener_and_admin_command_reaches_the_service()
         crate::admin_enroll(&dir.socket(), "alice".into()).await,
         std::process::ExitCode::SUCCESS
     );
+    assert_eq!(
+        super::super::tests::get(&mut app, "/readyz").await,
+        axum::http::StatusCode::OK
+    );
+    // The listener still runs, but its path no longer reaches it: unlinked, then replaced.
+    fs::rename(dir.socket(), dir.0.join("moved.sock")).unwrap();
+    assert_eq!(
+        super::super::tests::get(&mut app, "/readyz").await,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    let impostor = std::os::unix::net::UnixListener::bind(dir.socket()).unwrap();
+    assert_eq!(
+        super::super::tests::get(&mut app, "/readyz").await,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    drop(impostor);
+    fs::remove_file(dir.socket()).unwrap();
+    fs::rename(dir.0.join("moved.sock"), dir.socket()).unwrap();
     assert_eq!(
         super::super::tests::get(&mut app, "/readyz").await,
         axum::http::StatusCode::OK
@@ -173,6 +195,24 @@ async fn enroll_maps_refusals_to_adr_0020_statuses_and_returns_a_public_url() {
         assert_eq!(
             status.get_error_details().error_info().unwrap().reason,
             reason
+        );
+    }
+    // An invalid name is refused before the database, and never echoed.
+    for user in ["bad/DO-NOT-PRINT", "", &"a".repeat(64)] {
+        let status = admin
+            .enroll(Request::new(EnrollRequest { user: user.into() }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::InvalidArgument);
+        assert!(
+            user.is_empty() || !status.message().contains(user),
+            "{status:?}"
+        );
+        let details = status.get_error_details();
+        assert_eq!(details.error_info().unwrap().reason, "INVALID_FIELD");
+        assert_eq!(
+            details.bad_request().unwrap().field_violations[0].field,
+            "user"
         );
     }
     let url = admin

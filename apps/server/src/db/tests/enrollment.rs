@@ -131,10 +131,13 @@ async fn unknown_or_disabled_user_is_refused_without_writes() {
     let dir = TempDir::new();
     let (mut writer, _readers) = open(&dir.database()).await.unwrap();
     setup(&mut writer).await;
-    // Removing bob from the configuration disables him and revokes his sessions and PATs.
+    issue(&mut writer, "bob", TTL, 500).await.unwrap();
+    // Removing bob from the configuration disables him and deletes his sessions, passkeys and
+    // pending link, and revokes his runtime PATs (ADR 0025).
     reconcile(&mut writer, &declared("[users.alice]"))
         .await
         .unwrap();
+    assert!(links(&mut writer).await.is_empty());
     let before = super::users::changes(&mut writer).await;
     assert!(matches!(
         issue(&mut writer, "carol", TTL, 1_000).await,
@@ -145,6 +148,31 @@ async fn unknown_or_disabled_user_is_refused_without_writes() {
         Err(Error::Disabled)
     ));
     assert_eq!(super::users::changes(&mut writer).await, before);
-    assert_eq!(count(&mut writer, "webauthn_credential", "bob").await, 1);
+    assert_eq!(count(&mut writer, "webauthn_credential", "bob").await, 0);
+    assert!(links(&mut writer).await.is_empty());
+    // Declared again: no passkey came back, a fresh link is the only way in.
+    reconcile(&mut writer, &declared("[users.alice]\n[users.bob]"))
+        .await
+        .unwrap();
+    assert_eq!(count(&mut writer, "webauthn_credential", "bob").await, 0);
+    assert!(links(&mut writer).await.is_empty());
+    issue(&mut writer, "bob", TTL, 2_000).await.unwrap();
+    assert_eq!(links(&mut writer).await.len(), 1);
+}
+
+#[tokio::test]
+async fn unrepresentable_expiry_is_refused_before_any_write() {
+    let dir = TempDir::new();
+    let (mut writer, _readers) = open(&dir.database()).await.unwrap();
+    setup(&mut writer).await;
+    let before = super::users::changes(&mut writer).await;
+    for (ttl, now) in [(Duration::MAX, 1_000), (Duration::from_secs(60), i64::MAX)] {
+        assert!(matches!(
+            issue(&mut writer, "alice", ttl, now).await,
+            Err(Error::Expiry)
+        ));
+    }
+    assert_eq!(super::users::changes(&mut writer).await, before);
+    assert_eq!(count(&mut writer, "webauthn_credential", "alice").await, 1);
     assert!(links(&mut writer).await.is_empty());
 }

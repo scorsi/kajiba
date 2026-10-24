@@ -54,10 +54,14 @@ pub async fn reconcile_users(
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query("DELETE FROM session WHERE user_id = ?")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            // ADR 0025: re-declaring the user requires a fresh enrollment.
+            for statement in [
+                "DELETE FROM session WHERE user_id = ?",
+                "DELETE FROM enrollment_token WHERE user_id = ?",
+                "DELETE FROM webauthn_credential WHERE user_id = ?",
+            ] {
+                sqlx::query(statement).bind(id).execute(&mut *tx).await?;
+            }
             sqlx::query(
                 "UPDATE api_token SET revoked_at = ? WHERE user_id = ? AND source = 'runtime' AND revoked_at IS NULL",
             )

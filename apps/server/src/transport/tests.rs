@@ -46,7 +46,7 @@ impl State {
             .unwrap();
         let _bus = crate::db::events::EventBus::default();
         self.health.started(readers);
-        self.health.local_serving.store(true, Ordering::Release);
+        self.health.local_serving.on.store(true, Ordering::Release);
     }
 }
 

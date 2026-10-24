@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 http.workspace = true
+libc.workspace = true
 serde.workspace = true
 ssh-key.workspace = true
 toml.workspace = true

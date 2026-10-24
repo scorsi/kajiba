@@ -210,12 +210,16 @@ fn all_identity_names_use_shared_validation_and_normalization() {
         ("mirror.credentials", "github"),
         ("users.alice.tokens", "ci"),
     ] {
-        server_error(
-            &SERVER.replace(
-                &format!("[{table}.{name}]"),
-                &format!("[{table}.\"bad/name\"]"),
-            ),
-            table,
+        let input = SERVER.replace(
+            &format!("[{table}.{name}]"),
+            &format!("[{table}.\"bad/name\"]"),
+        );
+        server_error(&input, table);
+        // A rejected name may be a misplaced secret: never echoed.
+        assert!(
+            !ServerConfig::parse(&input)
+                .unwrap_err()
+                .contains("bad/name")
         );
         let normalized = SERVER.replace(
             &format!("{table}.{name}"),
@@ -248,10 +252,14 @@ fn all_identity_names_use_shared_validation_and_normalization() {
 #[test]
 fn durations_accept_each_unit_and_reject_bad_or_overflowing_values() {
     for (value, seconds) in [("2s", 2), ("2m", 120), ("2h", 7200), ("2d", 172800)] {
-        let config =
-            ServerConfig::parse(&format!("{MINIMAL}\n[auth]\nsession_ttl='{value}'")).unwrap();
-        assert_eq!(config.auth.session_ttl, Duration::from_secs(seconds));
-        assert_eq!(config.auth.enrollment_ttl, Duration::from_secs(900));
+        let config = ServerConfig::parse(&format!(
+            "{MINIMAL}\n[mirror]\nreconcile_interval='{value}'"
+        ))
+        .unwrap();
+        assert_eq!(
+            config.mirror.reconcile_interval,
+            Duration::from_secs(seconds)
+        );
     }
     for value in [
         "",
@@ -272,6 +280,44 @@ fn durations_accept_each_unit_and_reject_bad_or_overflowing_values() {
             "auth.session_ttl",
         );
     }
+}
+
+#[test]
+fn auth_ttls_are_bounded() {
+    for (field, accepted, refused) in [
+        (
+            "enrollment_ttl",
+            ["1m", "60s", "24h", "1d"],
+            ["0s", "59s", "86401s", "2d"],
+        ),
+        (
+            "session_ttl",
+            ["1m", "7d", "90d", "2160h"],
+            ["0s", "59s", "91d", "7776001s"],
+        ),
+    ] {
+        for value in accepted {
+            assert!(
+                ServerConfig::parse(&format!("{MINIMAL}\n[auth]\n{field}='{value}'")).is_ok(),
+                "{field}={value}"
+            );
+        }
+        for value in refused {
+            server_error(
+                &format!("{MINIMAL}\n[auth]\n{field}='{value}'"),
+                &format!("auth.{field}: must be between 1m and"),
+            );
+        }
+    }
+}
+
+#[test]
+fn rejected_values_are_not_echoed() {
+    let error =
+        ServerConfig::parse(&SERVER.replace("\"ci:trigger\"", "\"DO-NOT-PRINT\"")).unwrap_err();
+    assert!(error.contains("users.alice.tokens.ci.scopes"), "{error}");
+    assert!(error.contains("expected one of"), "{error}");
+    assert!(!error.contains("DO-NOT-PRINT"), "{error}");
 }
 
 #[test]
@@ -380,6 +426,98 @@ fn openssh_keys_parse_and_can_produce_sha256_fingerprints() {
     }
 }
 
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("kajiba-core-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+    fn private_file(&self, name: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.0.join(name);
+        std::fs::write(&path, "DO-NOT-PRINT").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+#[test]
+fn secret_files_must_not_be_accessible_to_others_and_symlinks_are_followed() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = TempDir::new("modes");
+    let secret = dir.private_file("secret");
+    // A secret manager links a stable path to the decrypted file.
+    let link = dir.0.join("link");
+    symlink(&secret, &link).unwrap();
+    let runner = |path: &Path| {
+        RunnerConfig::parse(
+            &RUNNER.replace("/run/secrets/kajiba-runner-build-1", path.to_str().unwrap()),
+        )
+        .unwrap()
+        .check_files()
+    };
+    for mode in [0o600, 0o400, 0o640, 0o660] {
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert!(runner(&secret).is_ok(), "{mode:o}");
+        assert!(runner(&link).is_ok(), "{mode:o}");
+    }
+    for mode in [0o604, 0o602, 0o644, 0o666] {
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
+        for path in [&secret, &link] {
+            let error = runner(path).unwrap_err();
+            assert!(error.contains("token_file"), "{error}");
+            assert!(error.contains("readable or writable by others"), "{error}");
+            assert!(!error.contains("DO-NOT-PRINT"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn config_reads_are_bounded_and_refuse_special_files_without_blocking() {
+    use kajiba_core::config::{MAX_CONFIG_BYTES, read_config};
+    let dir = TempDir::new("read");
+    let path = dir.0.join("server.toml");
+    std::fs::write(&path, MINIMAL).unwrap();
+    assert_eq!(read_config(&path).unwrap(), MINIMAL);
+    std::fs::write(&path, " ".repeat(MAX_CONFIG_BYTES as usize)).unwrap();
+    assert!(read_config(&path).is_ok());
+    std::fs::write(&path, " ".repeat(MAX_CONFIG_BYTES as usize + 1)).unwrap();
+    assert!(read_config(&path).unwrap_err().contains("larger than"));
+    assert!(
+        read_config(&dir.0)
+            .unwrap_err()
+            .contains("expected a regular file")
+    );
+    // Opening a FIFO with no writer would block forever without O_NONBLOCK.
+    let fifo = dir.0.join("fifo");
+    let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    assert!(
+        read_config(&fifo)
+            .unwrap_err()
+            .contains("expected a regular file")
+    );
+    let runner = RunnerConfig::parse(
+        &RUNNER.replace("/run/secrets/kajiba-runner-build-1", fifo.to_str().unwrap()),
+    )
+    .unwrap();
+    assert!(
+        runner
+            .check_files()
+            .unwrap_err()
+            .contains("expected a regular file")
+    );
+}
+
 #[test]
 fn file_checks_open_every_secret_path_and_report_the_field() {
     // These paths deliberately do not exist: structural validation must never open them.
@@ -391,7 +529,8 @@ fn file_checks_open_every_secret_path_and_report_the_field() {
             .unwrap_err()
             .contains("runners.build-1.token_file")
     );
-    let existing = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/server.toml");
+    let dir = TempDir::new("files");
+    let existing = dir.private_file("secret");
     let input = SERVER.replace(
         "/run/secrets/kajiba-runner-build-1",
         existing.to_str().unwrap(),

@@ -5,6 +5,8 @@ use std::{io::Read, time::Duration};
 pub enum Error {
     UnknownUser,
     Disabled,
+    /// `now + ttl` is not representable; configuration bounds the TTL, so this is a bug.
+    Expiry,
     Database(sqlx::Error),
 }
 
@@ -23,6 +25,11 @@ pub async fn issue(
     ttl: Duration,
     now: i64,
 ) -> Result<String, Error> {
+    // Checked before any write: a wrapped expiry could store a link already expired or eternal.
+    let expires_at = i64::try_from(ttl.as_millis())
+        .ok()
+        .and_then(|ttl| now.checked_add(ttl))
+        .ok_or(Error::Expiry)?;
     let mut tx = writer.begin().await?;
     let (id, disabled_at) =
         sqlx::query_as::<_, (i64, Option<i64>)>("SELECT id, disabled_at FROM user WHERE name = ?")
@@ -60,7 +67,7 @@ pub async fn issue(
     .bind(id)
     .bind(kajiba_core::sha256(token.as_bytes()).as_slice())
     .bind(now)
-    .bind(now + ttl.as_millis() as i64)
+    .bind(expires_at)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

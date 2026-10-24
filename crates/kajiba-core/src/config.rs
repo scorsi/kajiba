@@ -1,6 +1,14 @@
 //! TOML configuration shared by the server, runner and offline validation.
 
-use std::{collections::BTreeMap, fs::File, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs::{File, Metadata, OpenOptions},
+    io::Read,
+    net::SocketAddr,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use http::Uri;
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
@@ -106,6 +114,10 @@ pub struct UserConfig {
     pub tokens: BTreeMap<String, TokenConfig>,
 }
 
+/// A declared personal access token. The token must carry at least 128 bits of randomness
+/// (ADR 0025): only its hash is declared, so validation cannot check it. ADR 0014's format
+/// (`kjb_` + 32 random bytes in base64url) has 256; generate one and its hash with
+/// `t="kjb_$(head -c 32 /dev/urandom | basenc --base64url | tr -d '=')"; echo "$t"; printf %s "$t" | sha256sum`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TokenConfig {
@@ -259,7 +271,18 @@ fn parse<T: DeserializeOwned>(input: &str) -> Result<T, String> {
     })?;
     value.try_into().map_err(|err: toml::de::Error| {
         let mut message = err.to_string();
-        if err.message().starts_with("invalid type:") {
+        // Never echo a rejected value: it may be a misplaced secret. Keep what was expected.
+        if err.message().starts_with("unknown variant")
+            || err.message().starts_with("invalid value")
+        {
+            let expected = err
+                .message()
+                .split_once(", expected ")
+                .map_or(String::new(), |(_, expected)| {
+                    format!(", expected {expected}")
+                });
+            message = message.replace(err.message(), &format!("invalid value{expected}"));
+        } else if err.message().starts_with("invalid type:") {
             if let Some((_, expected)) = err.message().rsplit_once(", expected ") {
                 message =
                     message.replace(err.message(), &format!("invalid type, expected {expected}"));
@@ -334,8 +357,10 @@ fn validate_metrics(metrics: &MetricsConfig) -> Result<(), String> {
 
 fn normalize<T>(map: &mut BTreeMap<String, T>, field: &str) -> Result<(), String> {
     let mut normalized = BTreeMap::new();
-    for (name, value) in std::mem::take(map) {
-        let key = validate_name(&name).map_err(|err| format!("{field}.{name}: {err}"))?;
+    for (index, (name, value)) in std::mem::take(map).into_iter().enumerate() {
+        // A rejected name is not echoed (it may be a misplaced secret); its sorted position is.
+        let key = validate_name(&name)
+            .map_err(|err| format!("{field}: name #{} in sorted order: {err}", index + 1))?;
         if normalized.insert(key, value).is_some() {
             return Err(format!(
                 "{field}.{name}: duplicate name after lowercase normalization"
@@ -346,22 +371,57 @@ fn normalize<T>(map: &mut BTreeMap<String, T>, field: &str) -> Result<(), String
     Ok(())
 }
 
-fn validate_path(path: &std::path::Path, field: &str) -> Result<(), String> {
+fn validate_path(path: &Path, field: &str) -> Result<(), String> {
     if path.as_os_str().is_empty() {
         return Err(format!("{field}: path must not be empty"));
     }
     Ok(())
 }
 
-fn open_file(path: &std::path::Path, field: &str) -> Result<(), String> {
-    let file = File::open(path).map_err(|err| format!("{field} ({}): {err}", path.display()))?;
-    if !file
-        .metadata()
-        .map_err(|err| format!("{field} ({}): {err}", path.display()))?
-        .is_file()
-    {
+/// Open a regular file, following symlinks, without blocking on a FIFO or a device.
+fn open_regular(path: &Path, field: &str) -> Result<(File, Metadata), String> {
+    let error = |err: std::io::Error| format!("{field} ({}): {err}", path.display());
+    // O_NONBLOCK makes opening a FIFO return at once; it has no effect on a regular file.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(error)?;
+    let metadata = file.metadata().map_err(error)?;
+    if !metadata.is_file() {
         return Err(format!(
             "{field} ({}): expected a regular file",
+            path.display()
+        ));
+    }
+    Ok((file, metadata))
+}
+
+/// Largest configuration file read; a generated file is a few KiB.
+pub const MAX_CONFIG_BYTES: u64 = 1 << 20;
+
+/// Read a configuration file: a regular file of at most `MAX_CONFIG_BYTES`.
+pub fn read_config(path: &Path) -> Result<String, String> {
+    let (file, _) = open_regular(path, "configuration")?;
+    let mut input = String::new();
+    file.take(MAX_CONFIG_BYTES + 1)
+        .read_to_string(&mut input)
+        .map_err(|err| format!("configuration ({}): {err}", path.display()))?;
+    if input.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(format!(
+            "configuration ({}): larger than {MAX_CONFIG_BYTES} bytes",
+            path.display()
+        ));
+    }
+    Ok(input)
+}
+
+fn open_file(path: &Path, field: &str) -> Result<(), String> {
+    let (_, metadata) = open_regular(path, field)?;
+    // A symlink (secret manager) is followed: the mode checked is the secret's own.
+    if metadata.permissions().mode() & 0o006 != 0 {
+        return Err(format!(
+            "{field} ({}): must not be readable or writable by others",
             path.display()
         ));
     }
@@ -404,6 +464,24 @@ impl ServerConfig {
         normalize(&mut config.users, "users")?;
         normalize(&mut config.runners, "runners")?;
         normalize(&mut config.mirror.credentials, "mirror.credentials")?;
+        for (field, ttl, max, max_text) in [
+            (
+                "auth.enrollment_ttl",
+                config.auth.enrollment_ttl,
+                86400,
+                "24h",
+            ),
+            (
+                "auth.session_ttl",
+                config.auth.session_ttl,
+                90 * 86400,
+                "90d",
+            ),
+        ] {
+            if !(60..=max).contains(&ttl.as_secs()) {
+                return Err(format!("{field}: must be between 1m and {max_text}"));
+            }
+        }
         // The schema has UNIQUE(fingerprint, usage) and UNIQUE(token_hash): refuse here,
         // naming both fields, rather than fail at startup.
         let mut fingerprints = BTreeMap::new();

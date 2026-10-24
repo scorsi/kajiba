@@ -22,8 +22,11 @@ let
   secretFile =
     description:
     mkOption {
-      # A string, never a Nix path, so a secret is never copied into the store.
-      type = types.strMatching "/.+";
+      # A string, never a Nix path, so a secret is never copied into the store; a store path
+      # (literal or interpolated) is refused too: the store is world-readable.
+      type = types.addCheck (types.strMatching "/.+") (
+        path: !(lib.hasPrefix "${builtins.storeDir}/" path) && !(builtins.hasContext path)
+      );
       description = "Absolute path to ${description}, read at runtime by the service user (0019).";
     };
   credentials =
@@ -159,7 +162,11 @@ in
                   options = {
                     sha256 = mkOption {
                       type = types.str;
-                      description = "Hex SHA-256 of the personal access token; never the token itself.";
+                      description = ''
+                        Hex SHA-256 of the personal access token; never the token itself. The token
+                        must carry at least 128 bits of randomness (the hash is world-readable):
+                        `t="kjb_$(head -c 32 /dev/urandom | basenc --base64url | tr -d '=')"; echo "$t"; printf %s "$t" | sha256sum`.
+                      '';
                     };
                     scopes = mkOption {
                       type = types.listOf types.str;
@@ -194,14 +201,13 @@ in
     persistedPaths = mkOption {
       type = types.listOf types.str;
       readOnly = true;
-      default =
-        map (sub: "${cfg.stateDir}/${sub}") [
-          "repos"
-          "db"
-          "ci"
-        ]
-        ++ [ cfg.dump.dir ];
-      description = "Paths a host with an ephemeral root must persist (0012); `tmp/` and the lock are not.";
+      # One mount for stateDir: quarantine in tmp/orphans must survive a reboot, and moves between
+      # repos/ and tmp/ are renames, which fail across mounts. Startup empties tmp/ anyway.
+      default = [
+        cfg.stateDir
+        cfg.dump.dir
+      ];
+      description = "Paths a host with an ephemeral root must persist (0012): the whole stateDir and dump.dir.";
     };
     dump = {
       dir = mkOption {

@@ -62,6 +62,7 @@ pub async fn reconcile_credentials(
             tokens.insert((name.clone(), token_name.clone()), (hash, scopes, expires));
         }
     }
+    let mut revoked = Vec::new();
     let result = async {
         let mut tx = writer.begin().await?;
         let users: BTreeMap<String, i64> = sqlx::query_as::<_, (String, i64)>("SELECT name, id FROM user")
@@ -97,6 +98,15 @@ pub async fn reconcile_credentials(
                     .bind(&key_type).bind(&line).bind(id).bind(&key_type).bind(&line)
                     .execute(&mut *tx).await?;
             } else {
+                // ADR 0025: a declared key wins over a runtime key with the same fingerprint and usage.
+                let runtime: Option<(i64, String)> = sqlx::query_as(
+                    "SELECT ssh_key.id, user.name FROM ssh_key JOIN user ON user.id = ssh_key.user_id
+                     WHERE usage = ? AND fingerprint = ? AND ssh_key.source = 'runtime'",
+                ).bind(&usage).bind(&fingerprint).fetch_optional(&mut *tx).await?;
+                if let Some((runtime_id, owner)) = runtime {
+                    sqlx::query("DELETE FROM ssh_key WHERE id = ?").bind(runtime_id).execute(&mut *tx).await?;
+                    revoked.push((owner, usage.clone(), fingerprint.clone()));
+                }
                 let public_id = new_public_id(&mut tx, now).await?;
                 sqlx::query("INSERT INTO ssh_key (public_id, user_id, usage, key_type, public_key, fingerprint, source, created_at) VALUES (?, ?, ?, ?, ?, ?, 'config', ?)")
                     .bind(public_id).bind(user_id).bind(usage).bind(key_type).bind(line)
@@ -121,5 +131,15 @@ pub async fn reconcile_credentials(
         }
         tx.commit().await
     }.await;
-    result.map_err(|err: sqlx::Error| format!("credential reconciliation: {err}"))
+    result.map_err(|err: sqlx::Error| format!("credential reconciliation: {err}"))?;
+    for (user, usage, fingerprint) in revoked {
+        tracing::warn!(
+            event = "runtime-key-revoked",
+            user,
+            usage,
+            fingerprint,
+            "a declared key replaced it"
+        );
+    }
+    Ok(())
 }

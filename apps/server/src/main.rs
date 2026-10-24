@@ -195,7 +195,7 @@ async fn admin_enroll(path: &std::path::Path, user: String) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(err) => {
-            // A refusal's message names the user and the reason ("unknown user alice").
+            // A refusal's message names the reason, and the user only once it is a valid name.
             let message = match err.downcast_ref::<tonic::Status>() {
                 Some(status) => status.message().to_owned(),
                 None => err.to_string(),
@@ -207,9 +207,7 @@ async fn admin_enroll(path: &std::path::Path, user: String) -> ExitCode {
 }
 
 fn load_config(path: &std::path::Path, files: bool) -> Result<ServerConfig, String> {
-    let input =
-        std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
-    let config = ServerConfig::parse(&input)?;
+    let config = ServerConfig::parse(&kajiba_core::config::read_config(path)?)?;
     if files {
         config.check_files()?;
     }

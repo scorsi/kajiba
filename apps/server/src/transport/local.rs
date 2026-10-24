@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll, ready},
@@ -29,6 +29,25 @@ use tonic::{
 };
 
 pub const SOCKET_PATH: &str = "/run/kajiba/local.sock";
+
+/// Readiness of the local listener: serving, and its path still names the socket it bound.
+#[derive(Default)]
+pub struct Serving {
+    pub(super) on: AtomicBool,
+    socket: OnceLock<(PathBuf, (u64, u64))>,
+}
+
+impl Serving {
+    pub(super) fn ready(&self) -> bool {
+        self.on.load(Ordering::Acquire)
+            && self.socket.get().is_none_or(|(path, identity)| {
+                fs::symlink_metadata(path).is_ok_and(|metadata| {
+                    metadata.file_type().is_socket()
+                        && (metadata.dev(), metadata.ino()) == *identity
+                })
+            })
+    }
+}
 
 pub struct Admin {
     pub writer: crate::db::Writer,
@@ -49,7 +68,18 @@ impl AdminService for Admin {
         request: Request<EnrollRequest>,
     ) -> Result<Response<EnrollResponse>, Status> {
         use crate::db::enrollment::{Error, issue};
-        let user = request.into_inner().user;
+        // Validated before taking the writer; a rejected name is never echoed (ADR 0022).
+        let user =
+            kajiba_core::names::validate_name(&request.into_inner().user).map_err(|err| {
+                let mut details = tonic_types::ErrorDetails::new();
+                details.set_error_info("INVALID_FIELD", "kajiba", std::collections::HashMap::new());
+                details.add_bad_request_violation("user", err.to_string());
+                <Status as tonic_types::StatusExt>::with_error_details(
+                    tonic::Code::InvalidArgument,
+                    format!("invalid user name: {err}"),
+                    details,
+                )
+            })?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|err| Status::internal(err.to_string()))?
@@ -72,13 +102,11 @@ impl AdminService for Admin {
                 "INVALID_STATE",
                 format!("user {user} is disabled"),
             ),
+            Error::Expiry => Status::internal("enrollment: expiry out of range"),
             Error::Database(err) => Status::internal(format!("enrollment: {err}")),
         })?;
         // ADR 0022: never log the link or its token.
-        tracing::info!(
-            event = "enrollment-issued",
-            user = user.to_ascii_lowercase()
-        );
+        tracing::info!(event = "enrollment-issued", user);
         Ok(Response::new(EnrollResponse {
             // The fragment keeps the token out of proxy and request logs; J4's page reads it.
             url: format!(
@@ -94,12 +122,12 @@ pub(super) struct Local {
     path: PathBuf,
     identity: (u64, u64),
     allowed_uids: Vec<u32>,
-    serving: Arc<AtomicBool>,
+    serving: Arc<Serving>,
     backoff: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl Local {
-    pub(super) fn bind(path: &Path, serving: Arc<AtomicBool>) -> io::Result<Self> {
+    pub(super) fn bind(path: &Path, serving: Arc<Serving>) -> io::Result<Self> {
         match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_socket() => {
                 match std::os::unix::net::UnixStream::connect(path) {
@@ -126,6 +154,9 @@ impl Local {
         }
         let listener = UnixListener::bind(path)?;
         let metadata = fs::symlink_metadata(path)?;
+        let _ = serving
+            .socket
+            .set((path.into(), (metadata.dev(), metadata.ino())));
         let local = Self {
             listener,
             path: path.into(),
@@ -149,19 +180,20 @@ impl Local {
         registry: Arc<Registry>,
         shutdown: impl std::future::Future<Output = ()>,
     ) -> io::Result<()> {
-        let routes = Routes::new(AdminServiceServer::new(admin))
+        // An enroll request is a user name: a few bytes, never tonic's 4 MiB default.
+        let routes = Routes::new(AdminServiceServer::new(admin).max_decoding_message_size(4096))
             .into_axum_router()
             .layer(middleware::from_fn_with_state(
                 registry,
                 correlation::request,
             ));
-        self.serving.store(true, Ordering::Release);
+        self.serving.on.store(true, Ordering::Release);
         let serving = self.serving.clone();
         tonic::transport::Server::builder()
             .add_routes(routes.into())
             .serve_with_incoming_shutdown(self, async move {
                 shutdown.await;
-                serving.store(false, Ordering::Release);
+                serving.on.store(false, Ordering::Release);
             })
             .await
             .map_err(io::Error::other)
@@ -200,7 +232,7 @@ impl Stream for Local {
 
 impl Drop for Local {
     fn drop(&mut self) {
-        self.serving.store(false, Ordering::Release);
+        self.serving.on.store(false, Ordering::Release);
         if fs::symlink_metadata(&self.path)
             .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == self.identity)
         {

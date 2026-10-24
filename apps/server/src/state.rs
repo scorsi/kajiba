@@ -51,7 +51,23 @@ fn prepare_with_sync(
         let path = state_dir.join(name);
         create_dir_all(&path, sync).map_err(|err| format!("{}: {err}", path.display()))?;
     }
+    for name in ["repos", "db", "ci", "ci/logs", "ci/artifacts", "tmp"] {
+        real_dir(&state_dir.join(name)).map_err(|err| err.to_string())?;
+    }
     Ok(lock)
+}
+
+/// A managed directory must be a directory itself, never a symlink: cleanup deletes
+/// recursively under `tmp/`, and a `tmp` link to `repos` would delete repositories.
+fn real_dir(path: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path)?.is_dir() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "{}: not a directory (symlinks are refused)",
+            path.display()
+        )))
+    }
 }
 
 // Run after migrations, while holding the state lock and before admitting work.
@@ -75,6 +91,8 @@ async fn cleanup_with_sync(
     let result = (|| -> io::Result<()> {
         let tmp = state_dir.join("tmp");
         let orphans = tmp.join("orphans");
+        real_dir(&tmp)?;
+        real_dir(&state_dir.join("repos"))?;
         for entry in fs::read_dir(&tmp)? {
             let entry = entry?;
             let kind = entry.file_type()?;
@@ -406,6 +424,37 @@ mod tests {
             "preserve"
         );
         assert!(temp.0.join("repos/orphan.git").is_dir());
+        writer.close().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_managed_directories_are_refused_before_any_deletion() {
+        use std::os::unix::fs::symlink;
+
+        for name in ["tmp", "repos", "db", "ci", "ci/logs"] {
+            let temp = TempDir::new();
+            let lock = prepare(&temp.0).unwrap();
+            let target = temp.0.join("elsewhere");
+            fs::rename(temp.0.join(name), &target).unwrap();
+            symlink(&target, temp.0.join(name)).unwrap();
+            drop(lock);
+            let error = prepare(&temp.0).unwrap_err();
+            assert!(error.contains("symlinks are refused"), "{name}: {error}");
+        }
+        // Replaced after prepare (cleanup re-checks): a tmp link to repos deletes nothing.
+        let temp = TempDir::new();
+        let _lock = prepare(&temp.0).unwrap();
+        let (mut writer, readers) = crate::db::open(&temp.0.join("db/kajiba.sqlite"))
+            .await
+            .unwrap();
+        fs::create_dir(temp.0.join("repos/keep.git")).unwrap();
+        fs::remove_dir(temp.0.join("tmp")).unwrap();
+        symlink(temp.0.join("repos"), temp.0.join("tmp")).unwrap();
+        let error = cleanup(&temp.0, &mut writer).await.unwrap_err();
+        assert!(error.contains("symlinks are refused"), "{error}");
+        assert!(temp.0.join("repos/keep.git").is_dir());
+        readers.close().await;
         writer.close().await.unwrap();
     }
 
