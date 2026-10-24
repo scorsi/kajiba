@@ -20,7 +20,8 @@ pub enum Error {
     NotEmpty(String),
     /// The source lacks the declared default branch.
     NoDefaultBranch(String),
-    /// The source cannot be read or fetched; the reason is redacted by `reason`.
+    /// The source cannot be read or fetched; one of `reason`'s classes, or the rule a
+    /// refused source broke (`check_source`).
     Source(String),
     Internal(String),
 }
@@ -58,7 +59,7 @@ pub async fn import(
     let refs = tokio::task::spawn_blocking(move || Gix.remote_refs(&owned, &secret))
         .await
         .map_err(|err| Error::Internal(err.to_string()))?
-        .map_err(|err| Error::Source(reason(&err.to_string(), source)))?;
+        .map_err(|err| Error::Source(reason(&err.to_string()).into()))?;
     let head = format!("refs/heads/{default_branch}");
     if !refs.iter().any(|r| r.name == head) {
         return Err(Error::NoDefaultBranch(head));
@@ -107,7 +108,7 @@ pub async fn import(
     .await
     .map_err(|err| Error::Internal(err.to_string()))?
     .map_err(Error::Internal)?;
-    fetched.map_err(|err| Error::Source(reason(&err.to_string(), source)))?;
+    fetched.map_err(|err| Error::Source(reason(&err.to_string()).into()))?;
     tracing::info!(event = "repo-imported", repo, refs = refs.len());
     Ok(refs.len())
 }
@@ -160,37 +161,53 @@ pub(crate) fn supervise(
     })
 }
 
-/// Git's stderr may echo a source URL with its credentials: keep only scheme, host
-/// and path of every URL (no userinfo, query or fragment), drop the source's own
-/// userinfo wherever it appears, on one line of at most 200 characters.
-pub fn reason(stderr: &str, source: &str) -> String {
-    let mut text = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
-    if let Some((userinfo, _)) = source
-        .split_once("://")
-        .and_then(|(_, rest)| rest.split_once('@'))
-        .filter(|(userinfo, _)| !userinfo.is_empty())
-    {
-        text = text.replace(userinfo, "");
+/// Classifies a git failure from its stderr. Git echoes the source, remote banners
+/// and sometimes a credential: none of that text ever leaves the server, only one
+/// of these fixed classes does (ADR 0022, 0041).
+pub fn reason(stderr: &str) -> &'static str {
+    let text = stderr.to_ascii_lowercase();
+    let any = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
+    if any(&["did not finish within", "timed out", "operation too slow"]) {
+        "timed out"
+    } else if any(&[
+        "authentication failed",
+        "error: 401",
+        "error: 403",
+        "could not read username",
+        "could not read password",
+        "terminal prompts disabled",
+        "permission denied",
+        "host key verification failed",
+        "access denied",
+    ]) {
+        "authentication failed"
+    } else if any(&[
+        "not found",
+        "error: 404",
+        "no such file or directory",
+        "does not exist",
+    ]) {
+        "source not found"
+    } else if any(&[
+        "not appear to be a git repository",
+        "not a git repository",
+        "bundle file",
+    ]) {
+        "not a git repository"
+    } else if any(&[
+        "could not resolve host",
+        "failed to connect",
+        "connection refused",
+        "connection reset",
+        "unable to look up",
+        "unable to access",
+        "unable to connect",
+        "could not read from remote repository",
+        "remote end hung up",
+        "early eof",
+    ]) {
+        "network error"
+    } else {
+        "other error"
     }
-    let mut out = String::new();
-    let mut rest = text.as_str();
-    while let Some(start) = rest.find("://") {
-        let (head, tail) = rest.split_at(start + 3);
-        out.push_str(head);
-        let end = tail
-            .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"'))
-            .unwrap_or(tail.len());
-        let (url, after) = tail.split_at(end);
-        let url = url.split(['?', '#']).next().unwrap_or(url);
-        let (authority, path) = url.split_at(url.find('/').unwrap_or(url.len()));
-        out.push_str(
-            authority
-                .rsplit_once('@')
-                .map_or(authority, |(_, host)| host),
-        );
-        out.push_str(path);
-        rest = after;
-    }
-    out.push_str(rest);
-    out.chars().take(200).collect()
 }

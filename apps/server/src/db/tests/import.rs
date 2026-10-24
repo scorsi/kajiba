@@ -313,35 +313,51 @@ fn sources_carrying_credentials_are_refused() {
 }
 
 #[test]
-fn source_reasons_drop_url_credentials_and_stay_bounded() {
-    let source = "https://user:secret@example.org/demo.git";
-    assert_eq!(
-        crate::import::reason(
-            "fatal: unable to access 'https://user:secret@example.org/demo.git/':\n  \
-             see ssh://other:pass@host:22/x and https://a%40b:c@d",
-            source
+fn source_reasons_are_fixed_classes_without_any_stderr_text() {
+    use crate::import::reason;
+    // A token in the path, a credential echoed on its own, a secret in a local path:
+    // only the class comes back.
+    for (stderr, class) in [
+        (
+            "fatal: unable to access 'https://host/secret-token/repo/': \
+             The requested URL returned error: 401",
+            "authentication failed",
         ),
-        "fatal: unable to access 'https://example.org/demo.git/': see ssh://host:22/x and https://d"
-    );
-    // A token in a query string or fragment goes too.
-    assert_eq!(
-        crate::import::reason(
-            "error: https://example.org/x?token=abc#f returned 401",
-            source
+        (
+            "remote: password secret rejected\nfatal: Authentication failed for 'https://host/x/'",
+            "authentication failed",
         ),
-        "error: https://example.org/x returned 401"
-    );
-    // The source's own userinfo goes even outside a URL.
-    assert_eq!(
-        crate::import::reason("fatal: 'x/user:secret@y' is not a repository", source),
-        "fatal: 'x/@y' is not a repository"
-    );
-    assert_eq!(
-        crate::import::reason(&"é".repeat(500), source)
-            .chars()
-            .count(),
-        200
-    );
+        (
+            "git@host: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+            "authentication failed",
+        ),
+        (
+            "remote: Repository not found.\nfatal: repository 'https://host/secret/' not found",
+            "source not found",
+        ),
+        (
+            "fatal: '/srv/secret-dir' does not appear to be a git repository",
+            "not a git repository",
+        ),
+        (
+            "fatal: unable to access 'https://secret@host/': Could not resolve host: host",
+            "network error",
+        ),
+        ("git did not finish within 3600 s", "timed out"),
+        (
+            "fatal: unable to access 'https://h/': Operation too slow",
+            "timed out",
+        ),
+        (
+            "remote: secret\nfatal: something else entirely",
+            "other error",
+        ),
+        ("", "other error"),
+    ] {
+        let got = reason(stderr);
+        assert_eq!(got, class, "{stderr}");
+        assert!(!got.contains("secret"));
+    }
 }
 
 #[tokio::test]
