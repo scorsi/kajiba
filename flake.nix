@@ -15,6 +15,21 @@
     };
 
     crane.url = "github:ipetkov/crane";
+
+    # Test-only inputs: log and metrics schema validators for the nixosTests (0015, 0022).
+    nisshi = {
+      url = "github:scorsi/nisshi";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-parts.follows = "flake-parts";
+      inputs.treefmt-nix.follows = "treefmt-nix";
+    };
+    masu = {
+      url = "github:scorsi/masu";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-parts.follows = "flake-parts";
+      inputs.treefmt-nix.follows = "treefmt-nix";
+      inputs.crane.follows = "crane";
+    };
   };
 
   outputs =
