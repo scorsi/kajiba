@@ -497,6 +497,52 @@ async fn a_failure_after_a_head_change_rolls_back_rows_and_the_next_run_converge
 }
 
 #[tokio::test]
+async fn a_failed_head_change_converges_before_archival_and_while_archived() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut state = State::new().await;
+    state.apply(DEMO).await.unwrap();
+    let (demo, _, _) = state.repo("demo").await;
+    let head = state.path(&demo).join("HEAD");
+    let tmp = state.dir.0.join("tmp");
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o500)).unwrap();
+    let error = state
+        .apply(&format!(
+            "{DEMO}default_branch='dev'\n[repos.fresh]\nowner='bob'\ndescription=''\n"
+        ))
+        .await
+        .unwrap_err();
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(error.contains(&tmp.display().to_string()), "{error}");
+    assert_eq!(
+        state.strings("SELECT default_branch FROM repo").await,
+        ["main"]
+    );
+    assert_eq!(fs::read_to_string(&head).unwrap(), "ref: refs/heads/dev\n");
+
+    state.reopen().await;
+    state.apply("").await.unwrap();
+    let archived = state.repo("demo").await;
+    assert_eq!(archived.0, demo);
+    assert!(archived.2.is_some());
+    assert_eq!(fs::read_to_string(&head).unwrap(), "ref: refs/heads/main\n");
+    assert_eq!(
+        state.strings("SELECT default_branch FROM repo").await,
+        ["main"]
+    );
+    assert_eq!(state.repo_dirs(), [format!("{demo}.git")]);
+
+    // Already archived repositories also converge, without changing their rows.
+    fs::write(&head, "ref: refs/heads/dev\n").unwrap();
+    state.reopen().await;
+    let before = changes(&mut state.writer).await;
+    state.apply("").await.unwrap();
+    assert_eq!(changes(&mut state.writer).await, before);
+    assert_eq!(state.repo("demo").await, archived);
+    assert_eq!(fs::read_to_string(&head).unwrap(), "ref: refs/heads/main\n");
+    state.close().await;
+}
+
+#[tokio::test]
 async fn a_repository_refusal_rolls_back_user_and_credential_changes() {
     let mut state = State::new().await;
     state.apply(DEMO).await.unwrap();

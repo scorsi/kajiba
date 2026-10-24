@@ -15,6 +15,7 @@ struct Row {
     owner: String,
     name: String,
     archived: bool,
+    default_branch: String,
 }
 
 enum Log {
@@ -58,7 +59,7 @@ impl Applied {
 
 /// ADR 0026: make `repo`, `repo_redirect`, `repo_permission` and the declared
 /// `mirror` columns equal the configuration, matching rows by key only. Run after
-/// user reconciliation, under the state lock; a refusal writes nothing.
+/// user reconciliation, under the state lock; a refusal commits no rows.
 pub async fn reconcile_repos(
     writer: &mut SqliteConnection,
     state_dir: &Path,
@@ -109,24 +110,34 @@ async fn apply(
         .map_err(sql)?
         .into_iter()
         .collect();
-    let rows: Vec<Row> = sqlx::query_as::<_, (i64, String, String, String, String, bool)>(
+    let rows: Vec<Row> = sqlx::query_as::<_, (i64, String, String, String, String, bool, String)>(
         "SELECT repo.id, repo.public_id, repo.config_key, user.name, repo.name,
-                repo.archived_at IS NOT NULL
+                repo.archived_at IS NOT NULL, repo.default_branch
          FROM repo JOIN user ON user.id = repo.owner_id",
     )
     .fetch_all(&mut *tx)
     .await
     .map_err(sql)?
     .into_iter()
-    .map(|(id, public_id, key, owner, name, archived)| Row {
-        id,
-        public_id,
-        key,
-        owner,
-        name,
-        archived,
-    })
+    .map(
+        |(id, public_id, key, owner, name, archived, default_branch)| Row {
+            id,
+            public_id,
+            key,
+            owner,
+            name,
+            archived,
+            default_branch,
+        },
+    )
     .collect();
+    // Repair uncommitted HEAD changes before declarations, including archived rows.
+    for row in &rows {
+        let path = state_dir.join(format!("repos/{}.git", row.public_id));
+        store
+            .set_head(&path, &row.default_branch)
+            .map_err(|err| format!("repos.{}.default_branch: {err}", row.key))?;
+    }
     let redirects: Vec<(i64, String)> =
         sqlx::query_as("SELECT repo_id, owner_name || '/' || name FROM repo_redirect")
             .fetch_all(&mut *tx)
@@ -207,8 +218,6 @@ async fn apply(
             .execute(&mut *tx)
             .await
             .map_err(sql)?;
-            // Compare the file itself, not the row's previous value: a HEAD left by an
-            // interrupted or rolled-back run converges here (set_head is idempotent).
             let path = state_dir.join(format!("repos/{}.git", row.public_id));
             store
                 .set_head(&path, &repo.default_branch)
