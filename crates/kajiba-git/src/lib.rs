@@ -191,6 +191,14 @@ impl GitStore for Gix {
         kajiba_core::names::validate_ref(&format!("refs/heads/{default_branch}"))
             .map_err(|err| Error::Git(err.to_string()))?;
         gix::init_bare(path)?;
+        // Objects and refs reach the disk before the database records them (ADR 0003).
+        let config = path.join("config");
+        let mut file =
+            gix::config::File::from_path_no_includes(config.clone(), gix::config::Source::Local)
+                .map_err(|err| Error::Git(err.to_string()))?;
+        file.set_raw_value_by("core", None, "fsync", "all")
+            .map_err(|err| Error::Git(err.to_string()))?;
+        std::fs::write(&config, file.to_bstring()).map_err(|err| Error::Git(err.to_string()))?;
         self.set_head(path, default_branch)
     }
 

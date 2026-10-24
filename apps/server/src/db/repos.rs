@@ -382,6 +382,8 @@ async fn apply(
         store
             .init_bare(&tmp, branch)
             .map_err(|err| format!("{}: {err}", tmp.display()))?;
+        // The staged content is durable before the row that points at it (ADR 0003).
+        crate::state::sync_tree(&tmp).map_err(|err| format!("{}: {err}", tmp.display()))?;
         std::fs::rename(&tmp, &path).map_err(|err| format!("{}: {err}", path.display()))?;
         created.push(path);
         crate::state::sync_dir(&state_dir.join("repos"))

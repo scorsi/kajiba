@@ -27,6 +27,19 @@ pub(crate) fn sync_dir(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }
 
+/// Every file and directory under `path`, then `path` itself.
+pub(crate) fn sync_tree(path: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            sync_tree(&entry.path())?;
+        } else {
+            File::open(entry.path())?.sync_all()?;
+        }
+    }
+    sync_dir(path)
+}
+
 fn create_dir_all(path: &Path, sync: &mut impl FnMut(&Path) -> io::Result<()>) -> io::Result<()> {
     if path.is_dir() {
         return Ok(());

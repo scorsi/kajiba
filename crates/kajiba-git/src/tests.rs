@@ -104,6 +104,8 @@ fn init_bare_puts_head_on_the_default_branch() {
         git(&bare, &["rev-parse", "--is-bare-repository"], "0 +0000"),
         "true"
     );
+    // Writes are durable before the database records them (ADR 0003).
+    assert_eq!(git(&bare, &["config", "core.fsync"], "0 +0000"), "all");
     assert_eq!(Gix.refs(&bare).unwrap(), []);
     assert!(Gix.init_bare(&dir.join("bad.git"), "a..b").is_err());
     assert!(!dir.join("bad.git").exists());
