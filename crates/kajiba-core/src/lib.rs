@@ -1,1 +1,3 @@
-//! Domain, permissions and events. Empty until J1.
+//! Shared domain validation, permissions and events.
+
+pub mod names;
