@@ -185,6 +185,10 @@
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
           };
+          nixos-server-enroll = import ./tests/server-enroll.nix {
+            inherit pkgs testLib;
+            kajibaServerPackage = config.packages.kajiba-server;
+          };
         }
       );
 
