@@ -23,6 +23,38 @@ impl Repos {
     }
 }
 
+/// Git transport and `/raw/` (0021, 0026): a clean 404 for an unknown repository.
+pub fn not_found_http() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (axum::http::StatusCode::NOT_FOUND, "repository not found\n").into_response()
+}
+
+impl Repos {
+    /// The git directory of an active repository found by name or redirect; an
+    /// archived one is refused with 403.
+    pub async fn git_dir(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Result<std::path::PathBuf, axum::response::Response> {
+        use axum::{http::StatusCode, response::IntoResponse};
+        let readers = self
+            .readers()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
+        match crate::db::repos::find(readers, owner, name).await {
+            Ok(Some(found)) if found.archived => {
+                Err((StatusCode::FORBIDDEN, "repository archived\n").into_response())
+            }
+            Ok(Some(found)) => Ok(self
+                .0
+                .state_dir
+                .join(format!("repos/{}.git", found.public_id))),
+            Ok(None) => Err(not_found_http()),
+            Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        }
+    }
+}
+
 fn not_found() -> Status {
     refused(
         tonic::Code::NotFound,

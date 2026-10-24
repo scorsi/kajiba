@@ -49,9 +49,14 @@ pub(super) async fn request(
         "/kajiba.admin.v1.AdminService/ListRepos" => "/kajiba.admin.v1.AdminService/ListRepos",
         "/kajiba.admin.v1.AdminService/Import" => "/kajiba.admin.v1.AdminService/Import",
         "/kajiba.v1.HealthService/Check" => "/kajiba.v1.HealthService/Check",
+        "/kajiba.v1.RepoService/GetRepo" => "/kajiba.v1.RepoService/GetRepo",
+        "/kajiba.v1.RepoService/ListRepos" => "/kajiba.v1.RepoService/ListRepos",
         "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo" => {
             "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
         }
+        // Route classes, never the raw path (0022).
+        path if path.ends_with(".git/info/refs") => "git-info-refs",
+        path if path.ends_with(".git/git-upload-pack") => "git-upload-pack",
         _ => "other",
     };
     let started = Instant::now();
@@ -60,13 +65,16 @@ pub(super) async fn request(
     request
         .extensions_mut()
         .insert(RequestId(request_id.clone()));
-    let kind = Kind::from_content_type(
-        request
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or(""),
-    );
+    let kind = match method {
+        "git-info-refs" | "git-upload-pack" => Kind::GitHttp,
+        _ => Kind::from_content_type(
+            request
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or(""),
+        ),
+    };
     let mut body = RequestBody {
         metrics,
         kind,

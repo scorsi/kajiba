@@ -52,6 +52,73 @@ impl Fixture {
     }
 }
 
+impl Fixture {
+    /// Fills a declared repository: `files` committed on `main`, then each extra
+    /// branch and tag on that commit, pushed with the git binary.
+    pub(in crate::transport) async fn fill(
+        &self,
+        repo: &str,
+        files: &[(&str, &str)],
+        refs: &[&str],
+    ) {
+        let (owner, name) = repo.split_once('/').unwrap();
+        let found = crate::db::repos::find(self.repos.readers().unwrap(), owner, name)
+            .await
+            .unwrap()
+            .unwrap();
+        let bare = self.dir.join(format!("repos/{}.git", found.public_id));
+        let work = self.dir.join("tmp/work");
+        git(
+            &self.dir,
+            &["init", "-q", "-b", "main", work.to_str().unwrap()],
+        );
+        for (path, content) in files {
+            let file = work.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, content).unwrap();
+        }
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-q", "-m", "init"]);
+        for name in refs {
+            git(&work, &["update-ref", name, "HEAD"]);
+        }
+        git(
+            &work,
+            &[
+                "push",
+                "-q",
+                bare.to_str().unwrap(),
+                "refs/heads/*:refs/heads/*",
+                "refs/tags/*:refs/tags/*",
+            ],
+        );
+        std::fs::remove_dir_all(work).unwrap();
+    }
+}
+
+/// The git binary without user configuration and with fixed identity and dates.
+pub(in crate::transport) fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "a")
+        .env("GIT_AUTHOR_EMAIL", "a@example.org")
+        .env("GIT_COMMITTER_NAME", "a")
+        .env("GIT_COMMITTER_EMAIL", "a@example.org")
+        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);

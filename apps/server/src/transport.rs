@@ -88,6 +88,7 @@ fn router(
     let mut app = Routes::new(HealthServiceServer::new(health.clone()))
         .add_service(RepoServiceServer::new(repos::Repos(health.clone())))
         .into_axum_router()
+        .merge(git_http::routes(repos::Repos(health.clone())))
         .route("/healthz", get(|| async { "OK" }))
         .route(
             "/readyz",
@@ -325,6 +326,7 @@ fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
 
 pub mod correlation;
 pub mod cursor;
+pub mod git_http;
 pub mod local;
 pub mod repos;
 

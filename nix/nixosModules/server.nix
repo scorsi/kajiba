@@ -326,6 +326,8 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
       restartTriggers = [ configFile ];
+      # admin import and smart HTTP spawn git (0003).
+      path = [ pkgs.git ];
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} serve --config ${configFile}";
         # The unit is active only once /readyz answers 200 (0022); TimeoutStartSec bounds it.

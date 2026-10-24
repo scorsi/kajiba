@@ -46,6 +46,7 @@ const BOUNDS_TEXT: [&str; 7] = ["0.01", "0.05", "0.25", "1", "5", "30", "+Inf"];
 pub enum Kind {
     Grpc,
     GrpcWeb,
+    GitHttp,
     Other = 5,
 }
 impl Kind {
