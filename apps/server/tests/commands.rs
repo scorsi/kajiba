@@ -297,3 +297,55 @@ fn serve_refuses_held_state_lock_with_fatal_error() {
     drop(lock);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn serve_reconciles_declared_users_before_serving() {
+    use sqlx::Connection;
+    use std::time::{Duration, Instant};
+
+    let dir = std::env::temp_dir().join(format!("kajiba-users-start-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("server.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "state_dir={:?}\n[http]\npublic_url='https://example.org'\n[users.alice]\nis_admin=true",
+            dir.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kajiba-server"))
+        .args(["serve", "--config", path.to_str().unwrap()])
+        .env_remove("RUST_LOG")
+        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(dir.join("db/kajiba.sqlite"))
+        .read_only(true);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut reconciled = false;
+    while Instant::now() < deadline {
+        if let Ok(mut connection) = sqlx::SqliteConnection::connect_with(&options).await {
+            let count = sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM user WHERE name = 'alice' AND kind = 'local' AND is_admin = 1 AND source = 'config' AND disabled_at IS NULL",
+            )
+            .fetch_one(&mut connection)
+            .await;
+            connection.close().await.unwrap();
+            if matches!(count, Ok(1)) {
+                reconciled = true;
+                break;
+            }
+        }
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    child.wait().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert!(reconciled, "serve did not reconcile the declared user");
+}

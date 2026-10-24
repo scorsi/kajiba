@@ -8,6 +8,7 @@ use std::{path::Path, time::Duration};
 // The journal API is consumed by the dispatcher in J1 task 18.
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod events;
+pub mod users;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -67,6 +68,7 @@ mod tests {
     mod events;
     mod identity;
     mod repositories;
+    mod users;
 
     struct TempDir(PathBuf);
 
