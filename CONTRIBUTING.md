@@ -34,6 +34,7 @@ job from J4 (ADR 0015).
 file:
 
 ```sh
+pnpm install --frozen-lockfile # install UI tools first, from the repository root
 cd proto && buf lint && buf generate
 ```
 
@@ -41,6 +42,28 @@ This regenerates the TypeScript client (`apps/ui/src/lib/gen/`), which is
 committed. The Rust code isn't touched by `buf generate` — it's generated
 fresh on every `cargo build` by `crates/kajiba-proto/build.rs`, for the
 server, the runner and the CLI.
+
+The devShell adds `apps/ui/node_modules/.bin` to `PATH` when entered from
+the repository root. `proto-generated` uses the same pnpm dependencies in
+the sandbox and compares a fresh generation with the committed directory,
+including missing and extra files. Run the same check locally from the root:
+
+```sh
+bash nix/checks/proto-generated.sh
+bash nix/checks/proto-generated-test.sh "$PWD/nix/checks/proto-generated.sh"
+```
+
+`buf-breaking` passes with a skip message: the Nix source has no `.git` and
+no tag baseline is available in the sandbox. In a checkout with release tags,
+run against the last release tag (replace `<tag>` with that tag):
+
+```sh
+cd proto
+buf breaking --against '.git#tag=<tag>'
+```
+
+This is informational before 1.0.0; breaking changes are allowed in a minor
+bump (ADRs 0020, 0023). A checkout without release tags skips this comparison.
 
 ## Versioning
 

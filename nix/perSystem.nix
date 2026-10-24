@@ -13,6 +13,7 @@
       craneLib = inputs.crane.mkLib pkgs;
       commonCargoArgs = {
         pname = "kajiba-workspace";
+        version = lib.trim (builtins.readFile ../VERSION);
         src = lib.fileset.toSource {
           root = ../.;
           fileset = lib.fileset.unions [
@@ -62,6 +63,9 @@
           playwright
         ];
         PROTOC = "${pkgs.protobuf}/bin/protoc";
+        shellHook = ''
+          export PATH="$PWD/apps/ui/node_modules/.bin:$PATH"
+        '';
       };
 
       checks = {
@@ -104,6 +108,39 @@
           export HOME=$TMPDIR
           cd ${../proto}
           buf lint
+          touch $out
+        '';
+
+        proto-generated = pkgs.stdenvNoCC.mkDerivation {
+          pname = "proto-generated";
+          inherit (config.packages.kajiba-ui) version pnpmDeps;
+          src = lib.fileset.toSource {
+            root = ../.;
+            fileset = lib.fileset.unions [
+              (lib.fileset.fromSource config.packages.kajiba-ui.src)
+              ../proto
+            ];
+          };
+          nativeBuildInputs = with pkgs; [
+            nodejs
+            pnpm
+            pnpmConfigHook
+            buf
+            diffutils
+          ];
+          buildPhase = ''
+            runHook preBuild
+            export HOME=$TMPDIR
+            export PATH="$PWD/apps/ui/node_modules/.bin:$PATH"
+            bash ${./checks/proto-generated.sh}
+            bash ${./checks/proto-generated-test.sh} ${./checks/proto-generated.sh}
+            runHook postBuild
+          '';
+          installPhase = "touch $out";
+        };
+
+        buf-breaking = pkgs.runCommand "buf-breaking" { } ''
+          echo "buf-breaking: skipped (no tag baseline available in the sandbox; see CONTRIBUTING.md). Informational before 1.0.0."
           touch $out
         '';
       }
