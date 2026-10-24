@@ -309,7 +309,13 @@ async fn declared_key_replaces_a_runtime_key_with_the_same_fingerprint_and_usage
         SELECT '00000000000000000000000099', id, 'signing', 'ssh-ed25519', 'other', 'SHA256:other', 'runtime', 0 FROM user WHERE name = 'bob'")
         .execute(&mut writer).await.unwrap();
     // Startup does not abort: the declared signing key wins, the unrelated runtime key stays.
-    reconcile_credentials(&mut writer, &both).await.unwrap();
+    // The revocation is reported to the caller, which logs it after the outer commit.
+    let revoked = reconcile_credentials(&mut writer, &both).await.unwrap().0;
+    assert_eq!(revoked.len(), 1);
+    assert_eq!(
+        (revoked[0].0.as_str(), revoked[0].1.as_str()),
+        ("bob", "signing")
+    );
     let owners: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT user.name, usage, ssh_key.source, public_key FROM ssh_key JOIN user ON user.id = user_id ORDER BY user.name, usage",
     )

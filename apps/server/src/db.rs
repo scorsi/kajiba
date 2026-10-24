@@ -21,22 +21,24 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 /// commit through `EventBus::commit`.
 pub type Writer = std::sync::Arc<tokio::sync::Mutex<SqliteConnection>>;
 
-/// Users and their declared credentials change together or not at all.
+/// Users and their declared credentials change together or not at all. The caller
+/// logs the returned revocations once its own transaction, if any, has committed.
 pub async fn reconcile(
     writer: &mut SqliteConnection,
     declared: &std::collections::BTreeMap<String, kajiba_core::config::UserConfig>,
-) -> Result<(), String> {
+) -> Result<credentials::Revoked, String> {
     let mut transaction = writer
         .begin()
         .await
         .map_err(|err| format!("reconciliation: {err}"))?;
     // Each step's own transaction nests as a savepoint inside this one.
     users::reconcile_users(&mut transaction, declared).await?;
-    credentials::reconcile_credentials(&mut transaction, declared).await?;
+    let revoked = credentials::reconcile_credentials(&mut transaction, declared).await?;
     transaction
         .commit()
         .await
-        .map_err(|err| format!("reconciliation: {err}"))
+        .map_err(|err| format!("reconciliation: {err}"))?;
+    Ok(revoked)
 }
 
 /// ADR 0026: users, credentials and repositories are reconciled in one transaction;
@@ -50,11 +52,12 @@ pub async fn reconcile_declared(
         .begin()
         .await
         .map_err(|err| format!("reconciliation: {err}"))?;
-    reconcile(&mut transaction, &config.users).await?;
+    let revoked = reconcile(&mut transaction, &config.users).await?;
     let applied =
         repos::reconcile_repos(&mut transaction, &config.state_dir, store, &config.repos).await?;
     match transaction.commit().await {
         Ok(()) => {
+            revoked.committed();
             applied.committed();
             Ok(())
         }

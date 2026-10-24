@@ -6,10 +6,29 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Runtime keys a declared key replaced (owner, usage, fingerprint): logged by the
+/// caller once the outermost transaction commits, as the row deletion is only then real.
+#[derive(Debug)]
+pub struct Revoked(pub(crate) Vec<(String, String, String)>);
+
+impl Revoked {
+    pub fn committed(self) {
+        for (user, usage, fingerprint) in self.0 {
+            tracing::warn!(
+                event = "runtime-key-revoked",
+                user,
+                usage,
+                fingerprint,
+                "a declared key replaced it"
+            );
+        }
+    }
+}
+
 pub async fn reconcile_credentials(
     writer: &mut SqliteConnection,
     declared: &BTreeMap<String, UserConfig>,
-) -> Result<(), String> {
+) -> Result<Revoked, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| format!("credential reconciliation: {err}"))?
@@ -132,14 +151,5 @@ pub async fn reconcile_credentials(
         tx.commit().await
     }.await;
     result.map_err(|err: sqlx::Error| format!("credential reconciliation: {err}"))?;
-    for (user, usage, fingerprint) in revoked {
-        tracing::warn!(
-            event = "runtime-key-revoked",
-            user,
-            usage,
-            fingerprint,
-            "a declared key replaced it"
-        );
-    }
-    Ok(())
+    Ok(Revoked(revoked))
 }
