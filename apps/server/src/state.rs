@@ -8,7 +8,34 @@ use std::{
 
 // Keep the returned file open for the server lifetime; never unlink the lock file.
 pub fn prepare(state_dir: &Path) -> Result<File, String> {
-    fs::create_dir_all(state_dir).map_err(|err| format!("{}: {err}", state_dir.display()))?;
+    prepare_with_sync(state_dir, &mut sync_dir)
+}
+
+fn sync_dir(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+fn create_dir_all(path: &Path, sync: &mut impl FnMut(&Path) -> io::Result<()>) -> io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    create_dir_all(parent, sync)?;
+    match fs::create_dir(path) {
+        Ok(()) => sync(parent),
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+fn prepare_with_sync(
+    state_dir: &Path,
+    sync: &mut impl FnMut(&Path) -> io::Result<()>,
+) -> Result<File, String> {
+    create_dir_all(state_dir, sync).map_err(|err| format!("{}: {err}", state_dir.display()))?;
     let path = state_dir.join("kajiba.lock");
     let lock = OpenOptions::new()
         .write(true)
@@ -22,13 +49,21 @@ pub fn prepare(state_dir: &Path) -> Result<File, String> {
     })?;
     for name in ["repos", "db", "ci/logs", "ci/artifacts", "tmp"] {
         let path = state_dir.join(name);
-        fs::create_dir_all(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+        create_dir_all(&path, sync).map_err(|err| format!("{}: {err}", path.display()))?;
     }
     Ok(lock)
 }
 
 // Run after migrations, while holding the state lock and before admitting work.
 pub async fn cleanup(state_dir: &Path, writer: &mut sqlx::SqliteConnection) -> Result<(), String> {
+    cleanup_with_sync(state_dir, writer, &mut sync_dir).await
+}
+
+async fn cleanup_with_sync(
+    state_dir: &Path,
+    writer: &mut sqlx::SqliteConnection,
+    sync: &mut impl FnMut(&Path) -> io::Result<()>,
+) -> Result<(), String> {
     let ids: Vec<String> = sqlx::query_scalar("SELECT public_id FROM repo")
         .fetch_all(writer)
         .await
@@ -60,7 +95,7 @@ pub async fn cleanup(state_dir: &Path, writer: &mut sqlx::SqliteConnection) -> R
             if !entry.file_type()?.is_dir() || registered.contains(&name) {
                 continue;
             }
-            fs::create_dir_all(&orphans)?;
+            create_dir_all(&orphans, sync)?;
             let mut destination = orphans.join(&name);
             let mut suffix = 0_u64;
             loop {
@@ -76,6 +111,8 @@ pub async fn cleanup(state_dir: &Path, writer: &mut sqlx::SqliteConnection) -> R
                 }
             }
             fs::rename(entry.path(), &destination)?;
+            sync(&state_dir.join("repos"))?;
+            sync(&orphans)?;
             tracing::warn!(
                 event = "repo-orphaned",
                 path = %entry.path().display(),
@@ -122,13 +159,55 @@ mod tests {
     fn creates_layout_and_accepts_existing_directories() {
         let temp = TempDir::new();
         let root = temp.0.join("nested/state");
-        for _ in 0..2 {
-            let _lock = prepare(&root).unwrap();
+        let mut synced = Vec::new();
+        for attempt in 0..2 {
+            synced.clear();
+            let _lock = prepare_with_sync(&root, &mut |parent| {
+                synced.push(parent.to_path_buf());
+                sync_dir(parent)
+            })
+            .unwrap();
             for name in ["repos", "db", "ci/logs", "ci/artifacts", "tmp"] {
                 assert!(root.join(name).is_dir(), "{name}");
             }
             assert!(root.join("kajiba.lock").is_file());
+            if attempt == 0 {
+                assert_eq!(
+                    synced,
+                    [
+                        temp.0.clone(),
+                        temp.0.join("nested"),
+                        root.clone(),
+                        root.clone(),
+                        root.clone(),
+                        root.join("ci"),
+                        root.join("ci"),
+                        root.clone(),
+                    ]
+                );
+                fs::write(root.join("db/preserve"), "existing").unwrap();
+            } else {
+                assert!(synced.is_empty());
+                assert_eq!(
+                    fs::read_to_string(root.join("db/preserve")).unwrap(),
+                    "existing"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn prepare_reports_parent_sync_failure_and_releases_lock() {
+        let temp = TempDir::new();
+        let error = prepare_with_sync(&temp.0, &mut |parent| {
+            assert_eq!(parent, temp.0);
+            assert!(parent.join("repos").is_dir());
+            Err(io::Error::other("parent sync failed"))
+        })
+        .unwrap_err();
+        assert!(error.contains("parent sync failed"));
+        assert!(!temp.0.join("db").exists());
+        let _lock = prepare(&temp.0).unwrap();
     }
 
     #[test]
@@ -197,7 +276,25 @@ mod tests {
         fs::write(temp.0.join("tmp/nested/dir/file"), "temporary").unwrap();
         fs::write(temp.0.join("repos/file"), "leave non-directories").unwrap();
 
-        cleanup(&temp.0, &mut writer).await.unwrap();
+        let mut synced = Vec::new();
+        cleanup_with_sync(&temp.0, &mut writer, &mut |parent| {
+            if parent != temp.0.join("tmp") {
+                assert!(!orphan.exists());
+                assert!(temp.0.join(format!("tmp/orphans/{id}/HEAD")).is_file());
+            }
+            synced.push(parent.to_path_buf());
+            sync_dir(parent)
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            synced,
+            [
+                temp.0.join("tmp"),
+                temp.0.join("repos"),
+                temp.0.join("tmp/orphans")
+            ]
+        );
 
         assert!(!temp.0.join("tmp/file").exists());
         assert!(!temp.0.join("tmp/nested").exists());
@@ -231,7 +328,16 @@ mod tests {
         fs::create_dir(temp.0.join("repos/orphan.git")).unwrap();
         fs::write(temp.0.join("repos/orphan.git/HEAD"), "new orphan").unwrap();
 
-        cleanup(&temp.0, &mut writer).await.unwrap();
+        let mut synced = Vec::new();
+        cleanup_with_sync(&temp.0, &mut writer, &mut |parent| {
+            assert!(!temp.0.join("repos/orphan.git").exists());
+            assert!(orphans.join("orphan.git.2/HEAD").is_file());
+            synced.push(parent.to_path_buf());
+            sync_dir(parent)
+        })
+        .await
+        .unwrap();
+        assert_eq!(synced, [temp.0.join("repos"), orphans.clone()]);
 
         assert!(orphans.join("orphan.git").is_dir());
         assert!(
@@ -251,6 +357,32 @@ mod tests {
         assert!(!temp.0.join("repos/orphan.git").exists());
         readers.close().await;
         writer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_reports_source_and_destination_sync_failures() {
+        for failed_parent in ["repos", "tmp/orphans"] {
+            let temp = TempDir::new();
+            let _lock = prepare(&temp.0).unwrap();
+            let (mut writer, readers) = crate::db::open(&temp.0.join("db/kajiba.sqlite"))
+                .await
+                .unwrap();
+            fs::create_dir(temp.0.join("repos/orphan.git")).unwrap();
+            let error = cleanup_with_sync(&temp.0, &mut writer, &mut |parent| {
+                if parent == temp.0.join(failed_parent) {
+                    assert!(!temp.0.join("repos/orphan.git").exists());
+                    assert!(temp.0.join("tmp/orphans/orphan.git").is_dir());
+                    Err(io::Error::other("parent sync failed"))
+                } else {
+                    sync_dir(parent)
+                }
+            })
+            .await
+            .unwrap_err();
+            assert!(error.contains("parent sync failed"));
+            readers.close().await;
+            writer.close().await.unwrap();
+        }
     }
 
     #[tokio::test]
