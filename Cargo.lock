@@ -1998,6 +1998,7 @@ version = "0.1.0"
 dependencies = [
  "gix",
  "kajiba-core",
+ "libc",
 ]
 
 [[package]]

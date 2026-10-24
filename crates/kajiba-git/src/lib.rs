@@ -119,11 +119,12 @@ pub trait GitStore {
     /// with `--stateless-rpc`).
     fn transport(&self, service: Service, repo: &Path, options: &[&str]) -> Command;
     /// The branches and tags (`refs/heads/*`, `refs/tags/*`) of a path, bundle or
-    /// URL, sorted by name; blocking.
-    fn remote_refs(&self, source: &str) -> Result<Vec<Ref>>;
+    /// URL, sorted by name; blocking. `credentials` is `user:token` or a token alone
+    /// for an http(s) source, empty otherwise (ADR 0044).
+    fn remote_refs(&self, source: &str, credentials: &str) -> Result<Vec<Ref>>;
     /// Fetches exactly these ids into these refs of `repo`, all or none
     /// (`git fetch --atomic`, no tag following); blocking.
-    fn fetch(&self, repo: &Path, source: &str, refs: &[Ref]) -> Result<()>;
+    fn fetch(&self, repo: &Path, source: &str, credentials: &str, refs: &[Ref]) -> Result<()>;
 }
 
 /// Deadline of one git child of an import (`ls-remote`, then `fetch`): a hung
@@ -151,10 +152,10 @@ fn git() -> Command {
 
 /// A git child reading an import source: credentials travel in the environment,
 /// never on the command line (readable by every local user), and the source cannot
-/// steer the protocol or run hooks.
-fn import_command(source: &str) -> (Command, String) {
-    let (url, credentials) = split_userinfo(source);
-    let local = !url.contains("://") || url.starts_with("file://");
+/// steer the protocol or run hooks. `credentials` is `user:token` or a token alone
+/// (then the user name is `token`, which every forge accepts with a token).
+fn import_command(source: &str, credentials: &str) -> Command {
+    let local = !source.contains("://") || source.starts_with("file://");
     let mut command = git();
     command.env(
         "GIT_ALLOW_PROTOCOL",
@@ -170,7 +171,10 @@ fn import_command(source: &str) -> (Command, String) {
         ("http.lowSpeedLimit", "1".to_owned()),
         ("http.lowSpeedTime", "60".to_owned()),
     ];
-    if let Some((username, password)) = credentials {
+    if !credentials.is_empty() {
+        let (username, password) = credentials
+            .split_once(':')
+            .unwrap_or(("token", credentials));
         command
             .env("KAJIBA_IMPORT_USERNAME", username)
             .env("KAJIBA_IMPORT_PASSWORD", password);
@@ -186,92 +190,71 @@ fn import_command(source: &str) -> (Command, String) {
             .env(format!("GIT_CONFIG_KEY_{i}"), key)
             .env(format!("GIT_CONFIG_VALUE_{i}"), value);
     }
-    (command, url)
+    command
 }
 
-/// Splits `http(s)://user[:password]@host…` into the URL without userinfo and the
-/// decoded credentials; any other source is returned unchanged (an ssh user is
-/// not a secret and ssh has no credential helper).
-fn split_userinfo(source: &str) -> (String, Option<(String, String)>) {
-    let Some((scheme, rest)) = source.split_once("://") else {
-        return (source.to_owned(), None);
-    };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let Some((userinfo, host)) = rest[..end]
-        .rsplit_once('@')
-        .filter(|_| matches!(scheme, "http" | "https"))
-    else {
-        return (source.to_owned(), None);
-    };
-    let (username, password) = userinfo.split_once(':').unwrap_or((userinfo, ""));
-    (
-        format!("{scheme}://{host}{}", &rest[end..]),
-        Some((percent_decode(username), percent_decode(password))),
-    )
-}
-
-/// URL percent-decoding, as git applies it to userinfo.
-fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let escaped = (bytes[i] == b'%' && i + 2 < bytes.len())
-            .then(|| std::str::from_utf8(&bytes[i + 1..i + 3]).ok())
-            .flatten()
-            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
-        match escaped {
-            Some(byte) => {
-                out.push(byte);
-                i += 3;
-            }
-            None => {
-                out.push(bytes[i]);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn run(mut command: Command, stdin: &str, deadline: Duration) -> Result<String> {
-    use std::io::{Read, Write};
-    use std::sync::mpsc::{RecvTimeoutError, channel};
-    let mut child = command
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|err| Error::Git(format!("git: {err}")))?;
-    let mut input = child.stdin.take().expect("piped");
-    let mut stdout = child.stdout.take().expect("piped");
-    let mut stderr = child.stderr.take().expect("piped");
-    // The watchdog owns the child: past the deadline it kills it, then reaps it.
-    let (done, finished) = channel::<()>();
-    let watchdog = std::thread::spawn(move || {
-        let timed_out = matches!(
-            finished.recv_timeout(deadline),
-            Err(RecvTimeoutError::Timeout)
-        );
-        if timed_out {
-            let _ = child.kill();
-        }
-        child.wait().map(|status| (status, timed_out))
-    });
-    // stderr is drained apart so a chatty git never blocks on it while reading stdin.
-    let (errors, collected) = channel::<Vec<u8>>();
+/// Reads a pipe to its end on a thread of its own, so a chatty or stuck pipe never
+/// blocks the deadline.
+fn drain(mut pipe: impl std::io::Read + Send + 'static) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut buffer = Vec::new();
-        let _ = stderr.read_to_end(&mut buffer);
-        let _ = errors.send(buffer);
+        let _ = pipe.read_to_end(&mut buffer);
+        let _ = sender.send(buffer);
     });
+    receiver
+}
+
+/// Blocks until the child exits, without reaping it: its pid still names its process
+/// group afterwards, so killing the group cannot reach a recycled pid.
+fn wait_without_reaping(pid: libc::pid_t) {
+    // SAFETY: waitid only writes `info`; a zeroed siginfo_t is a valid out-parameter.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    loop {
+        let waited = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if waited == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
+        }
+    }
+}
+
+/// Runs the child to completion within `deadline`, a hard limit on the process, not
+/// on its pipes: a child that closes stdout and lingers is still killed, and a
+/// descendant (ssh, curl) holding a pipe dies with the child's process group.
+fn run(mut command: Command, stdin: &str, deadline: Duration) -> Result<String> {
+    use std::io::Write;
+    use std::os::unix::process::CommandExt;
+    use std::sync::mpsc::channel;
+    let mut child = command
+        .stdin(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|err| Error::Git(format!("git: {err}")))?;
+    let pid = child.id() as libc::pid_t;
+    let mut input = child.stdin.take().expect("piped");
+    let stdout = drain(child.stdout.take().expect("piped"));
+    let stderr = drain(child.stderr.take().expect("piped"));
     // Writing can fail if git exits early; its status reports why.
-    let _ = input.write_all(stdin.as_bytes());
-    drop(input);
-    let mut output = Vec::new();
-    let _ = stdout.read_to_end(&mut output);
-    drop(done);
-    let (status, timed_out) = watchdog
-        .join()
-        .map_err(|_| Error::Git("git: watchdog panicked".into()))?
+    let stdin = stdin.to_owned();
+    std::thread::spawn(move || input.write_all(stdin.as_bytes()));
+    let (exited, exit) = channel::<()>();
+    std::thread::spawn(move || {
+        wait_without_reaping(pid);
+        let _ = exited.send(());
+    });
+    let timed_out = exit.recv_timeout(deadline).is_err();
+    // Exited or past the deadline: nothing of the import's process group outlives git.
+    // SAFETY: the child is not reaped yet, so `pid` is ours and still names the group.
+    unsafe { libc::kill(-pid, libc::SIGKILL) };
+    let status = child
+        .wait()
         .map_err(|err| Error::Git(format!("git: {err}")))?;
     if timed_out {
         return Err(Error::Git(format!(
@@ -279,16 +262,17 @@ fn run(mut command: Command, stdin: &str, deadline: Duration) -> Result<String> 
             deadline.as_secs()
         )));
     }
+    // A descendant that left the group (setsid) may still hold a pipe: bounded wait.
+    let collect = |pipe: std::sync::mpsc::Receiver<Vec<u8>>| {
+        pipe.recv_timeout(Duration::from_secs(10))
+            .unwrap_or_default()
+    };
     if !status.success() {
-        // A surviving grandchild may hold stderr open: do not wait on it forever.
-        let stderr = collected
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap_or_default();
         return Err(Error::Git(
-            String::from_utf8_lossy(&stderr).trim().to_owned(),
+            String::from_utf8_lossy(&collect(stderr)).trim().to_owned(),
         ));
     }
-    String::from_utf8(output).map_err(|err| Error::Git(err.to_string()))
+    String::from_utf8(collect(stdout)).map_err(|err| Error::Git(err.to_string()))
 }
 
 /// The gix + `git` binary implementation.
@@ -542,9 +526,9 @@ impl GitStore for Gix {
         command
     }
 
-    fn remote_refs(&self, source: &str) -> Result<Vec<Ref>> {
-        let (mut command, url) = import_command(source);
-        command.args(["ls-remote", "--refs", "--", &url]);
+    fn remote_refs(&self, source: &str, credentials: &str) -> Result<Vec<Ref>> {
+        let mut command = import_command(source, credentials);
+        command.args(["ls-remote", "--refs", "--", source]);
         let mut refs = Vec::new();
         for line in run(command, "", IMPORT_TIMEOUT)?.lines() {
             let (target, name) = line
@@ -563,8 +547,8 @@ impl GitStore for Gix {
         Ok(refs)
     }
 
-    fn fetch(&self, repo: &Path, source: &str, refs: &[Ref]) -> Result<()> {
-        let (mut command, url) = import_command(source);
+    fn fetch(&self, repo: &Path, source: &str, credentials: &str, refs: &[Ref]) -> Result<()> {
+        let mut command = import_command(source, credentials);
         command.arg("--git-dir").arg(repo).args([
             "fetch",
             "--atomic",
@@ -573,7 +557,7 @@ impl GitStore for Gix {
             "--quiet",
             "--stdin",
             "--",
-            &url,
+            source,
         ]);
         let refspecs: String = refs
             .iter()

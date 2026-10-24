@@ -153,56 +153,85 @@ fn set_head_is_idempotent_and_replaces_head_atomically() {
 
 #[test]
 fn import_commands_keep_credentials_out_of_the_command_line() {
-    let (command, url) = import_command("https://alice:s%40cret@example.org/demo.git?x=1");
-    assert_eq!(url, "https://example.org/demo.git?x=1");
-    let env: std::collections::BTreeMap<_, _> = command
-        .get_envs()
-        .map(|(k, v)| {
-            (
-                k.to_str().unwrap(),
-                v.and_then(|v| v.to_str()).unwrap_or(""),
-            )
-        })
-        .collect();
+    let envs = |command: &Command| -> std::collections::BTreeMap<String, String> {
+        command
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_str().unwrap().to_owned(),
+                    v.and_then(|v| v.to_str()).unwrap_or("").to_owned(),
+                )
+            })
+            .collect()
+    };
+    let command = import_command("https://example.org/demo.git", "alice:s@cret");
+    assert!(command.get_args().next().is_none());
+    let env = envs(&command);
     assert_eq!(env["KAJIBA_IMPORT_USERNAME"], "alice");
     assert_eq!(env["KAJIBA_IMPORT_PASSWORD"], "s@cret");
     assert_eq!(env["GIT_ALLOW_PROTOCOL"], "http:https:ssh:git");
     assert!(env["GIT_CONFIG_VALUE_3"].starts_with("!f() { printf 'username=%s"));
     assert_eq!(env["GIT_CONFIG_KEY_0"], "core.hooksPath");
     assert!(env.contains_key("PATH"), "{env:?}");
+    // A token alone gets a fixed user name; a token containing ':' keeps its tail.
+    let env = envs(&import_command("https://example.org/demo.git", "t0:k:en"));
+    assert_eq!(env["KAJIBA_IMPORT_USERNAME"], "t0");
+    assert_eq!(env["KAJIBA_IMPORT_PASSWORD"], "k:en");
+    let env = envs(&import_command("https://example.org/demo.git", "tok3n"));
+    assert_eq!(env["KAJIBA_IMPORT_USERNAME"], "token");
+    assert_eq!(env["KAJIBA_IMPORT_PASSWORD"], "tok3n");
     // No credentials, a local path: nothing to pass, `file` allowed.
-    let (command, url) = import_command("/srv/source.git");
-    let env: Vec<_> = command
-        .get_envs()
-        .map(|(k, _)| k.to_str().unwrap())
-        .collect();
-    assert_eq!(url, "/srv/source.git");
-    assert_eq!(env.iter().filter(|k| k.starts_with("KAJIBA_")).count(), 0);
-    assert_eq!(
-        command
-            .get_envs()
-            .find(|(k, _)| *k == "GIT_ALLOW_PROTOCOL")
-            .and_then(|(_, v)| v)
-            .unwrap(),
-        "file:http:https:ssh:git"
-    );
-    // An ssh user is kept: it is not a secret and ssh has no credential helper.
-    assert_eq!(
-        split_userinfo("ssh://git@example.org/demo.git"),
-        ("ssh://git@example.org/demo.git".to_owned(), None)
-    );
+    let env = envs(&import_command("/srv/source.git", ""));
+    assert_eq!(env.keys().filter(|k| k.starts_with("KAJIBA_")).count(), 0);
+    assert_eq!(env["GIT_ALLOW_PROTOCOL"], "file:http:https:ssh:git");
+    assert_eq!(env["GIT_CONFIG_COUNT"], "3");
+}
+
+fn sh(script: &str) -> Command {
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", script])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
 }
 
 #[test]
 fn run_kills_a_child_past_its_deadline() {
-    let mut command = Command::new("sh");
-    command
-        .args(["-c", "exec sleep 30"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    for script in [
+        "exec sleep 30",
+        // Closing stdout early does not end the deadline (the pipes are not the clock).
+        "exec >&- 2>&-; exec sleep 30",
+    ] {
+        let started = std::time::Instant::now();
+        let err = run(sh(script), "", Duration::from_millis(200)).unwrap_err();
+        assert!(
+            err.to_string().contains("did not finish"),
+            "{script}: {err}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10), "{script}");
+    }
+}
+
+#[test]
+fn run_does_not_wait_for_a_descendant_holding_the_pipes() {
+    // The shell exits at once; its background child inherited stdout and stderr.
     let started = std::time::Instant::now();
-    let err = run(command, "", Duration::from_millis(200)).unwrap_err();
-    assert!(err.to_string().contains("did not finish"), "{err}");
+    let output = run(
+        sh("echo first; sleep 30 & exit 0"),
+        "",
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    assert_eq!(output, "first\n");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let err = run(
+        sh("echo oops >&2; sleep 30 & exit 3"),
+        "",
+        Duration::from_secs(30),
+    )
+    .unwrap_err();
+    assert_eq!(err.to_string(), "oops");
     assert!(started.elapsed() < Duration::from_secs(10));
 }
 
