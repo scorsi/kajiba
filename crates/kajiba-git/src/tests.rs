@@ -220,22 +220,28 @@ fn tree_lists_entries_with_their_kind() {
 fn blob_reads_file_content() {
     let f = fixture("blob");
     assert_eq!(
-        Gix.blob(&f.bare, &f.first, "README.md").unwrap(),
+        Gix.blob(&f.bare, &f.first, "README.md", u64::MAX).unwrap(),
         b"hello\n"
     );
     assert_eq!(
-        Gix.blob(&f.bare, &f.second, "README.md").unwrap(),
+        Gix.blob(&f.bare, &f.second, "README.md", u64::MAX).unwrap(),
         b"hello again\n"
     );
     assert_eq!(
-        Gix.blob(&f.bare, &f.third, "README.md").unwrap(),
+        Gix.blob(&f.bare, &f.third, "README.md", u64::MAX).unwrap(),
         b"feature\n"
     );
-    assert_eq!(Gix.blob(&f.bare, &f.second, "docs/a.md").unwrap(), b"a\n");
-    assert_eq!(Gix.blob(&f.bare, &f.first, "link").unwrap(), b"README.md");
+    assert_eq!(
+        Gix.blob(&f.bare, &f.second, "docs/a.md", u64::MAX).unwrap(),
+        b"a\n"
+    );
+    assert_eq!(
+        Gix.blob(&f.bare, &f.first, "link", u64::MAX).unwrap(),
+        b"README.md"
+    );
     for path in ["src", "missing", "docs/a.md", "src/lib.rs/x", ""] {
         assert_eq!(
-            Gix.blob(&f.bare, &f.first, path),
+            Gix.blob(&f.bare, &f.first, path, u64::MAX),
             Err(Error::NotFound),
             "{path:?}"
         );
@@ -385,5 +391,26 @@ fn resolve_refuses_unknown_refs() {
         &tree_id,
     ] {
         assert_eq!(Gix.resolve(&f.bare, spec), Err(Error::NotFound), "{spec:?}");
+    }
+}
+
+#[test]
+fn blob_checks_header_size_before_loading() {
+    let f = fixture("blob-limit");
+    let data = Gix.blob(&f.bare, &f.first, "README.md", u64::MAX).unwrap();
+    let size = data.len() as u64;
+    assert!(size > 0);
+    for packed in [false, true] {
+        if packed {
+            git(&f.bare, &["gc", "--prune=now"], "1700000000 +0000");
+        }
+        assert_eq!(
+            Gix.blob(&f.bare, &f.first, "README.md", size).unwrap(),
+            data
+        );
+        assert_eq!(
+            Gix.blob(&f.bare, &f.first, "README.md", size - 1),
+            Err(Error::TooLarge)
+        );
     }
 }

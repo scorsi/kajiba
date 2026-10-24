@@ -4,12 +4,27 @@
 use super::repos::Repos;
 use axum::{
     Router,
+    body::Bytes,
     extract::{Path, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
 };
 use kajiba_git::{Error, GitStore, Gix};
+
+const BLOB_LIMIT: u64 = 16 << 20;
+
+// Keep the permit with the allocation, including after handler cancellation.
+struct Blob {
+    data: Vec<u8>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl AsRef<[u8]> for Blob {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
 
 pub fn routes(repos: Repos) -> Router {
     Router::new()
@@ -29,9 +44,18 @@ async fn raw(
     if kajiba_core::names::validate_path(&spec).is_err() {
         return (StatusCode::BAD_REQUEST, "invalid path\n").into_response();
     }
+    let permit = match repos.read_permit() {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
     let blob = tokio::task::spawn_blocking(move || {
         let (commit, file) = Gix.resolve(&path, &spec)?;
-        Gix.blob(&path, &commit, file)
+        Gix.blob(&path, &commit, file, BLOB_LIMIT).map(|data| {
+            Bytes::from_owner(Blob {
+                data,
+                _permit: permit,
+            })
+        })
     })
     .await;
     match blob {
@@ -44,6 +68,9 @@ async fn raw(
         )
             .into_response(),
         Ok(Err(Error::NotFound)) => (StatusCode::NOT_FOUND, "file not found\n").into_response(),
+        Ok(Err(Error::TooLarge)) => {
+            (StatusCode::PAYLOAD_TOO_LARGE, "blob too large\n").into_response()
+        }
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

@@ -2035,7 +2035,6 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
- "tokio-util",
  "tonic",
  "tonic-reflection",
  "tonic-types",

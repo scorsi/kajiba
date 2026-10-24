@@ -15,6 +15,27 @@ use tonic::{Request, Response, Status};
 pub struct Repos(pub Health);
 
 impl Repos {
+    pub fn read_permit(
+        &self,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, axum::response::Response> {
+        use axum::{
+            http::{StatusCode, header},
+            response::IntoResponse,
+        };
+        self.0
+            .public_reads
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::RETRY_AFTER, "1")],
+                    "public reads busy\n",
+                )
+                    .into_response()
+            })
+    }
+
     pub fn readers(&self) -> Result<&SqlitePool, Status> {
         self.0
             .database

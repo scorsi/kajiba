@@ -11,6 +11,8 @@ use std::process::Command;
 pub enum Error {
     /// The object, ref or path does not exist (or is not of the expected kind).
     NotFound,
+    /// The blob exceeds the caller's allocation limit.
+    TooLarge,
     /// Any other failure, with gix's message.
     Git(String),
 }
@@ -19,6 +21,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound => f.write_str("not found"),
+            Self::TooLarge => f.write_str("blob too large"),
             Self::Git(err) => f.write_str(err),
         }
     }
@@ -100,7 +103,8 @@ pub trait GitStore {
     /// Every ref except `HEAD`, sorted by name (as `git for-each-ref`).
     fn refs(&self, repo: &Path) -> Result<Vec<Ref>>;
     fn tree(&self, repo: &Path, commit: &str, path: &str) -> Result<Vec<TreeEntry>>;
-    fn blob(&self, repo: &Path, commit: &str, path: &str) -> Result<Vec<u8>>;
+    /// Refuses blobs larger than `limit` after reading their object header.
+    fn blob(&self, repo: &Path, commit: &str, path: &str, limit: u64) -> Result<Vec<u8>>;
     /// Up to `limit` commits reachable from `commit`, newest first.
     fn log(&self, repo: &Path, commit: &str, limit: usize) -> Result<Vec<Commit>>;
     /// Changes from `from` (the empty tree when `None`) to `to`.
@@ -256,13 +260,16 @@ impl GitStore for Gix {
         Ok(entries)
     }
 
-    fn blob(&self, repo: &Path, commit: &str, path: &str) -> Result<Vec<u8>> {
+    fn blob(&self, repo: &Path, commit: &str, path: &str, limit: u64) -> Result<Vec<u8>> {
         let repo = open(repo)?;
         let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
         let tree = tree_at(&repo, commit, dir)?;
         let entry = tree.find_entry(name).ok_or(Error::NotFound)?;
         if entry.mode().is_tree() || entry.mode().is_commit() {
             return Err(Error::NotFound);
+        }
+        if repo.find_header(entry.id())?.size() > limit {
+            return Err(Error::TooLarge);
         }
         let data = entry.object()?.detach().data;
         Ok(data)

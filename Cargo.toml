@@ -31,8 +31,6 @@ toml = "0.8"
 # Already transitive (gix): inflates gzipped git upload-pack requests.
 zlib-rs = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "process", "io-util"] }
-# Already transitive (h2): streams git's output as a response body.
-tokio-util = { version = "0.7", features = ["io"] }
 tonic = "0.12"
 tonic-types = "0.12"
 tonic-build = "0.12"

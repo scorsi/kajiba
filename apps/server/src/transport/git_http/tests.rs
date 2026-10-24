@@ -252,3 +252,65 @@ async fn unknown_archived_and_ui_routes_answer_plain_statuses() {
         http::StatusCode::MOVED_PERMANENTLY
     );
 }
+
+#[tokio::test]
+async fn public_read_budget_is_shared_and_refuses_before_reading_requests() {
+    let fixture = Fixture::new(DEMO).await;
+    let permits: Vec<_> = (0..super::super::PUBLIC_READS)
+        .map(|_| fixture.repos.read_permit().unwrap())
+        .collect();
+    for path in [
+        "/alice/demo.git/info/refs?service=git-upload-pack",
+        "/raw/alice/demo/main/README.md",
+    ] {
+        let response = call(&fixture, path).await;
+        assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "1");
+    }
+    struct Unread;
+    impl http_body::Body for Unread {
+        type Data = axum::body::Bytes;
+        type Error = std::convert::Infallible;
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            panic!("busy request body must not be polled");
+        }
+    }
+    let response = super::super::router(fixture.repos.0.clone(), false, Default::default())
+        .unwrap()
+        .call(
+            http::Request::post("/alice/demo.git/git-upload-pack")
+                .header("content-type", "application/x-git-upload-pack-request")
+                .body(axum::body::Body::new(Unread))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()["retry-after"], "1");
+    drop(permits);
+    let response = call(
+        &fixture,
+        "/alice/demo.git/info/refs?service=git-upload-pack",
+    )
+    .await;
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(
+        fixture.repos.0.public_reads.available_permits(),
+        super::super::PUBLIC_READS - 1
+    );
+    drop(response);
+    let _all = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        fixture
+            .repos
+            .0
+            .public_reads
+            .acquire_many(super::super::PUBLIC_READS as u32),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}

@@ -4,15 +4,20 @@
 use super::repos::Repos;
 use axum::{
     Router,
-    body::{Body, Bytes},
+    body::Bytes,
     extract::{Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
 use kajiba_git::{GitStore, Gix, Service};
+use std::time::Duration;
 use std::{collections::HashMap, process::Stdio};
-use tokio::io::AsyncWriteExt;
+
+mod stream;
+
+const STREAM_IDLE: Duration = Duration::from_secs(60);
+const STREAM_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
 pub fn routes(repos: Repos) -> Router {
     Router::new()
@@ -88,20 +93,32 @@ async fn info_refs(
         )
             .into_response();
     }
-    let output = match command(&path, &["--stateless-rpc", "--advertise-refs"], &headers)
-        .output()
-        .await
+    let permit = match repos.read_permit() {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
+    let child = match command(&path, &["--stateless-rpc", "--advertise-refs"], &headers)
+        .stdin(Stdio::null())
+        .spawn()
     {
-        Ok(output) if output.status.success() => output.stdout,
-        Ok(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(child) => child,
         Err(err) => return internal(err),
     };
     // Protocol v2 starts with its capability advertisement; v0 with a service line.
-    let mut body = Vec::new();
-    if !protocol(&headers).is_some_and(|p| p.split(':').any(|item| item == "version=2")) {
-        body.extend_from_slice(b"001e# service=git-upload-pack\n0000");
-    }
-    body.extend_from_slice(&output);
+    let prefix: &'static [u8] =
+        if protocol(&headers).is_some_and(|p| p.split(':').any(|item| item == "version=2")) {
+            b""
+        } else {
+            b"001e# service=git-upload-pack\n0000"
+        };
+    let body = stream::body(
+        child,
+        Vec::new(),
+        prefix,
+        permit,
+        STREAM_IDLE,
+        STREAM_LIFETIME,
+    );
     (
         [
             (
@@ -151,6 +168,10 @@ async fn upload_pack(
     {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
+    let permit = match repos.read_permit() {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
     let Ok(body): Result<Bytes, _> = axum::body::to_bytes(body, REQUEST_LIMIT).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
@@ -169,22 +190,13 @@ async fn upload_pack(
         },
         Some(_) => return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
     };
-    let mut child = match command(&path, &["--stateless-rpc"], &parts.headers)
+    let child = match command(&path, &["--stateless-rpc"], &parts.headers)
         .stdin(Stdio::piped())
         .spawn()
     {
         Ok(child) => child,
         Err(err) => return internal(err),
     };
-    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    tokio::spawn(async move {
-        // git stops reading on a malformed request; its exit ends the response.
-        let _ = stdin.write_all(&body).await;
-        drop(stdin);
-        let _ = child.wait().await;
-    });
     (
         [
             (
@@ -193,7 +205,7 @@ async fn upload_pack(
             ),
             (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
         ],
-        Body::from_stream(tokio_util::io::ReaderStream::new(stdout)),
+        stream::body(child, body, b"", permit, STREAM_IDLE, STREAM_LIFETIME),
     )
         .into_response()
 }

@@ -103,3 +103,55 @@ async fn raw_serves_files_by_branch_nested_branch_tag_and_commit() {
         assert!(body.contains("archived"));
     }
 }
+
+#[tokio::test]
+async fn raw_blob_size_limit_and_permit_follow_the_allocation() {
+    let fixture = Fixture::new(DEMO).await;
+    let limit = super::BLOB_LIMIT as usize;
+    let large = "a".repeat(limit + 1);
+    fixture
+        .fill(
+            "alice/demo",
+            &[("at-limit", &large[..limit]), ("above-limit", &large)],
+            &[],
+        )
+        .await;
+    let mut app = super::super::router(fixture.repos.0.clone(), false, Default::default()).unwrap();
+    let response = app
+        .call(
+            http::Request::get("/raw/alice/demo/main/above-limit")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        fixture.repos.0.public_reads.available_permits(),
+        super::super::PUBLIC_READS
+    );
+
+    let response = app
+        .call(
+            http::Request::get("/raw/alice/demo/main/at-limit")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    let bytes = axum::body::to_bytes(response.into_body(), limit)
+        .await
+        .unwrap();
+    assert_eq!(bytes.len(), limit);
+    assert_eq!(
+        fixture.repos.0.public_reads.available_permits(),
+        super::super::PUBLIC_READS - 1
+    );
+    drop(bytes);
+    assert_eq!(
+        fixture.repos.0.public_reads.available_permits(),
+        super::super::PUBLIC_READS
+    );
+}

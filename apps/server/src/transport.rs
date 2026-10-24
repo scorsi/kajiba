@@ -32,6 +32,7 @@ pub struct Health {
     database: Arc<OnceLock<SqlitePool>>,
     state_dir: PathBuf,
     local_serving: Arc<local::Serving>,
+    public_reads: Arc<Semaphore>,
 }
 
 impl Health {
@@ -40,6 +41,7 @@ impl Health {
             database: Arc::default(),
             state_dir,
             local_serving: Arc::default(),
+            public_reads: Arc::new(Semaphore::new(PUBLIC_READS)),
         }
     }
 
@@ -138,6 +140,8 @@ const PUBLIC: Limits = Limits {
 };
 /// Time to produce a response head on non-streaming routes, request body included.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Shared by upload-pack processes and raw reads (ADR 0040).
+const PUBLIC_READS: usize = 32;
 
 /// gRPC callers get a gRPC status (HTTP 200), everything else a plain HTTP status.
 fn refusal(request: &HttpRequest, http: StatusCode, grpc: tonic::Code) -> HttpResponse {
