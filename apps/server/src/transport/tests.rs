@@ -504,7 +504,8 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
                 assert_eq!(recv.recv_timeout(timeout).unwrap()["event"], "ready");
                 let started = recv.recv_timeout(timeout).unwrap();
                 assert_eq!(started["event"], "in-flight");
-                assert!(Command::new("/bin/kill").arg(signal).arg(child.id().to_string()).status().unwrap().success());
+                // PATH lookup: the Linux Nix build sandbox has no /bin/kill; stdenv coreutils provides kill.
+                assert!(Command::new("kill").arg(signal).arg(child.id().to_string()).status().unwrap().success());
                 let stopping = recv.recv_timeout(timeout).unwrap();
                 assert_eq!(stopping["event"], "stopping");
                 assert!(stopping.get("request_id").is_none());
