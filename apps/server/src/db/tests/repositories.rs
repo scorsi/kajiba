@@ -4,7 +4,7 @@ use sqlx::Row;
 const ROWS: [(&str, &str); 4] = [
     (
         "repo",
-        "INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at) VALUES (?1, ?2, ?1, 'demo', 'public', 0, 'main', '', 0)",
+        "INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (?1, ?2, ?1, 'demo', 'public', 0, 'main', '', 0, 'key' || ?1)",
     ),
     (
         "repo_redirect",
@@ -64,7 +64,7 @@ async fn repositories_valid_rows_nullability_and_mirror_queue_index() {
             .unwrap();
         let expected = match table {
             "repo" => {
-                "id public_id owner_id name visibility ci_enabled default_branch description created_at"
+                "id public_id owner_id name visibility ci_enabled default_branch description created_at config_key archived_at"
             }
             "repo_redirect" => "id owner_name name repo_id created_at",
             "repo_permission" => "user_id repo_id role",
@@ -90,7 +90,11 @@ async fn repositories_valid_rows_nullability_and_mirror_queue_index() {
             let required = name != "id"
                 && !matches!(
                     name.as_str(),
-                    "next_attempt_at" | "last_success_at" | "last_error" | "last_error_at"
+                    "next_attempt_at"
+                        | "last_success_at"
+                        | "last_error"
+                        | "last_error_at"
+                        | "archived_at"
                 );
             assert_eq!(
                 column.get::<i64, _>("notnull"),
@@ -281,6 +285,51 @@ async fn repositories_foreign_keys_restrict_owners_and_cascade_owned_rows() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get::<i64, _>("user_id"), 2);
+    readers.close().await;
+    writer.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn declared_keys_are_unique_and_archived_rows_keep_their_names() {
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    populate(&mut writer).await;
+    let index = sqlx::query("PRAGMA index_list(repo)")
+        .fetch_all(&mut writer)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|index| index.get::<String, _>("name") == "repo_config_key")
+        .unwrap();
+    assert_eq!(index.get::<i64, _>("unique"), 1);
+    refuses(
+        &mut writer,
+        "UPDATE repo SET config_key = 'key1' WHERE id = 2",
+        "2067",
+    )
+    .await;
+    // An archived row still holds its owner and name (0026): no other row may take them.
+    sqlx::query("UPDATE repo SET archived_at = 1000 WHERE id = 1")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    refuses(
+        &mut writer,
+        "UPDATE repo SET owner_id = 1 WHERE id = 2",
+        "2067",
+    )
+    .await;
+    refuses(
+        &mut writer,
+        "INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (3, '00000000000000000000000003', 1, 'demo', 'public', 0, 'main', '', 0, 'key3')",
+        "2067",
+    )
+    .await;
+    // Unarchival clears the column on the same row.
+    sqlx::query("UPDATE repo SET archived_at = NULL WHERE id = 1")
+        .execute(&mut writer)
+        .await
+        .unwrap();
     readers.close().await;
     writer.close().await.unwrap();
 }

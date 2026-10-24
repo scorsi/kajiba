@@ -18,7 +18,7 @@ pub(super) fn event(public_id: &str) -> NewEvent {
 
 async fn populate(writer: &mut SqliteConnection) {
     sqlx::query("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'owner', 'local', 0, 'config', 0), (2, '00000000000000000000000002', 'pusher', 'local', 0, 'runtime', 0);
-        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 0, 'main', '', 0), (2, '00000000000000000000000002', 1, 'other', 'public', 0, 'main', '', 0)")
+        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 0, 'main', '', 0, 'demo'), (2, '00000000000000000000000002', 1, 'other', 'public', 0, 'main', '', 0, 'other')")
         .execute(writer).await.unwrap();
 }
 
@@ -147,7 +147,8 @@ async fn events_schema_columns_nullability_keys_and_index() {
         for column in columns {
             let name: String = column.get("name");
             let required = name != "id"
-                && !(table == "event" && matches!(name.as_str(), "principal_id" | "repo_id"));
+                && !(table == "event" && matches!(name.as_str(), "principal_id" | "repo_id"))
+                && !(table == "pending_push" && name == "principal_id");
             assert_eq!(
                 column.get::<i64, _>("notnull"),
                 i64::from(required),
@@ -325,4 +326,40 @@ fn production_code_never_updates_or_deletes_events() {
             assert!(!refused, "{}: {window:?}", path.display());
         }
     }
+}
+
+#[tokio::test]
+async fn pending_push_accepts_a_system_principal() {
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    populate(&mut writer).await;
+    // `admin import` records its refs with no user: the principal is `system` (0026).
+    sqlx::query("INSERT INTO pending_push (repo_id, principal_id, correlation_id, updates, created_at) VALUES (1, NULL, 'import-1', '[]', 0)")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let principal: Option<i64> =
+        sqlx::query_scalar("SELECT principal_id FROM pending_push WHERE repo_id = 1")
+            .fetch_one(&mut writer)
+            .await
+            .unwrap();
+    assert_eq!(principal, None);
+    // The rebuilt table keeps its user foreign key and its repository cascade.
+    refuses(
+        &mut writer,
+        "UPDATE pending_push SET principal_id = 999",
+        "787",
+    )
+    .await;
+    sqlx::query("DELETE FROM repo WHERE id = 1")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pending_push")
+        .fetch_one(&mut writer)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    readers.close().await;
+    writer.close().await.unwrap();
 }
