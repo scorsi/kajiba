@@ -191,13 +191,16 @@ fn invalid_config_is_structured_for_check_and_startup() {
 }
 
 #[test]
-fn serve_emits_start_and_applied_migration_versions() {
+fn serve_emits_start_migrations_and_orphan_warning() {
     use std::io::BufRead;
     use std::process::Stdio;
 
     let dir = std::env::temp_dir().join(format!("kajiba-log-start-{}", std::process::id()));
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("server.toml");
+    let orphan = dir.join("state/repos/orphan.git");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join("HEAD"), "preserve orphan").unwrap();
     std::fs::write(
         &path,
         format!(
@@ -217,7 +220,7 @@ fn serve_emits_start_and_applied_migration_versions() {
     let (send, receive) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         let mut reader = std::io::BufReader::new(stderr);
-        for _ in 0..2 {
+        for _ in 0..5 {
             let mut text = String::new();
             reader.read_line(&mut text).unwrap();
             let _ = send.send(text);
@@ -225,8 +228,14 @@ fn serve_emits_start_and_applied_migration_versions() {
     });
     let line = receive.recv_timeout(std::time::Duration::from_secs(5));
     let migration = receive.recv_timeout(std::time::Duration::from_secs(5));
+    let later: Vec<_> = (0..3)
+        .map(|_| receive.recv_timeout(std::time::Duration::from_secs(5)))
+        .collect();
     let _ = child.kill();
     child.wait().unwrap();
+    let destination = dir.join("state/tmp/orphans/orphan.git");
+    let contents = std::fs::read_to_string(destination.join("HEAD"));
+    let orphan_exists = orphan.exists();
     std::fs::remove_dir_all(dir).unwrap();
     reader.join().unwrap();
     let line: serde_json::Value = serde_json::from_str(&line.unwrap()).unwrap();
@@ -237,6 +246,20 @@ fn serve_emits_start_and_applied_migration_versions() {
     assert_eq!(migration["event"], "migration-applied");
     assert_eq!(migration["level"], "info");
     assert_eq!(migration["version"], 1);
+    let later: Vec<serde_json::Value> = later
+        .into_iter()
+        .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+        .collect();
+    for (line, version) in later[..2].iter().zip([2, 3]) {
+        assert_eq!(line["event"], "migration-applied");
+        assert_eq!(line["version"], version);
+    }
+    assert_eq!(later[2]["event"], "repo-orphaned");
+    assert_eq!(later[2]["level"], "warn");
+    assert_eq!(later[2]["path"], orphan.to_str().unwrap());
+    assert_eq!(later[2]["destination"], destination.to_str().unwrap());
+    assert_eq!(contents.unwrap(), "preserve orphan");
+    assert!(!orphan_exists);
 }
 
 #[test]

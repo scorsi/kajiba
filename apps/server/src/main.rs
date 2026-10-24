@@ -117,13 +117,18 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let _database = match db::open(&config.state_dir.join("db/kajiba.sqlite")).await {
-                Ok(database) => database,
-                Err(err) => {
-                    log::error("fatal", &err);
-                    return ExitCode::FAILURE;
-                }
-            };
+            let (mut writer, _readers) =
+                match db::open(&config.state_dir.join("db/kajiba.sqlite")).await {
+                    Ok(database) => database,
+                    Err(err) => {
+                        log::error("fatal", &err);
+                        return ExitCode::FAILURE;
+                    }
+                };
+            if let Err(err) = state::cleanup(&config.state_dir, &mut writer).await {
+                log::error("fatal", &err);
+                return ExitCode::FAILURE;
+            }
             return match serve().await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
