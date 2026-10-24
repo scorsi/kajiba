@@ -165,12 +165,20 @@
         inherit inputs pkgs system;
         kajibaServerPackage = config.packages.kajiba-server;
       }
-      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-        nixos-healthz = import ./tests/healthz.nix {
-          inherit pkgs;
-          kajibaServerPackage = config.packages.kajiba-server;
-        };
-      };
+      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+        let
+          testLib = import ./tests/lib.nix {
+            inherit pkgs;
+            inherit (inputs) nisshi masu;
+          };
+        in
+        {
+          nixos-server-lifecycle = import ./tests/server-lifecycle.nix {
+            inherit pkgs testLib;
+            kajibaServerPackage = config.packages.kajiba-server;
+          };
+        }
+      );
 
       treefmt = {
         projectRootFile = "flake.nix";
