@@ -11,11 +11,34 @@
     }:
     let
       craneLib = inputs.crane.mkLib pkgs;
+      commonCargoArgs = {
+        pname = "kajiba-workspace";
+        src = lib.fileset.toSource {
+          root = ../.;
+          fileset = lib.fileset.unions [
+            (craneLib.fileset.commonCargoSources ../crates)
+            (craneLib.fileset.commonCargoSources ../apps/server)
+            (craneLib.fileset.commonCargoSources ../apps/runner)
+            ../Cargo.toml
+            ../Cargo.lock
+            ../proto
+          ];
+        };
+        strictDeps = true;
+        nativeBuildInputs = [ pkgs.protobuf ];
+        PROTOC = "${pkgs.protobuf}/bin/protoc";
+        cargoExtraArgs = "--locked --workspace";
+      };
+      cargoArtifacts = craneLib.buildDepsOnly commonCargoArgs;
     in
     {
       packages = {
-        kajiba-server = pkgs.callPackage ./packages/kajiba-server.nix { inherit craneLib; };
-        kajiba-runner = pkgs.callPackage ./packages/kajiba-runner.nix { inherit craneLib; };
+        kajiba-server = pkgs.callPackage ./packages/kajiba-server.nix {
+          inherit craneLib commonCargoArgs cargoArtifacts;
+        };
+        kajiba-runner = pkgs.callPackage ./packages/kajiba-runner.nix {
+          inherit craneLib commonCargoArgs cargoArtifacts;
+        };
         kajiba-cli = pkgs.callPackage ./packages/kajiba-cli.nix { };
         kajiba-ui = pkgs.callPackage ./packages/kajiba-ui.nix { };
       };
@@ -41,6 +64,22 @@
       };
 
       checks = {
+        inherit (config.packages)
+          kajiba-server
+          kajiba-runner
+          kajiba-cli
+          kajiba-ui
+          ;
+
+        cargo-test = craneLib.cargoTest (commonCargoArgs // { inherit cargoArtifacts; });
+        cargo-clippy = craneLib.cargoClippy (
+          commonCargoArgs
+          // {
+            inherit cargoArtifacts;
+            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+          }
+        );
+
         versions-identical =
           pkgs.runCommand "versions-identical"
             {

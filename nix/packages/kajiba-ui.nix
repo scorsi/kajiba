@@ -46,6 +46,13 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     runHook postBuild
   '';
 
+  doCheck = true;
+  checkPhase = ''
+    runHook preCheck
+    pnpm --filter kajiba-ui check
+    runHook postCheck
+  '';
+
   installPhase = ''
     runHook preInstall
     cp -r apps/ui/build $out

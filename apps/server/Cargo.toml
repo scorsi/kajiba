@@ -11,4 +11,5 @@ path = "src/main.rs"
 [dependencies]
 axum.workspace = true
 clap.workspace = true
+kajiba-proto = { path = "../../crates/kajiba-proto" }
 tokio.workspace = true
