@@ -59,6 +59,8 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
+    mod identity;
+
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -90,12 +92,18 @@ mod tests {
         let (mut writer, readers) = open(&dir.database()).await.unwrap();
         assert!(dir.database().is_file());
         let history = sqlx::query_as::<_, (i64, String, bool, Vec<u8>, i64)>(
-            "SELECT version, CAST(installed_on AS TEXT), success, checksum, execution_time FROM _sqlx_migrations",
+            "SELECT version, CAST(installed_on AS TEXT), success, checksum, execution_time FROM _sqlx_migrations ORDER BY version",
         )
         .fetch_all(&mut writer)
         .await
         .unwrap();
-        assert_eq!(history.len(), 1);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].0, 2);
+        assert!(history[1].2);
+        assert_eq!(
+            history[1].3,
+            MIGRATOR.iter().nth(1).unwrap().checksum.as_ref()
+        );
         assert_eq!(history[0].0, 1);
         assert!(history[0].2);
         assert_eq!(
@@ -107,18 +115,29 @@ mod tests {
 
         let (mut writer, readers) = open(&dir.database()).await.unwrap();
         let reopened = sqlx::query_as::<_, (i64, String, bool, Vec<u8>, i64)>(
-            "SELECT version, CAST(installed_on AS TEXT), success, checksum, execution_time FROM _sqlx_migrations",
+            "SELECT version, CAST(installed_on AS TEXT), success, checksum, execution_time FROM _sqlx_migrations ORDER BY version",
         )
         .fetch_all(&mut writer)
         .await
         .unwrap();
         assert_eq!(reopened, history);
         let tables: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type = 'table'")
+            sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
                 .fetch_all(&mut writer)
                 .await
                 .unwrap();
-        assert_eq!(tables, ["_sqlx_migrations"]);
+        assert_eq!(
+            tables,
+            [
+                "_sqlx_migrations",
+                "api_token",
+                "enrollment_token",
+                "session",
+                "ssh_key",
+                "user",
+                "webauthn_credential"
+            ]
+        );
         readers.close().await;
         writer.close().await.unwrap();
     }
@@ -185,7 +204,7 @@ mod tests {
         let (mut writer, readers) = open(&dir.database()).await.unwrap();
         sqlx::query("CREATE TABLE preserved (value TEXT NOT NULL); INSERT INTO preserved VALUES ('original')")
             .execute(&mut writer).await.unwrap();
-        // Include the already applied baseline so failure reaches the broken SQL.
+        // Include the already applied migrations so failure reaches the broken SQL.
         let migrator = Migrator {
             migrations: MIGRATOR
                 .iter()
@@ -216,7 +235,7 @@ mod tests {
                 .fetch_all(&mut writer)
                 .await
                 .unwrap();
-        assert_eq!(versions, [1]);
+        assert_eq!(versions, [1, 2]);
         readers.close().await;
         writer.close().await.unwrap();
     }
