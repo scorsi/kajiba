@@ -106,8 +106,9 @@ pub trait GitStore {
     fn tree(&self, repo: &Path, commit: &str, path: &str) -> Result<Vec<TreeEntry>>;
     /// Refuses blobs larger than `limit` after reading their object header.
     fn blob(&self, repo: &Path, commit: &str, path: &str, limit: u64) -> Result<Vec<u8>>;
-    /// Up to `limit` commits reachable from `commit`, newest first.
-    fn log(&self, repo: &Path, commit: &str, limit: usize) -> Result<Vec<Commit>>;
+    /// Up to `limit` commits reachable from `commit`, newest first, after passing over
+    /// the first `skip` without building them.
+    fn log(&self, repo: &Path, commit: &str, skip: usize, limit: usize) -> Result<Vec<Commit>>;
     /// Changes from `from` (the empty tree when `None`) to `to`.
     fn diff(&self, repo: &Path, from: Option<&str>, to: &str) -> Result<Vec<Change>>;
     /// Splits `<ref>/<path>` (0021) into a commit id and the remaining path (`""`
@@ -415,7 +416,7 @@ impl GitStore for Gix {
         Ok(data)
     }
 
-    fn log(&self, repo: &Path, commit_id: &str, limit: usize) -> Result<Vec<Commit>> {
+    fn log(&self, repo: &Path, commit_id: &str, skip: usize, limit: usize) -> Result<Vec<Commit>> {
         let repo = open(repo)?;
         let tip = commit(&repo, commit_id)?.id;
         let walk = repo
@@ -425,7 +426,8 @@ impl GitStore for Gix {
             ))
             .all()?;
         let mut commits = Vec::new();
-        for info in walk.take(limit) {
+        // Skipped entries are walk infos only (id, parents): no object is decoded.
+        for info in walk.skip(skip).take(limit) {
             let info = info?;
             let object = info.object()?;
             let author = object.author()?;

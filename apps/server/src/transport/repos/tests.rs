@@ -53,6 +53,16 @@ impl Fixture {
 }
 
 impl Fixture {
+    /// The git directory of a declared `<owner>/<name>`.
+    pub(in crate::transport) async fn bare(&self, repo: &str) -> PathBuf {
+        let (owner, name) = repo.split_once('/').unwrap();
+        let found = crate::db::repos::find(self.repos.readers().unwrap(), owner, name)
+            .await
+            .unwrap()
+            .unwrap();
+        self.dir.join(format!("repos/{}.git", found.public_id))
+    }
+
     /// Fills a declared repository: `files` committed on `main`, then each extra
     /// branch and tag on its own empty commit, each the child of the previous one
     /// (distinct ids: a fetch wants each), pushed with the git binary.
@@ -62,12 +72,7 @@ impl Fixture {
         files: &[(&str, &str)],
         refs: &[&str],
     ) {
-        let (owner, name) = repo.split_once('/').unwrap();
-        let found = crate::db::repos::find(self.repos.readers().unwrap(), owner, name)
-            .await
-            .unwrap()
-            .unwrap();
-        let bare = self.dir.join(format!("repos/{}.git", found.public_id));
+        let bare = self.bare(repo).await;
         let work = self.dir.join("tmp/work");
         git(
             &self.dir,
@@ -406,6 +411,33 @@ async fn blob(repos: &Repos, repo: &str, revision: &str, path: &str) -> Result<V
         .map(|response| response.into_inner().content)
 }
 
+async fn commits(
+    repos: &Repos,
+    revision: &str,
+    page_size: i32,
+    page_token: String,
+) -> Result<ListCommitsResponse, Status> {
+    repos
+        .list_commits(Request::new(ListCommitsRequest {
+            repo: "alice/demo".into(),
+            revision: revision.into(),
+            page_size,
+            page_token,
+        }))
+        .await
+        .map(Response::into_inner)
+}
+
+async fn diff(repos: &Repos, revision: &str) -> Result<GetCommitDiffResponse, Status> {
+    repos
+        .get_commit_diff(Request::new(GetCommitDiffRequest {
+            repo: "alice/demo".into(),
+            revision: revision.into(),
+        }))
+        .await
+        .map(Response::into_inner)
+}
+
 #[tokio::test]
 async fn browses_tree_blob_log_and_diff_of_active_and_archived_repositories() {
     let mut fixture = Fixture::new(DEMO).await;
@@ -444,16 +476,7 @@ async fn browses_tree_blob_log_and_diff_of_active_and_archived_repositories() {
     let mut token = String::new();
     let mut messages = Vec::new();
     loop {
-        let page = repos
-            .list_commits(Request::new(ListCommitsRequest {
-                repo: "alice/demo".into(),
-                revision: "v1".into(),
-                page_size: 2,
-                page_token: token,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
+        let page = commits(repos, "v1", 2, token).await.unwrap();
         assert!(page.commits.len() <= 2);
         messages.extend(page.commits.into_iter().map(|c| c.message));
         token = page.next_page_token;
@@ -471,14 +494,8 @@ async fn browses_tree_blob_log_and_diff_of_active_and_archived_repositories() {
         ]
     );
 
-    let diff = |revision: &str| {
-        repos.get_commit_diff(Request::new(GetCommitDiffRequest {
-            repo: "alice/demo".into(),
-            revision: revision.into(),
-        }))
-    };
     // The root commit against the empty tree; b1 adds nothing to main.
-    let root = diff("main").await.unwrap().into_inner();
+    let root = diff(repos, "main").await.unwrap();
     assert!(root.commit.unwrap().parent_ids.is_empty());
     assert_eq!(
         root.changes
@@ -490,7 +507,7 @@ async fn browses_tree_blob_log_and_diff_of_active_and_archived_repositories() {
             ("src/lib.rs", ChangeKind::Added, true)
         ]
     );
-    let b1 = diff("b1").await.unwrap().into_inner();
+    let b1 = diff(repos, "b1").await.unwrap();
     assert_eq!(b1.commit.unwrap().parent_ids.len(), 1);
     assert!(b1.changes.is_empty());
 
@@ -555,8 +572,127 @@ async fn browses_tree_blob_log_and_diff_of_active_and_archived_repositories() {
     }
     let status = blob(repos, "alice/demo", "main", "src").await.unwrap_err();
     assert_eq!(reason(&status), "PATH_NOT_FOUND");
-    let status = diff("nope").await.unwrap_err();
+    let status = diff(repos, "nope").await.unwrap_err();
     assert_eq!(reason(&status), "REVISION_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn forged_commit_cursors_are_bounded_and_history_ends_without_a_token() {
+    let fixture = Fixture::new(DEMO).await;
+    fixture
+        .fill(
+            "alice/demo",
+            &[("flake.nix", "{ }\n")],
+            &["refs/heads/b1", "refs/heads/b2", "refs/tags/v1"],
+        )
+        .await;
+    let repos = &fixture.repos;
+    let tip = commits(repos, "v1", 1, String::new())
+        .await
+        .unwrap()
+        .commits
+        .remove(0)
+        .id;
+    let page = |skip: usize| cursor::encode("v1.ListCommits", &tip, skip as i64);
+    // The deepest issued cursor; beyond it the cursor was forged.
+    let last = commits(repos, "", 2, page(MAX_COMMIT_SKIP)).await.unwrap();
+    assert!(last.commits.is_empty() && last.next_page_token.is_empty());
+    let status = commits(repos, "", 1, page(MAX_COMMIT_SKIP + 1))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (status.code(), reason(&status).as_str()),
+        (Code::ResourceExhausted, "HISTORY_TOO_DEEP")
+    );
+    // Past the two remaining commits: no token even though the page is full.
+    let rest = commits(repos, "", 2, page(2)).await.unwrap();
+    assert_eq!(rest.commits.len(), 2);
+    assert!(rest.next_page_token.is_empty());
+}
+
+#[tokio::test]
+async fn browsing_shares_the_public_read_budget() {
+    let fixture = Fixture::new(DEMO).await;
+    fixture
+        .fill("alice/demo", &[("flake.nix", "{ }\n")], &[])
+        .await;
+    let repos = &fixture.repos;
+    let permits: Vec<_> = (0..super::super::PUBLIC_READS)
+        .map(|_| repos.read_permit().unwrap())
+        .collect();
+    for status in [
+        tree(repos, "alice/demo", "main", "").await.unwrap_err(),
+        blob(repos, "alice/demo", "main", "flake.nix")
+            .await
+            .unwrap_err(),
+        commits(repos, "main", 1, String::new()).await.unwrap_err(),
+        diff(repos, "main").await.unwrap_err(),
+    ] {
+        assert_eq!(
+            (status.code(), reason(&status).as_str()),
+            (Code::Unavailable, "READS_BUSY")
+        );
+    }
+    drop(permits);
+    assert_eq!(
+        tree(repos, "alice/demo", "main", "").await.unwrap(),
+        ["flake.nix:Blob"]
+    );
+    assert_eq!(
+        repos.0.public_reads.available_permits(),
+        super::super::PUBLIC_READS
+    );
+}
+
+#[tokio::test]
+async fn oversized_trees_and_diffs_are_resource_exhausted() {
+    let fixture = Fixture::new(DEMO).await;
+    fixture
+        .fill("alice/demo", &[("flake.nix", "{ }\n")], &[])
+        .await;
+    let bare = fixture.bare("alice/demo").await;
+    let blob = git(&bare, &["rev-parse", "refs/heads/main:flake.nix"]);
+    // Root commits of `count` files sharing one blob, on `refs/heads/<branch>`.
+    for (branch, count) in [("at", MAX_TREE_ENTRIES), ("above", MAX_TREE_ENTRIES + 1)] {
+        let mut mktree = std::process::Command::new("git")
+            .current_dir(&bare)
+            .args(["mktree"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        let mut stdin = mktree.stdin.take().unwrap();
+        for i in 0..count {
+            writeln!(stdin, "100644 blob {}\tf{i}", blob.trim()).unwrap();
+        }
+        drop(stdin);
+        let tree = String::from_utf8(mktree.wait_with_output().unwrap().stdout).unwrap();
+        let commit = git(&bare, &["commit-tree", tree.trim(), "-m", branch]);
+        git(
+            &bare,
+            &["update-ref", &format!("refs/heads/{branch}"), commit.trim()],
+        );
+    }
+    let repos = &fixture.repos;
+    assert_eq!(
+        tree(repos, "alice/demo", "at", "").await.unwrap().len(),
+        MAX_TREE_ENTRIES
+    );
+    assert_eq!(
+        diff(repos, "at").await.unwrap().changes.len(),
+        MAX_DIFF_CHANGES
+    );
+    let status = tree(repos, "alice/demo", "above", "").await.unwrap_err();
+    assert_eq!(
+        (status.code(), reason(&status).as_str()),
+        (Code::ResourceExhausted, "TREE_TOO_LARGE")
+    );
+    let status = diff(repos, "above").await.unwrap_err();
+    assert_eq!(
+        (status.code(), reason(&status).as_str()),
+        (Code::ResourceExhausted, "DIFF_TOO_LARGE")
+    );
 }
 
 #[tokio::test]

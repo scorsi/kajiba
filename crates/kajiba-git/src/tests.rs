@@ -321,14 +321,14 @@ fn unknown_commits_are_not_found() {
         tree_id,
     ] {
         assert_eq!(Gix.tree(&f.bare, &id, ""), Err(Error::NotFound), "{id:?}");
-        assert_eq!(Gix.log(&f.bare, &id, 1), Err(Error::NotFound), "{id:?}");
+        assert_eq!(Gix.log(&f.bare, &id, 0, 1), Err(Error::NotFound), "{id:?}");
     }
 }
 
 #[test]
 fn log_walks_newest_first() {
     let f = fixture("log");
-    let log = Gix.log(&f.bare, &f.third, 10).unwrap();
+    let log = Gix.log(&f.bare, &f.third, 0, 10).unwrap();
     let ids: Vec<&str> = log.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids, [&f.third, &f.second, &f.first]);
     assert_eq!(log[1].parents, std::slice::from_ref(&f.first));
@@ -337,8 +337,11 @@ fn log_walks_newest_first() {
     assert_eq!(log[1].author_email, "alice@example.org");
     assert_eq!(log[1].time, 1_700_000_100);
     assert_eq!(log[1].message, "second\n\nbody\n");
-    assert_eq!(Gix.log(&f.bare, &f.third, 1).unwrap().len(), 1);
-    assert_eq!(Gix.log(&f.bare, &f.first, 10).unwrap().len(), 1);
+    assert_eq!(Gix.log(&f.bare, &f.third, 0, 1).unwrap().len(), 1);
+    assert_eq!(Gix.log(&f.bare, &f.first, 0, 10).unwrap().len(), 1);
+    let skipped = Gix.log(&f.bare, &f.third, 1, 1).unwrap();
+    assert_eq!(skipped[0].id, f.second);
+    assert!(Gix.log(&f.bare, &f.third, 3, 10).unwrap().is_empty());
 }
 
 #[test]

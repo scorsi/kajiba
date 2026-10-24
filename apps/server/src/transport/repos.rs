@@ -42,6 +42,21 @@ impl Repos {
             })
     }
 
+    /// The same budget for browsing RPCs (ADR 0043): UNAVAILABLE when exhausted.
+    fn browse_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, Status> {
+        self.0
+            .public_reads
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                refused(
+                    tonic::Code::Unavailable,
+                    "READS_BUSY",
+                    "public reads busy, retry shortly".into(),
+                )
+            })
+    }
+
     pub fn readers(&self) -> Result<&SqlitePool, Status> {
         self.0
             .database
@@ -105,14 +120,35 @@ impl Repos {
 
 /// GetBlob refuses larger files: a response is held in memory whole.
 pub const MAX_BLOB_BYTES: usize = 16 << 20;
+/// Response bounds of ADR 0043: larger trees and diffs are refused, deeper history is
+/// reached from an older revision.
+pub const MAX_TREE_ENTRIES: usize = 10_000;
+pub const MAX_DIFF_CHANGES: usize = 10_000;
+pub const MAX_COMMIT_SKIP: usize = 10_000;
 
-/// A GitStore read, off the async runtime.
+/// A GitStore read, off the async runtime, holding a public-read permit until the
+/// response is built; a cancelled handler keeps the permit with the running work.
 async fn blocking<T: Send + 'static>(
+    permit: tokio::sync::OwnedSemaphorePermit,
     read: impl FnOnce() -> Result<T, Status> + Send + 'static,
 ) -> Result<T, Status> {
-    tokio::task::spawn_blocking(read)
-        .await
-        .map_err(|err| Status::internal(format!("git: {err}")))?
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        read()
+    })
+    .await
+    .map_err(|err| Status::internal(format!("git: {err}")))?
+}
+
+fn too_large<T>(items: Vec<T>, max: usize, reason: &'static str) -> Result<Vec<T>, Status> {
+    if items.len() > max {
+        return Err(refused(
+            tonic::Code::ResourceExhausted,
+            reason,
+            format!("more than {max} items; narrow the request"),
+        ));
+    }
+    Ok(items)
 }
 
 /// `NotFound` from git becomes `<reason>`, anything else INTERNAL.
@@ -334,11 +370,13 @@ impl RepoService for Repos {
         let request = request.into_inner();
         path(&request.path)?;
         let dir = self.browse_dir(&request.repo).await?;
-        blocking(move || {
+        let permit = self.browse_permit()?;
+        blocking(permit, move || {
             let commit_id = revision(&dir, &request.revision)?;
             let entries = Gix
                 .tree(&dir, &commit_id, &request.path)
-                .map_err(git_error("PATH_NOT_FOUND"))?
+                .map_err(git_error("PATH_NOT_FOUND"))?;
+            let entries = too_large(entries, MAX_TREE_ENTRIES, "TREE_TOO_LARGE")?
                 .into_iter()
                 .map(|entry| TreeEntry {
                     name: entry.name,
@@ -365,7 +403,8 @@ impl RepoService for Repos {
         let request = request.into_inner();
         path(&request.path)?;
         let dir = self.browse_dir(&request.repo).await?;
-        blocking(move || {
+        let permit = self.browse_permit()?;
+        blocking(permit, move || {
             let commit_id = revision(&dir, &request.revision)?;
             let content = Gix
                 .blob(&dir, &commit_id, &request.path, MAX_BLOB_BYTES as u64)
@@ -392,21 +431,35 @@ impl RepoService for Repos {
             )),
             None => None,
         };
+        // Issued cursors never pass the bound: a deeper one is forged (ADR 0043).
+        if cursor
+            .as_ref()
+            .is_some_and(|(_, skip)| *skip > MAX_COMMIT_SKIP)
+        {
+            return Err(refused(
+                tonic::Code::ResourceExhausted,
+                "HISTORY_TOO_DEEP",
+                format!(
+                    "at most {MAX_COMMIT_SKIP} commits past the revision; list from an older one"
+                ),
+            ));
+        }
         let dir = self.browse_dir(&request.repo).await?;
-        blocking(move || {
+        let permit = self.browse_permit()?;
+        blocking(permit, move || {
             let (tip, skip) = match cursor {
                 Some(cursor) => cursor,
                 None => (revision(&dir, &request.revision)?, 0),
             };
             // shortcut: each page walks the history from the tip again, quadratic over deep paging; keep the walk state if that gets slow.
-            let mut commits = Gix
-                .log(&dir, &tip, skip.saturating_add(size + 1))
+            let mut page = Gix
+                .log(&dir, &tip, skip, size + 1)
                 .map_err(git_error("REVISION_NOT_FOUND"))?;
-            let mut page = commits.split_off(skip.min(commits.len()));
-            let next_page_token = if page.len() > size {
+            let next_page_token = if page.len() > size && skip + size <= MAX_COMMIT_SKIP {
                 page.truncate(size);
                 cursor::encode(METHOD, &tip, (skip + size) as i64)
             } else {
+                page.truncate(size);
                 String::new()
             };
             Ok(Response::new(ListCommitsResponse {
@@ -423,16 +476,18 @@ impl RepoService for Repos {
     ) -> Result<Response<GetCommitDiffResponse>, Status> {
         let request = request.into_inner();
         let dir = self.browse_dir(&request.repo).await?;
-        blocking(move || {
+        let permit = self.browse_permit()?;
+        blocking(permit, move || {
             let id = revision(&dir, &request.revision)?;
             let found = Gix
-                .log(&dir, &id, 1)
+                .log(&dir, &id, 0, 1)
                 .map_err(git_error("REVISION_NOT_FOUND"))?
                 .pop()
                 .ok_or_else(|| git_error("REVISION_NOT_FOUND")(kajiba_git::Error::NotFound))?;
             let changes = Gix
                 .diff(&dir, found.parents.first().map(String::as_str), &id)
-                .map_err(git_error("REVISION_NOT_FOUND"))?
+                .map_err(git_error("REVISION_NOT_FOUND"))?;
+            let changes = too_large(changes, MAX_DIFF_CHANGES, "DIFF_TOO_LARGE")?
                 .into_iter()
                 .map(|change| FileChange {
                     path: change.path,
