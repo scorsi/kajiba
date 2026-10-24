@@ -200,6 +200,10 @@
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
           };
+          nixos-repo-lifecycle = import ./tests/repo-lifecycle.nix {
+            inherit pkgs testLib;
+            kajibaServerPackage = config.packages.kajiba-server;
+          };
         }
       );
 
