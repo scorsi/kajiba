@@ -152,6 +152,48 @@ fn set_head_is_idempotent_and_replaces_head_atomically() {
 }
 
 #[test]
+fn import_commands_keep_credentials_out_of_the_command_line() {
+    let (command, url) = import_command("https://alice:s%40cret@example.org/demo.git?x=1");
+    assert_eq!(url, "https://example.org/demo.git?x=1");
+    let env: std::collections::BTreeMap<_, _> = command
+        .get_envs()
+        .map(|(k, v)| {
+            (
+                k.to_str().unwrap(),
+                v.and_then(|v| v.to_str()).unwrap_or(""),
+            )
+        })
+        .collect();
+    assert_eq!(env["KAJIBA_IMPORT_USERNAME"], "alice");
+    assert_eq!(env["KAJIBA_IMPORT_PASSWORD"], "s@cret");
+    assert_eq!(env["GIT_ALLOW_PROTOCOL"], "http:https:ssh:git");
+    assert!(env["GIT_CONFIG_VALUE_3"].starts_with("!f() { printf 'username=%s"));
+    assert_eq!(env["GIT_CONFIG_KEY_0"], "core.hooksPath");
+    assert!(env.contains_key("PATH"), "{env:?}");
+    // No credentials, a local path: nothing to pass, `file` allowed.
+    let (command, url) = import_command("/srv/source.git");
+    let env: Vec<_> = command
+        .get_envs()
+        .map(|(k, _)| k.to_str().unwrap())
+        .collect();
+    assert_eq!(url, "/srv/source.git");
+    assert_eq!(env.iter().filter(|k| k.starts_with("KAJIBA_")).count(), 0);
+    assert_eq!(
+        command
+            .get_envs()
+            .find(|(k, _)| *k == "GIT_ALLOW_PROTOCOL")
+            .and_then(|(_, v)| v)
+            .unwrap(),
+        "file:http:https:ssh:git"
+    );
+    // An ssh user is kept: it is not a secret and ssh has no credential helper.
+    assert_eq!(
+        split_userinfo("ssh://git@example.org/demo.git"),
+        ("ssh://git@example.org/demo.git".to_owned(), None)
+    );
+}
+
+#[test]
 fn run_kills_a_child_past_its_deadline() {
     let mut command = Command::new("sh");
     command

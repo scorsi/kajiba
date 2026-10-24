@@ -130,9 +130,15 @@ pub trait GitStore {
 /// child is killed and the import fails.
 pub const IMPORT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
-/// The git binary without system or user configuration, never prompting.
+/// The git binary with an explicit environment (only `PATH` is inherited), without
+/// system or user configuration, never prompting. J3's `receive-pack` passes the
+/// module's `core.hooksPath` explicitly (ADR 0003).
 fn git() -> Command {
     let mut command = Command::new("git");
+    command.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
     command
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -140,6 +146,91 @@ fn git() -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command
+}
+
+/// A git child reading an import source: credentials travel in the environment,
+/// never on the command line (readable by every local user), and the source cannot
+/// steer the protocol or run hooks.
+fn import_command(source: &str) -> (Command, String) {
+    let (url, credentials) = split_userinfo(source);
+    let local = !url.contains("://") || url.starts_with("file://");
+    let mut command = git();
+    command.env(
+        "GIT_ALLOW_PROTOCOL",
+        if local {
+            "file:http:https:ssh:git"
+        } else {
+            "http:https:ssh:git"
+        },
+    );
+    let mut config = vec![
+        ("core.hooksPath", "/dev/null".to_owned()),
+        // A stalled transfer ends on its own; IMPORT_TIMEOUT is the backstop.
+        ("http.lowSpeedLimit", "1".to_owned()),
+        ("http.lowSpeedTime", "60".to_owned()),
+    ];
+    if let Some((username, password)) = credentials {
+        command
+            .env("KAJIBA_IMPORT_USERNAME", username)
+            .env("KAJIBA_IMPORT_PASSWORD", password);
+        config.push((
+            "credential.helper",
+            r#"!f() { printf 'username=%s\npassword=%s\n' "$KAJIBA_IMPORT_USERNAME" "$KAJIBA_IMPORT_PASSWORD"; }; f"#
+                .to_owned(),
+        ));
+    }
+    command.env("GIT_CONFIG_COUNT", config.len().to_string());
+    for (i, (key, value)) in config.iter().enumerate() {
+        command
+            .env(format!("GIT_CONFIG_KEY_{i}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{i}"), value);
+    }
+    (command, url)
+}
+
+/// Splits `http(s)://user[:password]@host…` into the URL without userinfo and the
+/// decoded credentials; any other source is returned unchanged (an ssh user is
+/// not a secret and ssh has no credential helper).
+fn split_userinfo(source: &str) -> (String, Option<(String, String)>) {
+    let Some((scheme, rest)) = source.split_once("://") else {
+        return (source.to_owned(), None);
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let Some((userinfo, host)) = rest[..end]
+        .rsplit_once('@')
+        .filter(|_| matches!(scheme, "http" | "https"))
+    else {
+        return (source.to_owned(), None);
+    };
+    let (username, password) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+    (
+        format!("{scheme}://{host}{}", &rest[end..]),
+        Some((percent_decode(username), percent_decode(password))),
+    )
+}
+
+/// URL percent-decoding, as git applies it to userinfo.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escaped = (bytes[i] == b'%' && i + 2 < bytes.len())
+            .then(|| std::str::from_utf8(&bytes[i + 1..i + 3]).ok())
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escaped {
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn run(mut command: Command, stdin: &str, deadline: Duration) -> Result<String> {
@@ -438,7 +529,7 @@ impl GitStore for Gix {
     }
 
     fn transport(&self, service: Service, repo: &Path, options: &[&str]) -> Command {
-        let mut command = Command::new("git");
+        let mut command = git();
         command
             .arg(match service {
                 Service::UploadPack => "upload-pack",
@@ -450,8 +541,8 @@ impl GitStore for Gix {
     }
 
     fn remote_refs(&self, source: &str) -> Result<Vec<Ref>> {
-        let mut command = git();
-        command.args(["ls-remote", "--refs", "--", source]);
+        let (mut command, url) = import_command(source);
+        command.args(["ls-remote", "--refs", "--", &url]);
         let mut refs = Vec::new();
         for line in run(command, "", IMPORT_TIMEOUT)?.lines() {
             let (target, name) = line
@@ -471,7 +562,7 @@ impl GitStore for Gix {
     }
 
     fn fetch(&self, repo: &Path, source: &str, refs: &[Ref]) -> Result<()> {
-        let mut command = git();
+        let (mut command, url) = import_command(source);
         command.arg("--git-dir").arg(repo).args([
             "fetch",
             "--atomic",
@@ -480,7 +571,7 @@ impl GitStore for Gix {
             "--quiet",
             "--stdin",
             "--",
-            source,
+            &url,
         ]);
         let refspecs: String = refs
             .iter()

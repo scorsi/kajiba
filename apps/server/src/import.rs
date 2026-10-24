@@ -35,6 +35,10 @@ pub async fn import(
     source: &str,
     correlation_id: &str,
 ) -> Result<usize, Error> {
+    // The server would resolve a relative path from its own working directory.
+    if !source.contains("://") && !Path::new(source).is_absolute() {
+        return Err(Error::Source("not an absolute path or a URL".into()));
+    }
     let valid = |name: &str| kajiba_core::names::validate_name(name).map_err(|_| Error::NotFound);
     let (owner, name) = repo.split_once('/').ok_or(Error::NotFound)?;
     let (owner, name) = (valid(owner)?, valid(name)?);
@@ -126,8 +130,9 @@ pub(crate) fn supervise(
     })
 }
 
-/// Git's stderr may echo a source URL with its credentials: drop the userinfo of
-/// every URL and of the source as given, on one line of at most 200 characters.
+/// Git's stderr may echo a source URL with its credentials: keep only scheme, host
+/// and path of every URL (no userinfo, query or fragment), drop the source's own
+/// userinfo wherever it appears, on one line of at most 200 characters.
 pub fn reason(stderr: &str, source: &str) -> String {
     let mut text = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
     if let Some((userinfo, _)) = source
@@ -143,15 +148,18 @@ pub fn reason(stderr: &str, source: &str) -> String {
         let (head, tail) = rest.split_at(start + 3);
         out.push_str(head);
         let end = tail
-            .find(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '\'' | '"'))
+            .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"'))
             .unwrap_or(tail.len());
-        let authority = &tail[..end];
+        let (url, after) = tail.split_at(end);
+        let url = url.split(['?', '#']).next().unwrap_or(url);
+        let (authority, path) = url.split_at(url.find('/').unwrap_or(url.len()));
         out.push_str(
             authority
                 .rsplit_once('@')
                 .map_or(authority, |(_, host)| host),
         );
-        rest = &tail[end..];
+        out.push_str(path);
+        rest = after;
     }
     out.push_str(rest);
     out.chars().take(200).collect()

@@ -183,6 +183,11 @@ async fn refusals_write_nothing() {
         ("alice/demo", &source, "not empty"),
         ("alice/other", &trunk, "no default branch"),
         ("alice/other", &import.state_dir.join("absent"), "source"),
+        (
+            "alice/other",
+            &PathBuf::from("relative/source.git"),
+            "source",
+        ),
     ] {
         let error = import.run(repo, from.to_str().unwrap()).await.unwrap_err();
         let matched = match (&error, check) {
@@ -269,6 +274,14 @@ fn source_reasons_drop_url_credentials_and_stay_bounded() {
             source
         ),
         "fatal: unable to access 'https://example.org/demo.git/': see ssh://host:22/x and https://d"
+    );
+    // A token in a query string or fragment goes too.
+    assert_eq!(
+        crate::import::reason(
+            "error: https://example.org/x?token=abc#f returned 401",
+            source
+        ),
+        "error: https://example.org/x returned 401"
     );
     // The source's own userinfo goes even outside a URL.
     assert_eq!(

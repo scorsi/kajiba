@@ -61,8 +61,6 @@ fn command(
     let mut command =
         tokio::process::Command::from(Gix.transport(Service::UploadPack, path, options));
     command
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
