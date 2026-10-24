@@ -95,6 +95,8 @@ pub enum Service {
 pub trait GitStore {
     /// `git init --bare` at `path` with `HEAD` on `refs/heads/<default_branch>`.
     fn init_bare(&self, path: &Path, default_branch: &str) -> Result<()>;
+    /// Points `HEAD` at `refs/heads/<branch>` (the declared default branch).
+    fn set_head(&self, repo: &Path, branch: &str) -> Result<()>;
     /// Every ref except `HEAD`, sorted by name (as `git for-each-ref`).
     fn refs(&self, repo: &Path) -> Result<Vec<Ref>>;
     fn tree(&self, repo: &Path, commit: &str, path: &str) -> Result<Vec<TreeEntry>>;
@@ -142,10 +144,16 @@ fn tree_at<'r>(repo: &'r gix::Repository, commit_id: &str, path: &str) -> Result
 
 impl GitStore for Gix {
     fn init_bare(&self, path: &Path, default_branch: &str) -> Result<()> {
-        let head = format!("refs/heads/{default_branch}");
-        kajiba_core::names::validate_ref(&head).map_err(|err| Error::Git(err.to_string()))?;
+        kajiba_core::names::validate_ref(&format!("refs/heads/{default_branch}"))
+            .map_err(|err| Error::Git(err.to_string()))?;
         gix::init_bare(path)?;
-        std::fs::write(path.join("HEAD"), format!("ref: {head}\n"))
+        self.set_head(path, default_branch)
+    }
+
+    fn set_head(&self, repo: &Path, branch: &str) -> Result<()> {
+        let head = format!("refs/heads/{branch}");
+        kajiba_core::names::validate_ref(&head).map_err(|err| Error::Git(err.to_string()))?;
+        std::fs::write(repo.join("HEAD"), format!("ref: {head}\n"))
             .map_err(|err| Error::Git(err.to_string()))
     }
 

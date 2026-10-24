@@ -2028,6 +2028,7 @@ dependencies = [
  "http-body",
  "hyper-util",
  "kajiba-core",
+ "kajiba-git",
  "kajiba-proto",
  "prost",
  "serde_json",

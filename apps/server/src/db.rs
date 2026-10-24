@@ -10,6 +10,7 @@ pub mod enrollment;
 // Production handlers follow in later milestones.
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod events;
+pub mod repos;
 pub mod users;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -111,6 +112,7 @@ mod tests {
     mod enrollment;
     mod events;
     mod identity;
+    mod repos;
     mod repositories;
     mod users;
 

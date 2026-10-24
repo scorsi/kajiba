@@ -135,6 +135,17 @@ async fn main() -> ExitCode {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
+            if let Err(err) = db::repos::reconcile_repos(
+                &mut writer,
+                &config.state_dir,
+                &kajiba_git::Gix,
+                &config.repos,
+            )
+            .await
+            {
+                log::error("fatal", &err);
+                return ExitCode::FAILURE;
+            }
             // Request handlers that write (enrollment, push hooks) take a clone of this handle.
             let writer = db::Writer::new(writer.into());
             let bus = std::sync::Arc::new(db::events::EventBus::default());

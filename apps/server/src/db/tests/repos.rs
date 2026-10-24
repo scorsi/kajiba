@@ -1,0 +1,371 @@
+use super::users::changes;
+use super::*;
+use crate::db::{reconcile, repos::reconcile_repos};
+use kajiba_core::config::ServerConfig;
+use kajiba_git::{GitStore, Gix};
+
+fn config(repos: &str) -> ServerConfig {
+    ServerConfig::parse(&format!(
+        "[http]\npublic_url='https://example.org'\n[users.alice]\n[users.bob]\n\
+         [mirror.credentials.github]\ntoken_file='/run/secrets/github'\n\
+         [mirror.credentials.other]\ntoken_file='/run/secrets/other'\n{repos}"
+    ))
+    .unwrap()
+}
+
+struct State {
+    dir: TempDir,
+    _lock: crate::state::StateLock,
+    writer: SqliteConnection,
+    readers: sqlx::SqlitePool,
+}
+
+impl State {
+    async fn new() -> Self {
+        let dir = TempDir::new();
+        let lock = crate::state::prepare(&dir.0).unwrap();
+        let (writer, readers) = open(&dir.0.join("db/kajiba.sqlite")).await.unwrap();
+        Self {
+            dir,
+            _lock: lock,
+            writer,
+            readers,
+        }
+    }
+
+    async fn apply(&mut self, repos: &str) -> Result<(), String> {
+        let config = config(repos);
+        reconcile(&mut self.writer, &config.users).await.unwrap();
+        reconcile_repos(&mut self.writer, &self.dir.0, &Gix, &config.repos).await
+    }
+
+    async fn repo(&mut self, key: &str) -> (String, String, Option<i64>) {
+        sqlx::query_as(
+            "SELECT repo.public_id, user.name || '/' || repo.name, archived_at FROM repo
+             JOIN user ON user.id = owner_id WHERE config_key = ?",
+        )
+        .bind(key)
+        .fetch_one(&mut self.writer)
+        .await
+        .unwrap()
+    }
+
+    async fn strings(&mut self, sql: &str) -> Vec<String> {
+        sqlx::query_scalar(sql)
+            .fetch_all(&mut self.writer)
+            .await
+            .unwrap()
+    }
+
+    fn path(&self, public_id: &str) -> std::path::PathBuf {
+        self.dir.0.join(format!("repos/{public_id}.git"))
+    }
+
+    fn repo_dirs(&self) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(self.dir.0.join("repos"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    async fn close(self) {
+        self.readers.close().await;
+        self.writer.close().await.unwrap();
+    }
+}
+
+fn git(repo: &std::path::Path, args: &[&str], stdin: &str) -> String {
+    use std::io::Write;
+    let mut child = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(repo)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "a")
+        .env("GIT_AUTHOR_EMAIL", "a@example.org")
+        .env("GIT_COMMITTER_NAME", "a")
+        .env("GIT_COMMITTER_EMAIL", "a@example.org")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "git {args:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+const DEMO: &str = "[repos.demo]\nowner='alice'\ndescription='Demo'\n\
+     previous_names=['alice/old']\npermissions.bob='write'\n\
+     mirrors=[{remote_url='https://example.org/demo.git', credential='github'}]\n";
+
+#[tokio::test]
+async fn creates_declared_repositories_and_noop_rerun_writes_nothing() {
+    let mut state = State::new().await;
+    state
+        .apply(&format!(
+            "{DEMO}[repos.tools]\nowner='bob'\nname='Tools'\ndescription=''\ndefault_branch='trunk'\nci_enabled=true\n"
+        ))
+        .await
+        .unwrap();
+    let (demo, name, archived) = state.repo("demo").await;
+    assert_eq!((name.as_str(), archived), ("alice/demo", None));
+    let (tools, name, _) = state.repo("tools").await;
+    assert_eq!(name, "bob/tools");
+    let mut dirs = vec![format!("{demo}.git"), format!("{tools}.git")];
+    dirs.sort();
+    assert_eq!(state.repo_dirs(), dirs);
+    for (id, branch) in [(&demo, "main"), (&tools, "trunk")] {
+        assert_eq!(
+            fs::read_to_string(state.path(id).join("HEAD")).unwrap(),
+            format!("ref: refs/heads/{branch}\n")
+        );
+        assert_eq!(Gix.refs(&state.path(id)).unwrap(), vec![]);
+    }
+    assert_eq!(
+        fs::read_dir(state.dir.0.join("tmp")).unwrap().count(),
+        0,
+        "nothing left in tmp/"
+    );
+    assert_eq!(
+        state
+            .strings("SELECT owner_name || '/' || name FROM repo_redirect")
+            .await,
+        ["alice/old"]
+    );
+    assert_eq!(
+        state
+            .strings("SELECT user.name || ':' || role FROM repo_permission JOIN user ON user.id = user_id")
+            .await,
+        ["bob:write"]
+    );
+    assert_eq!(
+        state
+            .strings("SELECT remote_url || ' ' || credential || ' ' || enabled || ' ' || state FROM mirror")
+            .await,
+        ["https://example.org/demo.git github 1 idle"]
+    );
+    let before = changes(&mut state.writer).await;
+    state
+        .apply(&format!(
+            "{DEMO}[repos.tools]\nowner='bob'\nname='tools'\ndescription=''\ndefault_branch='trunk'\nci_enabled=true\n"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changes(&mut state.writer).await, before);
+    state.close().await;
+}
+
+#[tokio::test]
+async fn renames_keep_identity_and_redirects_follow_previous_names() {
+    let mut state = State::new().await;
+    state
+        .apply(&format!(
+            "{DEMO}[repos.other]\nowner='alice'\nname='swap'\ndescription=''\n"
+        ))
+        .await
+        .unwrap();
+    let (demo, _, _) = state.repo("demo").await;
+    let (other, _, _) = state.repo("other").await;
+    // Swap the names of two keys, move demo to bob, change fields and redirects.
+    state
+        .apply(
+            "[repos.demo]\nowner='bob'\nname='swap'\ndescription='New'\ndefault_branch='dev'\n\
+             previous_names=['alice/demo']\n\
+             [repos.other]\nowner='bob'\nname='demo'\ndescription=''\n",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        state.repo("demo").await,
+        (demo.clone(), "bob/swap".into(), None)
+    );
+    assert_eq!(
+        state.repo("other").await,
+        (other.clone(), "bob/demo".into(), None)
+    );
+    let mut dirs = vec![format!("{demo}.git"), format!("{other}.git")];
+    dirs.sort();
+    assert_eq!(state.repo_dirs(), dirs);
+    assert_eq!(
+        fs::read_to_string(state.path(&demo).join("HEAD")).unwrap(),
+        "ref: refs/heads/dev\n"
+    );
+    assert_eq!(
+        state
+            .strings("SELECT owner_name || '/' || repo_redirect.name || '>' || repo.config_key FROM repo_redirect JOIN repo ON repo.id = repo_id")
+            .await,
+        ["alice/demo>demo"]
+    );
+    assert_eq!(
+        state
+            .strings("SELECT description || default_branch FROM repo WHERE config_key = 'demo'")
+            .await,
+        ["Newdev"]
+    );
+    assert!(
+        state
+            .strings("SELECT role FROM repo_permission")
+            .await
+            .is_empty()
+    );
+    assert!(
+        state
+            .strings("SELECT remote_url FROM mirror")
+            .await
+            .is_empty()
+    );
+    state.close().await;
+}
+
+#[tokio::test]
+async fn mirror_runtime_state_survives_configuration_changes() {
+    let mut state = State::new().await;
+    state.apply(DEMO).await.unwrap();
+    sqlx::query("UPDATE mirror SET attempts = 3, last_success_at = 5, last_error = 'boom'")
+        .execute(&mut state.writer)
+        .await
+        .unwrap();
+    let public_id = state.strings("SELECT public_id FROM mirror").await;
+    state
+        .apply(
+            "[repos.demo]\nowner='alice'\ndescription='Demo'\n\
+             mirrors=[{remote_url='https://example.org/demo.git', credential='other', enabled=false},\
+             {remote_url='https://example.org/second.git', credential='github'}]\n",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .strings("SELECT public_id || ' ' || credential || ' ' || enabled || ' ' || attempts || ' ' || last_success_at || ' ' || last_error FROM mirror WHERE remote_url = 'https://example.org/demo.git'")
+            .await,
+        [format!("{} other 0 3 5 boom", public_id[0])]
+    );
+    assert_eq!(
+        state
+            .strings("SELECT remote_url FROM mirror ORDER BY id")
+            .await
+            .len(),
+        2
+    );
+    state.close().await;
+}
+
+#[tokio::test]
+async fn archival_keeps_row_directory_history_and_locks_names() {
+    let mut state = State::new().await;
+    state.apply(DEMO).await.unwrap();
+    let (public_id, _, _) = state.repo("demo").await;
+    let path = state.path(&public_id);
+    let tree = git(&path, &["mktree"], "");
+    let commit = git(&path, &["commit-tree", &tree, "-m", "init"], "");
+    git(&path, &["update-ref", "refs/heads/main", &commit], "");
+    let refs = Gix.refs(&path).unwrap();
+    sqlx::raw_sql(
+        "UPDATE mirror SET state = 'queued', next_attempt_at = 7, last_success_at = 5;
+         INSERT INTO run (public_id, repo_id, sha, trigger, state, created_at)
+         VALUES ('00000000000000000000000001', 1, 'a', 'manual', 'queued', 0),
+                ('00000000000000000000000002', 1, 'a', 'manual', 'succeeded', 0);
+         INSERT INTO pending_push (repo_id, correlation_id, updates, created_at) VALUES (1, 'c', '[]', 0);",
+    )
+    .execute(&mut state.writer)
+    .await
+    .unwrap();
+
+    state.apply("").await.unwrap();
+    let (same, name, archived) = state.repo("demo").await;
+    assert_eq!(
+        (same.as_str(), name.as_str()),
+        (public_id.as_str(), "alice/demo")
+    );
+    assert!(archived.is_some());
+    assert_eq!(state.repo_dirs(), [format!("{public_id}.git")]);
+    assert_eq!(Gix.refs(&path).unwrap(), refs);
+    assert!(
+        state
+            .strings("SELECT role FROM repo_permission")
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        state
+            .strings("SELECT owner_name || '/' || repo_redirect.name || '>' || repo.config_key FROM repo_redirect JOIN repo ON repo.id = repo_id")
+            .await,
+        ["alice/old>demo"]
+    );
+    assert_eq!(
+        state.strings("SELECT state FROM run ORDER BY id").await,
+        ["cancelled", "succeeded"]
+    );
+    assert_eq!(
+        state
+            .strings("SELECT state || ' ' || ifnull(next_attempt_at, '-') || ' ' || last_success_at FROM mirror")
+            .await,
+        ["idle - 5"]
+    );
+    assert_eq!(
+        state
+            .strings("SELECT correlation_id FROM pending_push")
+            .await,
+        ["c"]
+    );
+    // The orphan sweep counts archived rows.
+    crate::state::cleanup(&state.dir.0, &mut state.writer)
+        .await
+        .unwrap();
+    assert_eq!(state.repo_dirs(), [format!("{public_id}.git")]);
+    assert!(!state.dir.0.join("tmp/orphans").exists());
+
+    // Another key may take neither its current nor its previous name; nothing is written.
+    let before = changes(&mut state.writer).await;
+    for (repos, name) in [
+        (
+            "[repos.copy]\nowner='alice'\nname='demo'\ndescription=''\n",
+            "alice/demo",
+        ),
+        (
+            "[repos.copy]\nowner='alice'\nname='old'\ndescription=''\n",
+            "alice/old",
+        ),
+        (
+            "[repos.copy]\nowner='alice'\ndescription=''\nprevious_names=['alice/demo']\n",
+            "alice/demo",
+        ),
+    ] {
+        let error = state.apply(repos).await.unwrap_err();
+        assert!(
+            error.contains(&format!(
+                "repos.copy: {name} is held by archived repository repos.demo"
+            )),
+            "{error}"
+        );
+        assert_eq!(changes(&mut state.writer).await, before);
+        assert_eq!(state.repo_dirs(), [format!("{public_id}.git")]);
+    }
+
+    // The same key re-declared unarchives the same row, content intact.
+    state.apply(DEMO).await.unwrap();
+    assert_eq!(
+        state.repo("demo").await,
+        (public_id.clone(), "alice/demo".into(), None)
+    );
+    assert_eq!(Gix.refs(&path).unwrap(), refs);
+    assert_eq!(
+        state.strings("SELECT role FROM repo_permission").await,
+        ["write"]
+    );
+    assert_eq!(
+        state.strings("SELECT state FROM run ORDER BY id").await,
+        ["cancelled", "succeeded"]
+    );
+    assert_eq!(state.repo_dirs(), [format!("{public_id}.git")]);
+    state.close().await;
+}

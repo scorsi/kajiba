@@ -4,6 +4,7 @@
   craneLib,
   commonCargoArgs,
   cargoArtifacts,
+  git,
 }:
 craneLib.buildPackage (
   commonCargoArgs
@@ -11,6 +12,8 @@ craneLib.buildPackage (
     inherit cargoArtifacts;
     pname = "kajiba-server";
     cargoExtraArgs = "--locked -p kajiba-server";
+    # Reconciliation tests write commits into bare repositories with the git binary.
+    nativeCheckInputs = [ git ];
     meta.mainProgram = "kajiba-server";
   }
 )
