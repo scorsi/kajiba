@@ -427,3 +427,96 @@ async fn retry_backoff_is_capped() {
     readers.close().await;
     writer.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn metrics_count_each_failed_attempt_once_and_lag_tracks_checkpoints() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use std::sync::Arc;
+    use tonic::codegen::Service;
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    setup(&mut writer).await;
+    let bus = Arc::new(EventBus::default());
+    let first = append(&mut writer, 1).await;
+    let second = append(&mut writer, 2).await;
+    // Sequence gaps must not inflate lag, and stored names cannot create metric labels.
+    sqlx::query("UPDATE event SET id = id + 10; INSERT INTO handler_checkpoint (handler, last_event_id, updated_at) VALUES ('private', 0, 0)")
+        .execute(&mut writer).await.unwrap();
+    assert_eq!(crate::metrics::handler_lag(&readers).await.unwrap(), [2; 4]);
+    let mut app = crate::metrics::router(Arc::default(), readers.clone(), bus.clone());
+    let scrape =
+        |app: &mut axum::Router| app.call(Request::get("/metrics").body(Body::empty()).unwrap());
+    let response = scrape(&mut app).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        crate::metrics::CONTENT_TYPE
+    );
+    let output = String::from_utf8(
+        to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(output.contains("kajiba_handler_failures_total{handler=\"ci\"} 0\n"));
+    let mut handler = TestHandler::<false> { fail: true };
+    assert!(bus.dispatch_next(&mut writer, &mut handler).await.is_err());
+    assert_eq!(bus.failure_count("ci"), 1);
+    assert_eq!(crate::metrics::handler_lag(&readers).await.unwrap(), [2; 4]);
+    let response = scrape(&mut app).await.unwrap();
+    let output = String::from_utf8(
+        to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(output.contains("kajiba_handler_failures_total{handler=\"ci\"} 1\n"));
+    assert!(!output.contains("private"));
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.starts_with("kajiba_handler_failures_total{"))
+            .count(),
+        4
+    );
+    handler.fail = false;
+    assert!(bus.dispatch_next(&mut writer, &mut handler).await.unwrap());
+    assert_eq!(checkpoint(&readers, "ci").await, Some(first + 10));
+    assert_eq!(
+        crate::metrics::handler_lag(&readers).await.unwrap(),
+        [1, 2, 2, 2]
+    );
+    assert!(bus.dispatch_next(&mut writer, &mut handler).await.unwrap());
+    assert_eq!(checkpoint(&readers, "ci").await, Some(second + 10));
+    assert!(!bus.dispatch_next(&mut writer, &mut handler).await.unwrap());
+    assert_eq!(
+        crate::metrics::handler_lag(&readers).await.unwrap(),
+        [0, 2, 2, 2]
+    );
+    assert_eq!(bus.failure_count("ci"), 1);
+    assert_eq!(
+        app.call(Request::get("/other").body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        app.call(Request::post("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    readers.close().await;
+    assert_eq!(
+        scrape(&mut app).await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    writer.close().await.unwrap();
+}

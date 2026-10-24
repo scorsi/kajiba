@@ -3,6 +3,7 @@ use kajiba_core::{config::ServerConfig, log};
 use std::{path::PathBuf, process::ExitCode};
 
 mod db;
+mod metrics;
 mod state;
 mod transport;
 
@@ -140,12 +141,12 @@ async fn main() -> ExitCode {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
-            let bus = db::events::EventBus::default();
+            let bus = std::sync::Arc::new(db::events::EventBus::default());
             // CI and mirror register here when their handlers are implemented.
             let mut dispatcher = db::events::Dispatcher::default();
-            health.started(readers);
+            health.started(readers.clone());
             return match tokio::select! {
-                result = transport::serve(&config.http, health) => result,
+                result = transport::serve(&config.http, &config.metrics, health, readers, bus.clone()) => result,
                 () = dispatcher.run(&bus, &mut writer) => unreachable!("dispatcher runs until shutdown"),
             } {
                 Ok(()) => ExitCode::SUCCESS,

@@ -100,7 +100,7 @@ async fn serving_status(app: &mut Router) -> ServingStatus {
 #[tokio::test]
 async fn readiness_waits_for_startup_and_checks_database_and_directories() {
     let state = State::new();
-    let mut app = router(state.health.clone(), false).unwrap();
+    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
     assert!(!state.health.state_dir.join("db/kajiba.sqlite").exists());
     assert_eq!(get(&mut app, "/healthz").await, StatusCode::OK);
     assert_eq!(
@@ -138,7 +138,7 @@ async fn reflection_is_disabled_by_default() {
             .unwrap();
     assert!(!config.http.reflection);
     let state = State::new();
-    let mut app = router(state.health.clone(), config.http.reflection).unwrap();
+    let mut app = router(state.health.clone(), config.http.reflection, Arc::default()).unwrap();
     for version in ["v1", "v1alpha"] {
         let response = grpc(
             &mut app,
@@ -156,7 +156,7 @@ async fn reflection_is_disabled_by_default() {
 #[tokio::test]
 async fn reflection_lists_health_and_returns_its_descriptor_when_enabled() {
     let state = State::new();
-    let mut app = router(state.health.clone(), true).unwrap();
+    let mut app = router(state.health.clone(), true, Arc::default()).unwrap();
     // v1 and v1alpha use the same wire format; support both grpcurl generations.
     for version in ["v1", "v1alpha"] {
         let path = format!("/grpc.reflection.{version}.ServerReflection/ServerReflectionInfo");
@@ -209,7 +209,7 @@ async fn http_and_grpc_share_one_ephemeral_port() {
     state.start().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = router(state.health.clone(), false).unwrap();
+    let app = router(state.health.clone(), false, Arc::default()).unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let http = tokio::task::spawn_blocking(move || {
         use std::io::{Read, Write};
@@ -291,7 +291,10 @@ async fn concurrent_errors_match_request_logs_and_inherit_spans() {
                         .map(|body| Body::new(LoggedBody(body)))
                 },
             ))
-            .layer(axum::middleware::from_fn(correlation::request));
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(Registry::default()),
+                correlation::request,
+            ));
         let call = || {
             let mut app = app.clone();
             async move {
@@ -395,7 +398,26 @@ async fn concurrent_errors_match_request_logs_and_inherit_spans() {
 async fn signals_drain_in_flight_requests_and_exit_zero() {
     const CHILD: &str = "KAJIBA_TEST_SHUTDOWN";
     if std::env::var_os(CHILD).is_some() {
+        let state = State::new();
+        state.start().await;
         kajiba_core::log::init("info").unwrap();
+        let registry = Arc::new(Registry::default());
+        let metrics = if std::env::var_os("KAJIBA_TEST_METRICS").is_some() {
+            let listener = metrics::bind(Some("127.0.0.1:0".parse().unwrap()))
+                .await
+                .unwrap()
+                .unwrap();
+            Some((
+                listener,
+                metrics::router(
+                    registry.clone(),
+                    state.health.database.get().unwrap().clone(),
+                    Arc::default(),
+                ),
+            ))
+        } else {
+            None
+        };
         let app = Router::new()
             .route(
                 "/slow",
@@ -406,19 +428,24 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
                     "completed"
                 }),
             )
-            .layer(axum::middleware::from_fn(correlation::request));
+            .layer(axum::middleware::from_fn_with_state(
+                registry,
+                correlation::request,
+            ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        serve_listener(listener, app).await.unwrap();
+        serve_listeners(listener, app, metrics).await.unwrap();
         return;
     }
     tokio::task::spawn_blocking(|| {
         use std::io::{BufRead, Read, Write};
         use std::process::{Command, Stdio};
-        for signal in ["-TERM", "-INT"] {
-            let mut child = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "transport::tests::signals_drain_in_flight_requests_and_exit_zero", "--nocapture"])
-                .env(CHILD, "1").env_remove("RUST_LOG")
-                .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+        for (signal, metrics) in [("-TERM", false), ("-INT", true)] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "transport::tests::signals_drain_in_flight_requests_and_exit_zero", "--nocapture"])
+                .env(CHILD, "1").env_remove("RUST_LOG").env_remove("KAJIBA_TEST_METRICS")
+                .stdout(Stdio::null()).stderr(Stdio::piped());
+            if metrics { command.env("KAJIBA_TEST_METRICS", "1"); }
+            let mut child = command.spawn().unwrap();
             let (send, recv) = std::sync::mpsc::channel();
             let stderr = child.stderr.take().unwrap();
             let reader = std::thread::spawn(move || {
@@ -432,6 +459,22 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
                 let listening = recv.recv_timeout(timeout).unwrap();
                 assert_eq!(listening["event"], "listening");
                 let addr = listening["addr"].as_str().unwrap().parse().unwrap();
+                let metrics_addr = if metrics {
+                    let listening = recv.recv_timeout(timeout).unwrap();
+                    assert_eq!(listening["event"], "metrics-listening");
+                    let addr = listening["addr"].as_str().unwrap().parse::<std::net::SocketAddr>().unwrap();
+                    assert!(addr.ip().is_loopback());
+                    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).unwrap();
+                    stream.set_read_timeout(Some(timeout)).unwrap();
+                    stream.set_write_timeout(Some(timeout)).unwrap();
+                    stream.write_all(b"GET /metrics HTTP/1.1\r\nHost: example.org\r\nConnection: close\r\n\r\n").unwrap();
+                    let mut response = String::new();
+                    stream.read_to_string(&mut response).unwrap();
+                    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+                    assert!(response.contains(&format!("content-type: {}\r\n", metrics::CONTENT_TYPE)));
+                    assert!(response.contains("kajiba_build_info{version=\""));
+                    Some(addr)
+                } else { None };
                 let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).unwrap();
                 stream.set_read_timeout(Some(timeout)).unwrap();
                 stream.set_write_timeout(Some(timeout)).unwrap();
@@ -445,7 +488,7 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
                 assert!(stopping.get("request_id").is_none());
                 assert!(child.try_wait().unwrap().is_none());
                 let deadline = std::time::Instant::now() + timeout;
-                while std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
+                while std::iter::once(addr).chain(metrics_addr).any(|addr| std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok()) {
                     assert!(std::time::Instant::now() < deadline, "listener still accepts requests");
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -479,7 +522,7 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
 #[tokio::test]
 async fn tonic_transport_errors_receive_error_info() {
     let state = State::new();
-    let mut app = router(state.health.clone(), false).unwrap();
+    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
     let response = grpc(
         &mut app,
         "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
@@ -494,4 +537,38 @@ async fn tonic_transport_errors_receive_error_info() {
     assert_eq!(info.domain, "kajiba");
     assert_eq!(info.reason, "INTERNAL");
     assert_eq!(info.metadata["request_id"].len(), 26);
+}
+
+#[tokio::test]
+async fn requests_update_metrics_after_body_completion_including_grpc_trailers() {
+    let state = State::new();
+    let registry = Arc::new(Registry::default());
+    let mut app = router(state.health.clone(), false, registry.clone()).unwrap();
+    let before = registry.exposition("test", [0; 4], [0; 4]);
+    assert!(before.contains("kajiba_requests_total{kind=\"other\",code=\"2xx\"} 0\n"));
+    let response = app
+        .call(http::Request::get("/healthz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_ref(), b"OK");
+    let response = grpc(&mut app, "/kajiba.v1.HealthService/Check", CheckRequest {}).await;
+    let _: CheckResponse = decode(response).await;
+    let after = registry.exposition("test", [0; 4], [0; 4]);
+    assert!(after.contains("kajiba_requests_total{kind=\"other\",code=\"2xx\"} 1\n"));
+    assert!(after.contains("kajiba_requests_total{kind=\"grpc\",code=\"OK\"} 1\n"));
+    assert!(after.contains("kajiba_request_duration_seconds_count{kind=\"grpc\"} 1\n"));
+    assert!(after.contains("kajiba_request_duration_seconds_count{kind=\"other\"} 1\n"));
+    let response = app
+        .call(http::Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.headers()["grpc-status"], "12");
+    assert_ne!(
+        response.headers()["content-type"],
+        crate::metrics::CONTENT_TYPE
+    );
 }

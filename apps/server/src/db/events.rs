@@ -72,7 +72,11 @@ impl EventBus {
             self.commit(transaction).await
         }.await;
         if let Err(err) = result {
-            *self.failures.lock().unwrap().entry(name).or_default() += 1;
+            {
+                let mut failures = self.failures.lock().unwrap();
+                let count = failures.entry(name).or_default();
+                *count = count.saturating_add(1);
+            }
             tracing::error!(event = "handler-failed", handler = name, event_id = event.id, err = %err);
             // Flush sqlx's queued rollback before another handler or retry runs.
             sqlx::query("SELECT 1").execute(writer).await?;

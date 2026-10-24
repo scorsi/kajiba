@@ -1,5 +1,9 @@
+use crate::{
+    db::events::EventBus,
+    metrics::{self, Registry},
+};
 use axum::{Router, http::StatusCode, middleware, routing::get};
-use kajiba_core::config::HttpConfig;
+use kajiba_core::config::{HttpConfig, MetricsConfig};
 use kajiba_proto::v1::{
     CheckRequest, CheckResponse,
     check_response::ServingStatus,
@@ -62,7 +66,11 @@ impl HealthService for Health {
     }
 }
 
-fn router(health: Health, reflection: bool) -> Result<Router, tonic_reflection::server::Error> {
+fn router(
+    health: Health,
+    reflection: bool,
+    registry: Arc<Registry>,
+) -> Result<Router, tonic_reflection::server::Error> {
     let mut grpc = Routes::new(HealthServiceServer::new(health.clone()));
     if reflection {
         let reflection = tonic_reflection::server::Builder::configure()
@@ -90,22 +98,71 @@ fn router(health: Health, reflection: bool) -> Result<Router, tonic_reflection::
                 }
             }),
         )
-        .layer(middleware::from_fn(correlation::request)))
+        .layer(middleware::from_fn_with_state(
+            registry,
+            correlation::request,
+        )))
 }
 
-pub async fn serve(config: &HttpConfig, health: Health) -> std::io::Result<()> {
-    let app = router(health, config.reflection).map_err(std::io::Error::other)?;
+pub async fn serve(
+    config: &HttpConfig,
+    metrics_config: &MetricsConfig,
+    health: Health,
+    readers: SqlitePool,
+    bus: Arc<EventBus>,
+) -> std::io::Result<()> {
+    let registry = Arc::new(Registry::default());
+    let app = router(health, config.reflection, registry.clone()).map_err(std::io::Error::other)?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    serve_listener(listener, app).await
+    let metrics = metrics::bind(metrics_config.listen)
+        .await?
+        .map(|listener| (listener, metrics::router(registry, readers, bus)));
+    serve_listeners(listener, app, metrics).await
 }
 
-async fn serve_listener(listener: tokio::net::TcpListener, app: Router) -> std::io::Result<()> {
+async fn serve_listeners(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    metrics: Option<(tokio::net::TcpListener, Router)>,
+) -> std::io::Result<()> {
+    use std::future::IntoFuture;
     let shutdown = shutdown_signal()?;
+    let (stop, stopped) = tokio::sync::watch::channel(false);
     tracing::info!(event = "listening", addr = %listener.local_addr()?);
+    if let Some((listener, _)) = &metrics {
+        tracing::info!(event = "metrics-listening", addr = %listener.local_addr()?);
+    }
     tracing::info!(event = "ready");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
+    let mut http_stopped = stopped.clone();
+    let mut metrics_stopped = stopped;
+    let servers = async move {
+        tokio::try_join!(
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = http_stopped.changed().await;
+                })
+                .into_future(),
+            async move {
+                if let Some((listener, app)) = metrics {
+                    axum::serve(listener, app)
+                        .with_graceful_shutdown(async move {
+                            let _ = metrics_stopped.changed().await;
+                        })
+                        .await?;
+                }
+                Ok(())
+            }
+        )?;
+        Ok(())
+    };
+    tokio::pin!(servers);
+    tokio::select! {
+        result = &mut servers => result,
+        () = shutdown => {
+            stop.send_replace(true);
+            servers.await
+        }
+    }
 }
 
 fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {

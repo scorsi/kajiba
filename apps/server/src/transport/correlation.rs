@@ -1,6 +1,7 @@
+use crate::metrics::{Kind, Registry};
 use axum::{
     body::{Body, Bytes},
-    extract::Request,
+    extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::Response,
@@ -10,6 +11,7 @@ use prost::Message;
 use std::{
     io::Read,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -31,7 +33,11 @@ fn request_id() -> std::io::Result<String> {
         .collect())
 }
 
-pub(super) async fn request(request: Request, next: Next) -> Result<Response, StatusCode> {
+pub(super) async fn request(
+    State(metrics): State<Arc<Registry>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
     let request_id = request_id().map_err(|err| {
         kajiba_core::log::error("fatal", &format!("request id: {err}"));
         StatusCode::INTERNAL_SERVER_ERROR
@@ -49,7 +55,16 @@ pub(super) async fn request(request: Request, next: Next) -> Result<Response, St
         }
         _ => "other",
     };
+    let kind = Kind::from_content_type(
+        request
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or(""),
+    );
     let mut body = RequestBody {
+        metrics,
+        kind,
         inner: Body::empty(),
         span,
         request_id,
@@ -149,6 +164,8 @@ fn code_name(code: tonic::Code) -> &'static str {
 }
 
 struct RequestBody {
+    metrics: Arc<Registry>,
+    kind: Kind,
     inner: Body,
     span: Span,
     request_id: String,
@@ -163,7 +180,9 @@ impl RequestBody {
     fn finish(&mut self) {
         if !self.finished {
             let _entered = self.span.enter();
-            let dur_us = self.started.elapsed().as_micros() as u64;
+            let duration = self.started.elapsed();
+            self.metrics.observe(self.kind, &self.status, duration);
+            let dur_us = duration.as_micros() as u64;
             if let Some(err) = &self.error {
                 tracing::error!(event = "request", method = self.method, status = %self.status, dur_us, err);
             } else {
@@ -305,6 +324,8 @@ mod tests {
             .unwrap();
         let inner = Body::new(Trailers(Some(trailers)));
         let mut body = RequestBody {
+            metrics: Arc::default(),
+            kind: Kind::Grpc,
             inner,
             span: tracing::info_span!("request", request_id = "test-id"),
             request_id: "test-id".into(),
