@@ -134,7 +134,9 @@ async fn crash_after_ref_update_yields_one_event_after_restart() {
         .await
         .unwrap();
     git(&path, &["update-ref", "refs/heads/main", &c2], "");
-    // The process and the server die before `exited`: a new instance recovers the row.
+    // The process and the server die before `exited`: a new instance reopens the
+    // database and recovers the row.
+    state.reopen().await;
     let gate = Gate::default();
     for _ in 0..2 {
         gate.reconcile(&mut state.writer, &bus, &state.dir.0, &Gix)
@@ -182,5 +184,60 @@ async fn unexpected_value_retains_the_row_and_blocks_admission() {
         .admit(&mut state.writer, 1, None, "request-2", &[])
         .await;
     assert!(matches!(refused, Err(Refused::Retained)), "{refused:?}");
+    state.close().await;
+}
+
+#[tokio::test]
+async fn a_recovery_pass_converts_rows_and_the_next_one_retries_after_an_error() {
+    let (mut state, path, c1, c2) = setup().await;
+    state
+        .apply("[repos.demo]\nowner='alice'\ndescription=''\n[repos.other]\nowner='alice'\ndescription=''\n")
+        .await
+        .unwrap();
+    let other: i64 = sqlx::query_scalar("SELECT id FROM repo WHERE config_key = 'other'")
+        .fetch_one(&mut state.writer)
+        .await
+        .unwrap();
+    let dead = Gate::default();
+    dead.admit(&mut state.writer, other, None, "empty", &[])
+        .await
+        .unwrap();
+    dead.admit(
+        &mut state.writer,
+        1,
+        None,
+        "import",
+        &[update("main", &c1, &c2)],
+    )
+    .await
+    .unwrap();
+    git(&path, &["update-ref", "refs/heads/main", &c2], "");
+    // The instance died without `exited`. The new one's timer recovers the rows in
+    // id order: `demo` is unreadable at first, so the first pass converts `empty`,
+    // fails on `import` without panicking, and the next pass finishes the job.
+    let hidden = path.with_extension("hidden");
+    std::fs::rename(&path, &hidden).unwrap();
+    let (gate, bus) = (Gate::default(), EventBus::default());
+    gate.recover_once(&mut state.writer, &bus, &state.dir.0, &Gix)
+        .await;
+    assert_eq!(
+        state
+            .strings("SELECT correlation_id FROM pending_push")
+            .await,
+        ["import"]
+    );
+    std::fs::rename(&hidden, &path).unwrap();
+    gate.recover_once(&mut state.writer, &bus, &state.dir.0, &Gix)
+        .await;
+    assert!(
+        state
+            .strings("SELECT correlation_id FROM pending_push")
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        events(&mut state).await,
+        [format!("system - 1 import {}", payload("main", &c1, &c2))]
+    );
     state.close().await;
 }

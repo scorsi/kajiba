@@ -226,13 +226,22 @@ impl Gate {
     ) {
         loop {
             tokio::time::sleep(RECOVERY_INTERVAL).await;
-            let result = self
-                .reconcile(&mut *writer.lock().await, bus, state_dir, store)
+            self.recover_once(&mut *writer.lock().await, bus, state_dir, store)
                 .await;
-            if let Err(err) = result {
-                // Not in ADR 0022's list; the next tick retries.
-                tracing::error!(event = "push-recovery-failed", err);
-            }
+        }
+    }
+
+    /// One pass of the timer: an error is logged and the next pass retries.
+    pub async fn recover_once(
+        &self,
+        writer: &mut SqliteConnection,
+        bus: &EventBus,
+        state_dir: &Path,
+        store: &impl GitStore,
+    ) {
+        if let Err(err) = self.reconcile(writer, bus, state_dir, store).await {
+            // Not in ADR 0022's list; the next tick retries.
+            tracing::error!(event = "push-recovery-failed", err);
         }
     }
 }

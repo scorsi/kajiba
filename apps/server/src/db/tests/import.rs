@@ -217,6 +217,11 @@ async fn a_crash_during_import_is_reconciled_at_restart() {
         .await
         .unwrap();
     Gix.fetch(&target, source.to_str().unwrap(), &refs).unwrap();
+    // The connections die with the server; the new instance reopens the file.
+    let (reopened, _) = crate::db::open(&import.state_dir.join("db/kajiba.sqlite"))
+        .await
+        .unwrap();
+    *import.writer.lock().await = reopened;
     let restarted = Gate::default();
     restarted
         .reconcile(

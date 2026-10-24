@@ -72,6 +72,16 @@ impl State {
         names
     }
 
+    /// A restart: the connections are closed and the file reopened.
+    pub(super) async fn reopen(&mut self) {
+        let (writer, readers) = open(&self.dir.0.join("db/kajiba.sqlite")).await.unwrap();
+        std::mem::replace(&mut self.writer, writer)
+            .close()
+            .await
+            .unwrap();
+        std::mem::replace(&mut self.readers, readers).close().await;
+    }
+
     pub(super) async fn close(self) {
         self.readers.close().await;
         self.writer.close().await.unwrap();
