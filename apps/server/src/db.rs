@@ -6,7 +6,7 @@ use sqlx::{
 use std::{path::Path, time::Duration};
 
 pub mod credentials;
-// Production handlers and the dispatch lifecycle follow in later tasks.
+// Production handlers follow in later milestones.
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod events;
 pub mod users;

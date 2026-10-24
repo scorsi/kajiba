@@ -1,10 +1,18 @@
 use sqlx::{Connection, FromRow, Sqlite, SqliteConnection, SqlitePool, Transaction};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    pin::Pin,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 use tokio::sync::Notify;
 
 /// One wake-up consumer drives all handlers against the single writer.
 #[derive(Default)]
 pub struct EventBus {
     wake: Notify,
+    failures: Mutex<BTreeMap<&'static str, u64>>,
 }
 
 impl EventBus {
@@ -26,23 +34,177 @@ impl EventBus {
         writer: &mut SqliteConnection,
         handler: &mut H,
     ) -> Result<bool, sqlx::Error> {
+        self.dispatch(writer, handler).await
+    }
+
+    /// In-process total for task 22's per-handler metric; resets on restart.
+    pub fn failure_count(&self, handler: &str) -> u64 {
+        self.failures
+            .lock()
+            .unwrap()
+            .get(handler)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    async fn dispatch(
+        &self,
+        writer: &mut SqliteConnection,
+        handler: &mut dyn RegisteredHandler,
+    ) -> Result<bool, sqlx::Error> {
+        let name = handler.name();
         let mut transaction = writer.begin().await?;
         let event: Option<Event> = sqlx::query_as("SELECT id, public_id, kind, version, occurred_at, principal_kind, principal_id, repo_id, correlation_id, payload FROM event WHERE id > COALESCE((SELECT last_event_id FROM handler_checkpoint WHERE handler = ?), 0) ORDER BY id LIMIT 1")
-            .bind(H::NAME)
+            .bind(name)
             .fetch_optional(&mut *transaction)
             .await?;
         let Some(event) = event else {
             transaction.rollback().await?;
             return Ok(false);
         };
-        handler.apply(&mut transaction, &event).await?;
-        sqlx::query("INSERT INTO handler_checkpoint (handler, last_event_id, updated_at) VALUES (?, ?, CAST(strftime('%s', 'now') AS INTEGER) * 1000) ON CONFLICT(handler) DO UPDATE SET last_event_id = excluded.last_event_id, updated_at = excluded.updated_at")
-            .bind(H::NAME)
-            .bind(event.id)
-            .execute(&mut *transaction)
-            .await?;
-        self.commit(transaction).await?;
+        let result = async {
+            handler.apply(&mut transaction, &event).await?;
+            sqlx::query("INSERT INTO handler_checkpoint (handler, last_event_id, updated_at) VALUES (?, ?, CAST(strftime('%s', 'now') AS INTEGER) * 1000) ON CONFLICT(handler) DO UPDATE SET last_event_id = excluded.last_event_id, updated_at = excluded.updated_at")
+                .bind(name)
+                .bind(event.id)
+                .execute(&mut *transaction)
+                .await?;
+            self.commit(transaction).await
+        }.await;
+        if let Err(err) = result {
+            *self.failures.lock().unwrap().entry(name).or_default() += 1;
+            tracing::error!(event = "handler-failed", handler = name, event_id = event.id, err = %err);
+            // Flush sqlx's queued rollback before another handler or retry runs.
+            sqlx::query("SELECT 1").execute(writer).await?;
+            return Err(err);
+        }
         Ok(true)
+    }
+}
+
+// ADR 0017 specifies capped backoff but no duration: 100 ms, doubling to 30 s.
+const RETRY_INITIAL: Duration = Duration::from_millis(100);
+const RETRY_CAP: Duration = Duration::from_secs(30);
+
+type ApplyFuture<'a> = Pin<Box<dyn Future<Output = Result<(), sqlx::Error>> + 'a>>;
+
+trait RegisteredHandler {
+    fn name(&self) -> &'static str;
+    fn apply<'a>(
+        &'a mut self,
+        transaction: &'a mut SqliteConnection,
+        event: &'a Event,
+    ) -> ApplyFuture<'a>;
+}
+
+impl<H: Handler> RegisteredHandler for H {
+    fn name(&self) -> &'static str {
+        H::NAME
+    }
+    fn apply<'a>(
+        &'a mut self,
+        transaction: &'a mut SqliteConnection,
+        event: &'a Event,
+    ) -> ApplyFuture<'a> {
+        Box::pin(Handler::apply(self, transaction, event))
+    }
+}
+
+struct HandlerState {
+    handler: Box<dyn RegisteredHandler>,
+    retry_at: Option<Instant>,
+    backoff: Duration,
+}
+
+#[derive(Default)]
+pub struct Dispatcher {
+    handlers: Vec<HandlerState>,
+}
+
+pub trait Clock {
+    fn now(&self) -> Instant;
+    async fn sleep(&self, duration: Duration);
+}
+
+struct SystemClock;
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    async fn sleep(&self, duration: Duration) {
+        tokio::time::sleep(duration).await;
+    }
+}
+
+impl Dispatcher {
+    pub fn register<H: Handler + 'static>(&mut self, handler: H) {
+        assert!(
+            !self
+                .handlers
+                .iter()
+                .any(|state| state.handler.name() == H::NAME),
+            "duplicate handler name"
+        );
+        self.handlers.push(HandlerState {
+            handler: Box::new(handler),
+            retry_at: None,
+            backoff: RETRY_INITIAL,
+        });
+    }
+
+    /// Drain immediately on startup, before waiting for any commit notification.
+    pub async fn run(&mut self, bus: &EventBus, writer: &mut SqliteConnection) {
+        loop {
+            self.drain(bus, writer, &SystemClock).await;
+            bus.notified().await;
+        }
+    }
+
+    /// Retry deadlines belong to individual handlers; a stuck handler cannot block others.
+    pub async fn drain(
+        &mut self,
+        bus: &EventBus,
+        writer: &mut SqliteConnection,
+        clock: &impl Clock,
+    ) {
+        loop {
+            let mut progressed = false;
+            for state in &mut self.handlers {
+                if state
+                    .retry_at
+                    .is_some_and(|deadline| deadline > clock.now())
+                {
+                    continue;
+                }
+                match bus.dispatch(writer, state.handler.as_mut()).await {
+                    Ok(handled) => {
+                        state.retry_at = None;
+                        state.backoff = RETRY_INITIAL;
+                        progressed |= handled;
+                    }
+                    Err(_) => {
+                        state.retry_at = Some(clock.now() + state.backoff);
+                        state.backoff = (state.backoff * 2).min(RETRY_CAP);
+                    }
+                }
+            }
+            if progressed {
+                continue;
+            }
+            let Some(deadline) = self
+                .handlers
+                .iter()
+                .filter_map(|state| state.retry_at)
+                .min()
+            else {
+                return;
+            };
+            // Commits may make work available to healthy handlers during a retry wait.
+            tokio::select! {
+                () = clock.sleep(deadline.saturating_duration_since(clock.now())) => {},
+                () = bus.notified() => {},
+            }
+        }
     }
 }
 

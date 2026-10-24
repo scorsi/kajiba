@@ -211,3 +211,219 @@ async fn handlers_progress_independently_in_event_id_order() {
     readers.close().await;
     writer.close().await.unwrap();
 }
+
+struct FakeClock {
+    now: std::cell::Cell<std::time::Instant>,
+    sleeps: std::cell::RefCell<Vec<std::time::Duration>>,
+}
+
+impl FakeClock {
+    fn new() -> Self {
+        Self {
+            now: std::cell::Cell::new(std::time::Instant::now()),
+            sleeps: Default::default(),
+        }
+    }
+}
+
+impl crate::db::events::Clock for FakeClock {
+    fn now(&self) -> std::time::Instant {
+        self.now.get()
+    }
+    async fn sleep(&self, duration: std::time::Duration) {
+        self.sleeps.borrow_mut().push(duration);
+        self.now.set(self.now.get() + duration);
+    }
+}
+
+struct FailingHandler {
+    remaining: usize,
+    readers: SqlitePool,
+    previous: Option<i64>,
+    check_mirror: bool,
+}
+
+impl Handler for FailingHandler {
+    const NAME: &'static str = "ci";
+    async fn apply(
+        &mut self,
+        transaction: &mut SqliteConnection,
+        event: &Event,
+    ) -> Result<(), sqlx::Error> {
+        // Every attempt must start with the previous transaction's effect absent.
+        assert_eq!(checkpoint(&self.readers, "ci").await, self.previous);
+        assert_eq!(
+            effects(&self.readers, "ci").await,
+            self.previous.into_iter().collect::<Vec<_>>()
+        );
+        if self.check_mirror && self.remaining == 1 {
+            assert_eq!(checkpoint(&self.readers, "mirror").await, Some(event.id));
+        }
+        TestHandler::<false> { fail: false }
+            .apply(transaction, event)
+            .await?;
+        if self.remaining > 0 {
+            self.remaining -= 1;
+            return Err(sqlx::Error::Protocol("injected failure".into()));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn retries_twice_with_rollback_counts_and_failure_logs() {
+    use crate::db::events::Dispatcher;
+    const CHILD: &str = "KAJIBA_RETRY_LOG_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "db::tests::dispatch::retries_twice_with_rollback_counts_and_failure_logs",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lines: Vec<serde_json::Value> = String::from_utf8(output.stderr)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        for line in lines {
+            assert_eq!(line["event"], "handler-failed");
+            assert_eq!(line["level"], "error");
+            assert_eq!(line["handler"], "ci");
+            assert_eq!(line["event_id"], 2);
+            assert!(line["err"].as_str().unwrap().contains("injected failure"));
+        }
+        return;
+    }
+    // Isolate the real stderr logger from parallel tests and tracing's callsite cache.
+    kajiba_core::log::init("error").unwrap();
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    setup(&mut writer).await;
+    let bus = EventBus::default();
+    let first = append(&mut writer, 1).await;
+    bus.dispatch_next(&mut writer, &mut TestHandler::<false> { fail: false })
+        .await
+        .unwrap();
+    let second = append(&mut writer, 2).await;
+    let mut dispatcher = Dispatcher::default();
+    dispatcher.register(FailingHandler {
+        remaining: 2,
+        readers: readers.clone(),
+        previous: Some(first),
+        check_mirror: true,
+    });
+    dispatcher.register(TestHandler::<true> { fail: false });
+    let clock = FakeClock::new();
+    dispatcher.drain(&bus, &mut writer, &clock).await;
+    assert_eq!(effects(&readers, "ci").await, [first, second]);
+    assert_eq!(effects(&readers, "mirror").await, [first, second]);
+    assert_eq!(checkpoint(&readers, "ci").await, Some(second));
+    assert_eq!(bus.failure_count("ci"), 2);
+    assert_eq!(bus.failure_count("mirror"), 0);
+    assert_eq!(
+        *clock.sleeps.borrow(),
+        [
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(200)
+        ]
+    );
+    readers.close().await;
+    writer.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn restart_dispatches_committed_event_without_notification_and_replay_is_unique() {
+    use crate::db::events::Dispatcher;
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    setup(&mut writer).await;
+    let bus = EventBus::default();
+    let first = append(&mut writer, 1).await;
+    bus.dispatch_next(&mut writer, &mut TestHandler::<false> { fail: false })
+        .await
+        .unwrap();
+    let mut transaction = writer.begin().await.unwrap();
+    let second = append(&mut transaction, 2).await;
+    bus.commit(transaction).await.unwrap();
+    // Simulate death before dispatch: discard the bus, reopen the same durable DB.
+    drop(bus);
+    readers.close().await;
+    writer.close().await.unwrap();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    let bus = EventBus::default();
+    let mut dispatcher = Dispatcher::default();
+    dispatcher.register(TestHandler::<false> { fail: false });
+    let clock = FakeClock::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            () = dispatcher.run(&bus, &mut writer) => panic!("dispatcher stopped"),
+            () = async {
+                while checkpoint(&readers, "ci").await != Some(second) {
+                    tokio::task::yield_now().await;
+                }
+            } => {},
+        }
+    })
+    .await
+    .expect("startup must replay without a wake-up");
+    assert_eq!(effects(&readers, "ci").await, [first, second]);
+    assert_eq!(checkpoint(&readers, "ci").await, Some(second));
+    sqlx::query("UPDATE handler_checkpoint SET last_event_id = ? WHERE handler = 'ci'")
+        .bind(first)
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    dispatcher.drain(&bus, &mut writer, &clock).await;
+    assert_eq!(effects(&readers, "ci").await, [first, second]);
+    assert_eq!(checkpoint(&readers, "ci").await, Some(second));
+    assert_eq!(bus.failure_count("ci"), 0);
+    assert!(clock.sleeps.borrow().is_empty());
+    readers.close().await;
+    writer.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn retry_backoff_is_capped() {
+    use crate::db::events::Dispatcher;
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    setup(&mut writer).await;
+    let bus = EventBus::default();
+    let id = append(&mut writer, 1).await;
+    let mut dispatcher = Dispatcher::default();
+    dispatcher.register(FailingHandler {
+        remaining: 12,
+        readers: readers.clone(),
+        previous: None,
+        check_mirror: false,
+    });
+    let clock = FakeClock::new();
+    dispatcher.drain(&bus, &mut writer, &clock).await;
+    let milliseconds: Vec<_> = clock
+        .sleeps
+        .borrow()
+        .iter()
+        .map(|duration| duration.as_millis())
+        .collect();
+    assert_eq!(
+        milliseconds,
+        [
+            100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 30000, 30000, 30000
+        ]
+    );
+    assert_eq!(effects(&readers, "ci").await, [id]);
+    assert_eq!(bus.failure_count("ci"), 12);
+    readers.close().await;
+    writer.close().await.unwrap();
+}

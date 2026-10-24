@@ -139,7 +139,13 @@ async fn main() -> ExitCode {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
-            return match serve().await {
+            let bus = db::events::EventBus::default();
+            // CI and mirror register here when their handlers are implemented.
+            let mut dispatcher = db::events::Dispatcher::default();
+            return match tokio::select! {
+                result = serve() => result,
+                () = dispatcher.run(&bus, &mut writer) => unreachable!("dispatcher runs until shutdown"),
+            } {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
                     log::error("fatal", &err.to_string());
