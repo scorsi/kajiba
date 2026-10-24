@@ -151,6 +151,84 @@ in
   # As in oroshi, discard the Linux toplevel context so Darwin never builds it.
   module-eval =
     assert assertionsPass { };
+    # Generated unit, identity and persisted paths (0012, 0015, 0022), full then default options.
+    assert
+      let
+        inherit ((evaluate false { }).config) systemd users services;
+        unit = systemd.services.kajiba-server.serviceConfig;
+      in
+      !(unit ? DynamicUser)
+      && unit.User == "kajiba"
+      && unit.Group == "kajiba"
+      && unit.StateDirectory == [ ]
+      &&
+        unit.ReadWritePaths == [
+          "/srv/kajiba"
+          "/srv/kajiba-dumps"
+        ]
+      && unit.RuntimeDirectory == "kajiba"
+      && unit.UMask == "0027"
+      && unit.ProtectSystem == "strict"
+      && unit.ProtectHome
+      && unit.PrivateTmp
+      && unit.NoNewPrivileges
+      && unit.CapabilityBoundingSet == ""
+      &&
+        unit.RestrictAddressFamilies == [
+          "AF_UNIX"
+          "AF_INET"
+          "AF_INET6"
+        ]
+      && lib.elem "@system-service" unit.SystemCallFilter
+      && unit.LogRateLimitIntervalSec == "30s"
+      && unit.LogRateLimitBurst == 30000
+      && lib.hasSuffix " http://127.0.0.1:8081/readyz" unit.ExecStartPost
+      && users.users.kajiba.isSystemUser
+      && users.users.kajiba.group == "kajiba"
+      && users.groups ? kajiba
+      && systemd.tmpfiles.settings."10-kajiba-server" ? "/srv/kajiba"
+      && systemd.tmpfiles.settings."10-kajiba-server"."/srv/kajiba-dumps".d.user == "kajiba"
+      &&
+        services.kajiba-server.persistedPaths == [
+          "/srv/kajiba/repos"
+          "/srv/kajiba/db"
+          "/srv/kajiba/ci"
+          "/srv/kajiba-dumps"
+        ];
+    assert
+      let
+        inherit ((evaluateWith false [ ]).config) systemd environment;
+        unit = systemd.services.kajiba-server.serviceConfig;
+      in
+      unit.StateDirectory == [
+        "kajiba"
+        "kajiba-dumps"
+      ]
+      && systemd.tmpfiles.settings."10-kajiba-server" == { }
+      && lib.hasSuffix " http://127.0.0.1:8080/readyz" unit.ExecStartPost
+      && systemd.services.kajiba-server.restartTriggers == [ environment.etc."kajiba/server.toml".source ]
+      && lib.elem inputs.self.packages.${linux}.kajiba-server environment.systemPackages;
+    assert lib.all
+      (
+        pair:
+        lib.hasSuffix " http://${pair.probe}/readyz"
+          (evaluate false {
+            services.kajiba-server.http.listen = lib.mkForce pair.listen;
+          }).config.systemd.services.kajiba-server.serviceConfig.ExecStartPost
+      )
+      [
+        {
+          listen = "0.0.0.0:8082";
+          probe = "127.0.0.1:8082";
+        }
+        {
+          listen = "[::]:8082";
+          probe = "[::1]:8082";
+        }
+      ];
+    assert
+      (evaluate false { services.kajiba-server.dump.dir = lib.mkForce "/var/lib/kajiba-dumps"; })
+      .config.systemd.services.kajiba-server.serviceConfig.StateDirectory == [ "kajiba-dumps" ];
     assert
       (evaluate false { }).config.systemd.services.kajiba-server.serviceConfig.ExecStart
       == "${lib.getExe inputs.self.packages.${linux}.kajiba-server} serve --config ${

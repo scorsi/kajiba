@@ -1,6 +1,6 @@
 # kajiba-server: typed options mirroring the server configuration one to one (0019), a TOML
 # file generated from them and checked at build time by `config check`, loopback metrics
-# (0022). Fixed identity, hardening and persisted paths land in J1 task 26 (0015).
+# (0022), fixed identity, hardened unit and persisted paths (0012, 0015, 0022).
 {
   config,
   lib,
@@ -77,6 +77,23 @@ let
       ${lib.getExe cfg.package} config check ${raw}
       cp ${raw} "$out"
     '';
+
+  # ExecStartPost probes /readyz on a connectable address, even for a wildcard listener.
+  listen = if cfg.http.listen == null then "127.0.0.1:8080" else cfg.http.listen;
+  probe =
+    if lib.hasPrefix "0.0.0.0:" listen then
+      "127.0.0.1:${lib.removePrefix "0.0.0.0:" listen}"
+    else if lib.hasPrefix "[::]:" listen then
+      "[::1]:${lib.removePrefix "[::]:" listen}"
+    else
+      listen;
+
+  # systemd creates and owns directories under /var/lib; any other path is a tmpfiles rule.
+  writable = [
+    cfg.stateDir
+    cfg.dump.dir
+  ];
+  inVarLib = lib.hasPrefix "/var/lib/";
 in
 {
   options.services.kajiba-server = {
@@ -164,6 +181,18 @@ in
       logRetention = optional types.str "14d" "CI log retention (0010).";
       artifactRetention = optional types.str "14d" "CI artifact retention (0010).";
     };
+    persistedPaths = mkOption {
+      type = types.listOf types.str;
+      readOnly = true;
+      default =
+        map (sub: "${cfg.stateDir}/${sub}") [
+          "repos"
+          "db"
+          "ci"
+        ]
+        ++ [ cfg.dump.dir ];
+      description = "Paths a host with an ephemeral root must persist (0012); `tmp/` and the lock are not.";
+    };
     dump = {
       dir = mkOption {
         type = types.strMatching "/.+";
@@ -188,17 +217,78 @@ in
     ];
     # Stable path for `kajiba-server config check --files /etc/kajiba/server.toml`.
     environment.etc."kajiba/server.toml".source = configFile;
+    # Root runs `kajiba-server admin enroll` over the local socket (0003, 0014).
+    environment.systemPackages = [ cfg.package ];
+    # Fixed identity: sshd and file ownership need it (0022), so no DynamicUser.
+    users.users.kajiba = {
+      isSystemUser = true;
+      group = "kajiba";
+    };
+    users.groups.kajiba = { };
+    systemd.tmpfiles.settings."10-kajiba-server" =
+      lib.genAttrs (lib.filter (dir: !inVarLib dir) writable)
+        (_: {
+          d = {
+            user = "kajiba";
+            group = "kajiba";
+            mode = "0750";
+          };
+        });
     systemd.services.kajiba-server = {
       description = "kajiba forge server";
       wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" ];
+      restartTriggers = [ configFile ];
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} serve --config ${configFile}";
-        DynamicUser = true;
-        User = "kajiba";
-        RuntimeDirectory = "kajiba";
-        StateDirectory = "kajiba";
-        UMask = "0027";
+        # The unit is active only once /readyz answers 200 (0022); TimeoutStartSec bounds it.
+        ExecStartPost = "${lib.getExe pkgs.curl} --silent --fail --output /dev/null --max-time 5 --retry 600 --retry-delay 1 --retry-all-errors http://${probe}/readyz";
         Restart = "on-failure";
+        User = "kajiba";
+        Group = "kajiba";
+        StateDirectory = map (lib.removePrefix "/var/lib/") (lib.filter inVarLib writable);
+        StateDirectoryMode = "0750";
+        # /run/kajiba holds the local socket (0003).
+        RuntimeDirectory = "kajiba";
+        RuntimeDirectoryMode = "0750";
+        ReadWritePaths = writable;
+        UMask = "0027";
+
+        # Hardening (0022). Git is spawned later: no MemoryDenyWriteExecute (PCRE JIT), and no
+        # PrivateUsers, which would hide root's UID from the local socket's peer check.
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+        NoNewPrivileges = true;
+        CapabilityBoundingSet = "";
+        AmbientCapabilities = "";
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_INET"
+          "AF_INET6"
+        ];
+        RestrictNamespaces = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+        ProtectClock = true;
+        ProtectControlGroups = true;
+        ProtectHostname = true;
+        ProtectKernelLogs = true;
+        ProtectKernelModules = true;
+        ProtectKernelTunables = true;
+        ProtectProc = "invisible";
+        RemoveIPC = true;
+        SystemCallArchitectures = "native";
+        SystemCallFilter = [
+          "@system-service"
+          "~@privileged"
+        ];
+
+        # Per-request logging (nisshi 0009).
+        LogRateLimitIntervalSec = lib.mkDefault "30s";
+        LogRateLimitBurst = lib.mkDefault 30000;
       };
     };
   };
