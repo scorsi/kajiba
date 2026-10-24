@@ -1,10 +1,10 @@
-use axum::{Router, routing::get};
 use clap::{Parser, Subcommand};
 use kajiba_core::{config::ServerConfig, log};
 use std::{path::PathBuf, process::ExitCode};
 
 mod db;
 mod state;
+mod transport;
 
 // Exit codes: 0 success (including help/version), 1 runtime error, 2 usage error
 // (clap), 3 command not implemented yet.
@@ -117,7 +117,8 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let (mut writer, _readers) =
+            let health = transport::Health::new(config.state_dir.clone());
+            let (mut writer, readers) =
                 match db::open(&config.state_dir.join("db/kajiba.sqlite")).await {
                     Ok(database) => database,
                     Err(err) => {
@@ -142,8 +143,9 @@ async fn main() -> ExitCode {
             let bus = db::events::EventBus::default();
             // CI and mirror register here when their handlers are implemented.
             let mut dispatcher = db::events::Dispatcher::default();
+            health.started(readers);
             return match tokio::select! {
-                result = serve() => result,
+                result = transport::serve(&config.http, health) => result,
                 () = dispatcher.run(&bus, &mut writer) => unreachable!("dispatcher runs until shutdown"),
             } {
                 Ok(()) => ExitCode::SUCCESS,
@@ -189,12 +191,6 @@ fn load_config(path: &std::path::Path, files: bool) -> Result<ServerConfig, Stri
         config.check_files()?;
     }
     Ok(config)
-}
-
-async fn serve() -> std::io::Result<()> {
-    let app = Router::new().route("/healthz", get(|| async { "OK" }));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
-    axum::serve(listener, app).await
 }
 
 #[cfg(test)]

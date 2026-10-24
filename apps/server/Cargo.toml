@@ -9,13 +9,16 @@ name = "kajiba-server"
 path = "src/main.rs"
 
 [dependencies]
-axum.workspace = true
+axum = { workspace = true, features = ["http2"] }
 clap.workspace = true
 kajiba-core = { path = "../../crates/kajiba-core" }
 kajiba-proto = { path = "../../crates/kajiba-proto" }
 sqlx.workspace = true
 tokio.workspace = true
+tonic.workspace = true
+tonic-reflection.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+prost.workspace = true
 serde_json.workspace = true

@@ -22,6 +22,7 @@ toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 tonic = "0.12"
 tonic-build = "0.12"
+tonic-reflection = { version = "0.12", default-features = false, features = ["server"] }
 
 [profile.dev]
 # mold/lld in the devShell do the heavy lifting; LTO stays off for fast iteration (0002).
