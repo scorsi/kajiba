@@ -195,8 +195,17 @@ fn serve_emits_start_with_version() {
     use std::io::BufRead;
     use std::process::Stdio;
 
-    let path = std::env::temp_dir().join(format!("kajiba-log-start-{}.toml", std::process::id()));
-    std::fs::write(&path, "[http]\npublic_url='https://example.org'").unwrap();
+    let dir = std::env::temp_dir().join(format!("kajiba-log-start-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("server.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "state_dir={:?}\n[http]\npublic_url='https://example.org'",
+            dir.join("state").to_str().unwrap()
+        ),
+    )
+    .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_kajiba-server"))
         .args(["serve", "--config", path.to_str().unwrap()])
         .env_remove("RUST_LOG")
@@ -216,10 +225,45 @@ fn serve_emits_start_with_version() {
     let line = receive.recv_timeout(std::time::Duration::from_secs(5));
     let _ = child.kill();
     child.wait().unwrap();
-    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
     reader.join().unwrap();
     let line: serde_json::Value = serde_json::from_str(&line.unwrap()).unwrap();
     assert_eq!(line["event"], "start");
     assert_eq!(line["level"], "info");
     assert_eq!(line["version"], include_str!("../../../VERSION").trim());
+}
+
+#[test]
+fn serve_refuses_held_state_lock_with_fatal_error() {
+    let dir = std::env::temp_dir().join(format!("kajiba-lock-refusal-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("server.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "state_dir={:?}\n[http]\npublic_url='https://example.org'",
+            dir.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let lock_path = dir.join("kajiba.lock");
+    let lock = std::fs::File::create(&lock_path).unwrap();
+    lock.try_lock().unwrap();
+    let output = run(&["serve", "--config", path.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let lines: Vec<serde_json::Value> = std::str::from_utf8(&output.stderr)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[1]["event"], "fatal");
+    assert_eq!(lines[1]["level"], "error");
+    assert_eq!(
+        lines[1]["err"],
+        format!("another instance holds {}", lock_path.display())
+    );
+    assert!(!dir.join("repos").exists());
+    drop(lock);
+    std::fs::remove_dir_all(dir).unwrap();
 }

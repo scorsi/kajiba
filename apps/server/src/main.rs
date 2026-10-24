@@ -3,6 +3,8 @@ use clap::{Parser, Subcommand};
 use kajiba_core::{config::ServerConfig, log};
 use std::{path::PathBuf, process::ExitCode};
 
+mod state;
+
 // Exit codes: 0 success (including help/version), 1 runtime error, 2 usage error
 // (clap), 3 command not implemented yet.
 const NOT_IMPLEMENTED: u8 = 3;
@@ -107,6 +109,13 @@ async fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             tracing::info!(event = "start", version = env!("CARGO_PKG_VERSION"));
+            let _state_lock = match state::prepare(&config.state_dir) {
+                Ok(lock) => lock,
+                Err(err) => {
+                    log::error("fatal", &err);
+                    return ExitCode::FAILURE;
+                }
+            };
             return match serve().await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {

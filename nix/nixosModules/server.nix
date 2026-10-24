@@ -27,6 +27,8 @@ in
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} serve --config ${configFile}";
         DynamicUser = true;
+        StateDirectory = "kajiba";
+        UMask = "0027";
         Restart = "on-failure";
       };
     };
