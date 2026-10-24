@@ -63,6 +63,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
+    mod ci;
     mod events;
     mod identity;
     mod repositories;
@@ -103,7 +104,13 @@ mod tests {
         .fetch_all(&mut writer)
         .await
         .unwrap();
-        assert_eq!(history.len(), 4);
+        assert_eq!(history.len(), 5);
+        assert_eq!(history[4].0, 5);
+        assert!(history[4].2);
+        assert_eq!(
+            history[4].3,
+            MIGRATOR.iter().nth(4).unwrap().checksum.as_ref()
+        );
         assert_eq!(history[3].0, 4);
         assert!(history[3].2);
         assert_eq!(
@@ -149,16 +156,23 @@ mod tests {
             [
                 "_sqlx_migrations",
                 "api_token",
+                "artifact",
                 "enrollment_token",
                 "event",
                 "handler_checkpoint",
+                "job",
+                "job_attempt",
+                "log_chunk",
                 "mirror",
                 "pending_push",
                 "repo",
                 "repo_permission",
                 "repo_redirect",
+                "run",
+                "runner",
                 "session",
                 "ssh_key",
+                "step",
                 "user",
                 "webauthn_credential"
             ]
@@ -260,7 +274,7 @@ mod tests {
                 .fetch_all(&mut writer)
                 .await
                 .unwrap();
-        assert_eq!(versions, [1, 2, 3, 4]);
+        assert_eq!(versions, [1, 2, 3, 4, 5]);
         readers.close().await;
         writer.close().await.unwrap();
     }
