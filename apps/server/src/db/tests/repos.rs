@@ -13,15 +13,15 @@ fn config(repos: &str) -> ServerConfig {
     .unwrap()
 }
 
-struct State {
-    dir: TempDir,
+pub(super) struct State {
+    pub(super) dir: TempDir,
     _lock: crate::state::StateLock,
-    writer: SqliteConnection,
+    pub(super) writer: SqliteConnection,
     readers: sqlx::SqlitePool,
 }
 
 impl State {
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let dir = TempDir::new();
         let lock = crate::state::prepare(&dir.0).unwrap();
         let (writer, readers) = open(&dir.0.join("db/kajiba.sqlite")).await.unwrap();
@@ -33,13 +33,13 @@ impl State {
         }
     }
 
-    async fn apply(&mut self, repos: &str) -> Result<(), String> {
+    pub(super) async fn apply(&mut self, repos: &str) -> Result<(), String> {
         let config = config(repos);
         reconcile(&mut self.writer, &config.users).await.unwrap();
         reconcile_repos(&mut self.writer, &self.dir.0, &Gix, &config.repos).await
     }
 
-    async fn repo(&mut self, key: &str) -> (String, String, Option<i64>) {
+    pub(super) async fn repo(&mut self, key: &str) -> (String, String, Option<i64>) {
         sqlx::query_as(
             "SELECT repo.public_id, user.name || '/' || repo.name, archived_at FROM repo
              JOIN user ON user.id = owner_id WHERE config_key = ?",
@@ -50,14 +50,14 @@ impl State {
         .unwrap()
     }
 
-    async fn strings(&mut self, sql: &str) -> Vec<String> {
+    pub(super) async fn strings(&mut self, sql: &str) -> Vec<String> {
         sqlx::query_scalar(sql)
             .fetch_all(&mut self.writer)
             .await
             .unwrap()
     }
 
-    fn path(&self, public_id: &str) -> std::path::PathBuf {
+    pub(super) fn path(&self, public_id: &str) -> std::path::PathBuf {
         self.dir.0.join(format!("repos/{public_id}.git"))
     }
 
@@ -70,13 +70,13 @@ impl State {
         names
     }
 
-    async fn close(self) {
+    pub(super) async fn close(self) {
         self.readers.close().await;
         self.writer.close().await.unwrap();
     }
 }
 
-fn git(repo: &std::path::Path, args: &[&str], stdin: &str) -> String {
+pub(super) fn git(repo: &std::path::Path, args: &[&str], stdin: &str) -> String {
     use std::io::Write;
     let mut child = std::process::Command::new("git")
         .arg("--git-dir")

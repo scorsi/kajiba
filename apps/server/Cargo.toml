@@ -17,6 +17,7 @@ prost.workspace = true
 kajiba-core = { path = "../../crates/kajiba-core" }
 kajiba-git = { path = "../../crates/kajiba-git" }
 kajiba-proto = { path = "../../crates/kajiba-proto" }
+serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tonic.workspace = true
@@ -24,5 +25,3 @@ tonic-types.workspace = true
 tonic-reflection.workspace = true
 tracing.workspace = true
 
-[dev-dependencies]
-serde_json.workspace = true

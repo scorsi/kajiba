@@ -146,9 +146,17 @@ async fn main() -> ExitCode {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
+            let bus = std::sync::Arc::new(db::events::EventBus::default());
+            let gate = std::sync::Arc::new(db::pushes::Gate::default());
+            if let Err(err) = gate
+                .reconcile(&mut writer, &bus, &config.state_dir, &kajiba_git::Gix)
+                .await
+            {
+                log::error("fatal", &err);
+                return ExitCode::FAILURE;
+            }
             // Request handlers that write (enrollment, push hooks) take a clone of this handle.
             let writer = db::Writer::new(writer.into());
-            let bus = std::sync::Arc::new(db::events::EventBus::default());
             // CI and mirror register here when their handlers are implemented.
             let mut dispatcher = db::events::Dispatcher::default();
             let admin = transport::local::Admin {
@@ -160,6 +168,7 @@ async fn main() -> ExitCode {
             return match tokio::select! {
                 result = transport::serve(&config.http, &config.metrics, health, readers, bus.clone(), admin) => result,
                 () = dispatcher.run(&bus, &writer) => unreachable!("dispatcher runs until shutdown"),
+                () = gate.recover_periodically(&writer, &bus, &config.state_dir, &kajiba_git::Gix) => unreachable!("recovery runs until shutdown"),
             } {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
