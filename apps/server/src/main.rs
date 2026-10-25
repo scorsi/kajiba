@@ -5,6 +5,9 @@ use std::{path::PathBuf, process::ExitCode};
 mod db;
 mod import;
 mod metrics;
+// serve-ssh joins it in J3 task 14.
+#[cfg_attr(not(test), allow(dead_code))]
+mod ssh;
 mod state;
 mod transport;
 
