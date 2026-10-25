@@ -105,9 +105,15 @@ let
       cp ${raw} "$out"
     '';
 
-  # shortcut: no receive-pack yet, install the hook wrappers in J3 task 24.
   hooksPath = pkgs.runCommand "kajiba-hooks" { } ''
     mkdir "$out"
+    for hook in pre-receive post-receive; do
+      cat > "$out/$hook" <<HOOK
+    #!${pkgs.runtimeShell}
+    exec ${lib.getExe gitCfg.package} hook $hook
+    HOOK
+      chmod +x "$out/$hook"
+    done
   '';
   gitConfigFile =
     let

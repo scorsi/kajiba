@@ -30,13 +30,18 @@ async fn hook_process() {
     let Some(socket) = std::env::var_os("KAJIBA_TEST_HOOK_SOCKET") else {
         return;
     };
-    let code = crate::hook::run(
-        Path::new(&socket),
-        crate::hook::Kind::PreReceive,
-        std::io::stdin(),
-        &|name| std::env::var(name).ok(),
-    )
+    let kind = match std::env::var("KAJIBA_TEST_HOOK").unwrap().as_str() {
+        "pre-receive" => crate::hook::Kind::PreReceive,
+        "post-receive" => crate::hook::Kind::PostReceive,
+        _ => panic!("unexpected hook"),
+    };
+    let code = crate::hook::run(Path::new(&socket), kind, std::io::stdin(), &|name| {
+        std::env::var(name).ok()
+    })
     .await;
+    if kind == crate::hook::Kind::PostReceive && code == std::process::ExitCode::SUCCESS {
+        eprintln!("post-receive acknowledged");
+    }
     std::process::exit(if code == std::process::ExitCode::SUCCESS {
         0
     } else {
@@ -49,7 +54,7 @@ async fn receive_pack_checks_then_forwards_once_and_never_changes_refs_on_refusa
     let temp = TempDir::new();
     let _lock = crate::state::prepare(&temp.0).unwrap();
     let generation = kajiba_core::new_id().unwrap();
-    let id = kajiba_core::new_id().unwrap();
+    let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned();
     let repositories = Arc::new(crate::repositories::Repositories::new(temp.0.clone()));
     repositories.create(&id, "main").unwrap();
     let target = temp.0.join(format!("repos/{id}.git"));
@@ -151,17 +156,20 @@ async fn receive_pack_checks_then_forwards_once_and_never_changes_refs_on_refusa
     ));
     let hooks = temp.0.join("hooks");
     std::fs::create_dir(&hooks).unwrap();
-    let hook = hooks.join("pre-receive");
     let executable = std::env::current_exe().unwrap();
-    std::fs::write(
-        &hook,
-        format!(
-            "#!/bin/sh\nexec '{}' --exact service::tests::admission::hook_process --nocapture\n",
-            executable.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for name in ["pre-receive", "post-receive"] {
+        assert!(!target.join("hooks").join(name).exists());
+        let hook = hooks.join(name);
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nexport KAJIBA_TEST_HOOK={name}\nexec '{}' --exact service::tests::admission::hook_process --nocapture\n",
+                executable.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let push = |specs: &[String]| {
         let mut command = tokio::process::Command::new("git");
         command
@@ -261,6 +269,10 @@ async fn receive_pack_checks_then_forwards_once_and_never_changes_refs_on_refusa
     };
     let output = push(&[good, "refs/tags/v1".into()]).await;
     assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("post-receive acknowledged"),
+        "{output:?}"
+    );
     assert_eq!(admissions.lock().unwrap().len(), 3);
     assert_eq!(git(&target, &["rev-parse", "refs/heads/main"]), signed);
     assert_eq!(git(&target, &["rev-parse", "refs/tags/v1"]), tag);
@@ -288,6 +300,10 @@ async fn receive_pack_checks_then_forwards_once_and_never_changes_refs_on_refusa
     ];
     let output = push(&specs).await;
     assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("post-receive acknowledged"),
+        "{output:?}"
+    );
     {
         let calls = admissions.lock().unwrap();
         assert_eq!(calls.len(), 4);
@@ -323,4 +339,5 @@ async fn receive_pack_checks_then_forwards_once_and_never_changes_refs_on_refusa
         "{output:?}"
     );
     assert_eq!(git(&target, &["for-each-ref"]), before);
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("post-receive acknowledged"));
 }

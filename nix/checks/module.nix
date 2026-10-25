@@ -554,6 +554,13 @@ in
       grep -E '^hooks_path = "/nix/store/[^"]+-kajiba-hooks"$' ${
         (evaluateWith true [ ]).config.environment.etc."kajiba/git.toml".source
       }
+      hooks=$(sed -n 's/^hooks_path = "\(.*\)"$/\1/p' ${
+        (evaluateWith true [ ]).config.environment.etc."kajiba/git.toml".source
+      })
+      for hook in pre-receive post-receive; do
+        test -x "$hooks/$hook"
+        grep -Fx "exec ${lib.getExe kajibaGitPackage} hook $hook" "$hooks/$hook"
+      done
       # Defaults stay in the code (0019): only the required public URL is written.
       [ "$(grep -c = ${configFileOf (evaluateWith true [ ])})" = 1 ]
       echo ${
