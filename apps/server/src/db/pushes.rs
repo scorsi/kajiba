@@ -62,6 +62,10 @@ impl Gate {
         self.generation.lock().unwrap().clone()
     }
 
+    pub fn session(&self, id: &str) -> Option<(i64, kajiba_proto::git::v1::Session)> {
+        self.sessions.lock().unwrap().get(id).cloned()
+    }
+
     /// Called under the database writer lock, also held by admission and exit.
     pub async fn rebuild(
         &self,

@@ -15,6 +15,8 @@ use tonic::{Request, Response, Status, service::Routes};
 
 pub const SOCKET_PATH: &str = "/run/kajiba/git.sock";
 
+mod policy;
+
 pub struct Gate {
     pub writer: Writer,
     pub generation: Mutex<Option<String>>,
@@ -67,9 +69,20 @@ impl GateService for Gate {
 
     async fn pre_receive(
         &self,
-        _: Request<PreReceiveRequest>,
+        request: Request<PreReceiveRequest>,
     ) -> Result<Response<PreReceiveResponse>, Status> {
-        Ok(Response::new(pre_receive()))
+        let mut refusals = self.refusals(&request.into_inner()).await?;
+        if refusals.is_empty() {
+            // Fail closed until signatures and durable admission are wired (task 21).
+            refusals.push(Refusal {
+                ref_name: String::new(),
+                reason: "pushes are not accepted yet".into(),
+            });
+        }
+        Ok(Response::new(PreReceiveResponse {
+            allowed: false,
+            refusals,
+        }))
     }
 
     async fn post_receive(
@@ -344,17 +357,6 @@ pub(super) async fn auth_key(
         user_public_id,
         public_key,
     })
-}
-
-pub(super) fn pre_receive() -> PreReceiveResponse {
-    // Fail closed until ref policy, signatures and durable admission are wired (task 21).
-    PreReceiveResponse {
-        allowed: false,
-        refusals: vec![Refusal {
-            ref_name: String::new(),
-            reason: "pushes are not accepted yet".into(),
-        }],
-    }
 }
 
 pub(super) fn bind(
