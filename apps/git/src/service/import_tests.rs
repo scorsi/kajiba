@@ -194,6 +194,11 @@ async fn imports_paths_bundles_and_urls_preserving_refs_tags_and_head() {
         );
         let request = request(&git, &from, refs);
         git.fetch(Request::new(request.clone())).await.unwrap();
+        assert!(
+            git.repositories
+                .metrics()
+                .contains("kajiba_git_sessions_total{kind=\"import\",result=\"ok\"} 1\n")
+        );
         let target = dir.0.join(format!("repos/{ID}.git"));
         assert_eq!(Gix.refs(&target).unwrap(), expected);
         assert_eq!(
@@ -417,6 +422,9 @@ async fn a_cancelled_fetch_rpc_keeps_the_child_accounted_until_wait_finishes() {
     assert!(fetch.await.unwrap_err().is_cancelled());
     assert_eq!(git.repositories.sessions(), std::slice::from_ref(&session));
     assert!(git.repositories.exits().is_empty());
+    let metrics = git.repositories.metrics();
+    assert!(metrics.contains("kajiba_git_sessions_active{kind=\"import\"} 1\n"));
+    assert!(metrics.contains("kajiba_git_sessions_total{kind=\"import\",result=\"error\"} 0\n"));
     drop(stream);
     tokio::time::timeout(Duration::from_secs(5), async {
         while git.repositories.exits().is_empty() {
@@ -427,6 +435,9 @@ async fn a_cancelled_fetch_rpc_keeps_the_child_accounted_until_wait_finishes() {
     .unwrap();
     assert!(git.repositories.sessions().is_empty());
     assert_eq!(git.repositories.exits(), [(session, 1)]);
+    let metrics = git.repositories.metrics();
+    assert!(metrics.contains("kajiba_git_sessions_active{kind=\"import\"} 0\n"));
+    assert!(metrics.contains("kajiba_git_sessions_total{kind=\"import\",result=\"error\"} 1\n"));
 }
 
 // Run in a delegated cgroup v2 on Linux; ordinary Cargo sandboxes cannot create cgroups.

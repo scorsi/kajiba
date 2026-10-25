@@ -116,6 +116,7 @@ let
           state_dir = if gitCfg.stateDir == "/var/lib/kajiba-git" then null else gitCfg.stateDir;
           hooks_path = toString hooksPath;
           log = { inherit (gitCfg.log) level; };
+          metrics = { inherit (gitCfg.metrics) listen; };
         }
       );
     in
@@ -378,20 +379,25 @@ in
       description = "Git-side state directory: repositories, staging and quarantine (0052).";
     };
     log.level = optional types.str "info" "tracing filter, overridden by RUST_LOG (0022).";
+    metrics.listen = optional types.str "no listener" "Loopback socket address of /metrics (0054).";
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = [
-      {
-        # Same addresses Rust's is_loopback accepts: 127.0.0.0/8 and ::1.
-        assertion =
-          cfg.metrics.listen == null
-          ||
-            builtins.match "(127\\.[0-9]+\\.[0-9]+\\.[0-9]+|\\[(0*:)*:?(0*:)*0*1]):[0-9]+" cfg.metrics.listen
-            != null;
-        message = "services.kajiba-server.metrics.listen must be a loopback socket address (0022).";
-      }
-    ];
+    assertions =
+      map
+        (service: {
+          # Same addresses Rust's is_loopback accepts: 127.0.0.0/8 and ::1.
+          assertion =
+            config.services.${service}.metrics.listen == null
+            ||
+              builtins.match "(127\\.[0-9]+\\.[0-9]+\\.[0-9]+|\\[(0*:)*:?(0*:)*0*1]):[0-9]+"
+                config.services.${service}.metrics.listen != null;
+          message = "services.${service}.metrics.listen must be a loopback socket address (0022, 0054).";
+        })
+        [
+          "kajiba-server"
+          "kajiba-git"
+        ];
     # Stable path for `kajiba-server config check --files /etc/kajiba/server.toml`.
     environment.etc."kajiba/server.toml".source = configFile;
     # Root runs `kajiba-server admin enroll` over the local socket (0003, 0014).
@@ -495,6 +501,9 @@ in
         InaccessiblePaths = [ "-${cfg.stateDir}" ];
         UMask = "0027";
         SocketBindDeny = "any";
+        SocketBindAllow = lib.optional (gitCfg.metrics.listen != null) (
+          "tcp:${lib.last (lib.splitString ":" gitCfg.metrics.listen)}"
+        );
       };
     };
   };

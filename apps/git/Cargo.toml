@@ -9,6 +9,7 @@ name = "kajiba-git"
 path = "src/main.rs"
 
 [dependencies]
+axum.workspace = true
 clap.workspace = true
 kajiba-proto = { path = "../../crates/kajiba-proto" }
 kajiba-core = { path = "../../crates/kajiba-core" }

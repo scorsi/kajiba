@@ -2000,6 +2000,7 @@ version = "0.1.0"
 name = "kajiba-git"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "clap",
  "kajiba-core",
  "kajiba-gitstore",

@@ -54,6 +54,7 @@ let
     services.kajiba-git = {
       stateDir = "/srv/kajiba-git";
       log.level = "debug";
+      metrics.listen = "127.0.0.1:9433";
     };
     services.kajiba-server = {
       stateDir = "/srv/kajiba-server";
@@ -368,7 +369,7 @@ in
         && unit.InaccessiblePaths == [ "-${services.kajiba-server.stateDir}" ]
         && unit.UMask == "0027"
         && unit.SocketBindDeny == "any"
-        && (unit.SocketBindAllow or [ ]) == [ ]
+        && unit.SocketBindAllow == lib.optional (services.kajiba-git.metrics.listen != null) "tcp:9433"
         && !(unit ? ExecStartPost)
         &&
           unit.ExecStart == "${lib.getExe services.kajiba-git.package} serve --config ${
@@ -433,6 +434,10 @@ in
         (evaluate false { })
         (evaluateWith false [ ])
       ];
+    assert (evaluateWith false [ ]).config.services.kajiba-git.metrics.listen == null;
+    assert
+      (evaluate false { services.kajiba-git.metrics.listen = lib.mkForce "[::1]:19433"; })
+      .config.systemd.services.kajiba-git.serviceConfig.SocketBindAllow == [ "tcp:19433" ];
     assert
       let
         settings = (evaluate false { }).config.systemd.tmpfiles.settings;
@@ -489,6 +494,20 @@ in
         "127.0.0.2:9431"
         "[::1]:9431"
       ];
+    assert lib.all
+      (address: !(assertionsPass { services.kajiba-git.metrics.listen = lib.mkForce address; }))
+      [
+        "0.0.0.0:9433"
+        "192.0.2.1:9433"
+        "[::]:9433"
+        "[2001:db8::1]:9433"
+      ];
+    assert lib.all
+      (address: assertionsPass { services.kajiba-git.metrics.listen = lib.mkForce address; })
+      [
+        "127.0.0.2:9433"
+        "[::1]:9433"
+      ];
     assert evaluationFails { services.kajiba-server.unexpected = true; };
     assert evaluationFails { services.kajiba-server.runners.build-1.token = "inline-secret"; };
     assert evaluationFails { services.kajiba-server.repos.demo.unexpected = true; };
@@ -527,6 +546,9 @@ in
         (evaluate true { }).config.environment.etc."kajiba/git.toml".source
       }
       grep -Fx 'level = "debug"' ${(evaluate true { }).config.environment.etc."kajiba/git.toml".source}
+      grep -Fx 'listen = "127.0.0.1:9433"' ${
+        (evaluate true { }).config.environment.etc."kajiba/git.toml".source
+      }
       # The git-side default file only needs the store hook directory.
       [ "$(grep -c = ${(evaluateWith true [ ]).config.environment.etc."kajiba/git.toml".source})" = 1 ]
       grep -E '^hooks_path = "/nix/store/[^"]+-kajiba-hooks"$' ${

@@ -5,7 +5,10 @@ use tokio::net::{UnixDatagram, UnixStream};
 
 #[tokio::test]
 async fn readiness_arrives_only_after_listening_and_shutdown_removes_socket() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let temp = TempDir::new();
+    let metrics = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = metrics.local_addr().unwrap();
     let notify_path = temp.0.join("notify");
     let notify = UnixDatagram::bind(&notify_path).unwrap();
     let socket = temp.0.join("local.sock");
@@ -23,6 +26,16 @@ async fn readiness_arrives_only_after_listening_and_shutdown_removes_socket() {
         assert_eq!(fs::metadata(&socket).unwrap().mode() & 0o777, 0o660);
         let stream = UnixStream::connect(&socket).await.unwrap();
         drop(stream);
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("kajiba_git_sessions_active{kind=\"import\"} 0\n"));
+        assert!(tokio::net::TcpListener::bind(addr).await.is_err());
     };
     tokio::time::timeout(
         Duration::from_secs(3),
@@ -32,6 +45,7 @@ async fn readiness_arrives_only_after_listening_and_shutdown_removes_socket() {
             &socket,
             vec![kajiba_core::local::effective_uid()],
             Some(notify_path.as_os_str()),
+            async { Ok(Some(metrics)) },
             stopped,
         ),
     )
@@ -40,6 +54,33 @@ async fn readiness_arrives_only_after_listening_and_shutdown_removes_socket() {
     .unwrap();
     assert!(!socket.exists());
     let _lock = crate::state::prepare(&state).unwrap();
+}
+
+#[tokio::test]
+async fn failed_metrics_bind_never_notifies_ready() {
+    let temp = TempDir::new();
+    let notify_path = temp.0.join("notify");
+    let notify = std::os::unix::net::UnixDatagram::bind(&notify_path).unwrap();
+    notify.set_nonblocking(true).unwrap();
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let socket = temp.0.join("local.sock");
+    let err = run(
+        &temp.0.join("state"),
+        &temp.0.join("git.sock"),
+        &socket,
+        vec![kajiba_core::local::effective_uid()],
+        Some(notify_path.as_os_str()),
+        crate::metrics::bind(Some(occupied.local_addr().unwrap())),
+        std::future::pending(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("metrics.listen"), "{err}");
+    assert!(!socket.exists());
+    assert_eq!(
+        notify.recv(&mut [0; 64]).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
 }
 
 #[tokio::test]
@@ -60,6 +101,7 @@ async fn failed_startup_never_notifies_ready() {
             &socket,
             peers.clone(),
             Some(notify_path.as_os_str()),
+            crate::metrics::bind(None),
             std::future::pending()
         )
         .await
@@ -74,6 +116,7 @@ async fn failed_startup_never_notifies_ready() {
             &socket,
             peers.clone(),
             Some(notify_path.as_os_str()),
+            crate::metrics::bind(None),
             std::future::pending()
         )
         .await
@@ -89,6 +132,7 @@ async fn failed_startup_never_notifies_ready() {
             &socket,
             peers,
             Some(notify_path.as_os_str()),
+            crate::metrics::bind(None),
             std::future::pending()
         )
         .await
@@ -117,6 +161,7 @@ async fn notification_failure_cleans_up_and_missing_notify_socket_is_optional() 
             &socket,
             peers.clone(),
             Some(missing.as_os_str()),
+            crate::metrics::bind(None),
             std::future::pending()
         )
         .await
@@ -130,6 +175,7 @@ async fn notification_failure_cleans_up_and_missing_notify_socket_is_optional() 
         &socket,
         peers,
         None,
+        crate::metrics::bind(None),
         std::future::ready(()),
     )
     .await
@@ -166,6 +212,7 @@ async fn daemon_emits_shared_json_logs_on_stderr() {
             &temp.0.join("local.sock"),
             vec![kajiba_core::local::effective_uid()],
             None,
+            crate::metrics::bind(None),
             std::future::ready(()),
         )
         .await
@@ -215,6 +262,7 @@ async fn repository_rpcs_run_in_the_real_daemon() {
                 &socket,
                 vec![kajiba_core::local::effective_uid()],
                 None,
+                crate::metrics::bind(None),
                 async {
                     let _ = stopped.await;
                 },

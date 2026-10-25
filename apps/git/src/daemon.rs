@@ -24,6 +24,7 @@ pub async fn serve(config: GitConfig) -> Result<(), String> {
         Path::new(SOCKET_PATH),
         peers,
         notify.as_deref(),
+        crate::metrics::bind(config.metrics.listen),
         async move {
             tokio::select! {
                 _ = terminate.recv() => {},
@@ -41,12 +42,19 @@ async fn run(
     socket: &Path,
     peers: Vec<u32>,
     notify: Option<&OsStr>,
+    metrics: impl std::future::Future<Output = io::Result<Option<tokio::net::TcpListener>>>,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), String> {
     let _lock = crate::state::prepare(state_dir)?;
     let local = Local::bind(socket, Default::default(), 0o660, peers)
         .map_err(|err| format!("{}: {err}", socket.display()))?;
     let generation = kajiba_core::new_id().map_err(|err| err.to_string())?;
+    let metrics = metrics
+        .await
+        .map_err(|err| format!("metrics.listen: {err}"))?;
+    if let Some(listener) = &metrics {
+        tracing::info!(event = "metrics-listening", addr = %listener.local_addr().map_err(|err| err.to_string())?);
+    }
     notify_ready(notify).map_err(|err| format!("notify readiness: {err}"))?;
     tracing::info!(event = "ready");
     let repositories =
@@ -58,8 +66,34 @@ async fn run(
             server_socket: server_socket.into(),
         }),
     );
+    let (stop, mut stopped) = tokio::sync::watch::channel(false);
+    let mut metrics_stopped = stopped.clone();
+    let app = crate::metrics::router(repositories.clone());
+    let servers = async move {
+        tokio::try_join!(
+            local.serve(routes, async move {
+                let _ = stopped.changed().await;
+            }),
+            async move {
+                if let Some(listener) = metrics {
+                    axum::serve(listener, app)
+                        .with_graceful_shutdown(async move {
+                            let _ = metrics_stopped.changed().await;
+                        })
+                        .await?;
+                }
+                Ok(())
+            }
+        )?;
+        Ok::<_, io::Error>(())
+    };
+    tokio::pin!(servers);
     tokio::select! {
-        result = local.serve(routes, shutdown) => result.map_err(|err| err.to_string()),
+        result = &mut servers => result.map_err(|err| err.to_string()),
+        () = shutdown => {
+            stop.send_replace(true);
+            servers.await.map_err(|err| err.to_string())
+        },
         () = crate::service::connect_server(server_socket, &generation, &repositories) => unreachable!("connection loop runs until shutdown"),
     }
 }

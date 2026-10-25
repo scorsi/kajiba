@@ -21,6 +21,7 @@
             ../crates/kajiba-core/tests/fixtures
             (craneLib.fileset.commonCargoSources ../apps/server)
             (craneLib.fileset.commonCargoSources ../apps/git)
+            ../apps/git/tests/fixtures
             ../apps/server/migrations
             ../apps/server/tests/fixtures
             (craneLib.fileset.commonCargoSources ../apps/runner)

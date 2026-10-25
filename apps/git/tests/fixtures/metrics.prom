@@ -1,0 +1,19 @@
+# HELP kajiba_git_build_info Running build version.
+# TYPE kajiba_git_build_info gauge
+kajiba_git_build_info{version="test"} 1
+# HELP kajiba_git_sessions_active Active sessions.
+# TYPE kajiba_git_sessions_active gauge
+kajiba_git_sessions_active{kind="receive_pack"} 1
+kajiba_git_sessions_active{kind="upload_pack"} 2
+kajiba_git_sessions_active{kind="import"} 3
+kajiba_git_sessions_active{kind="maintenance"} 4
+# HELP kajiba_git_sessions_total Completed sessions.
+# TYPE kajiba_git_sessions_total counter
+kajiba_git_sessions_total{kind="receive_pack",result="ok"} 1
+kajiba_git_sessions_total{kind="receive_pack",result="error"} 2
+kajiba_git_sessions_total{kind="upload_pack",result="ok"} 3
+kajiba_git_sessions_total{kind="upload_pack",result="error"} 4
+kajiba_git_sessions_total{kind="import",result="ok"} 5
+kajiba_git_sessions_total{kind="import",result="error"} 6
+kajiba_git_sessions_total{kind="maintenance",result="ok"} 7
+kajiba_git_sessions_total{kind="maintenance",result="error"} 8

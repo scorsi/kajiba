@@ -4,6 +4,26 @@ use std::os::unix::fs::{MetadataExt, symlink};
 const ID: &str = "00000000000000000000000001";
 
 #[test]
+fn completed_session_counters_saturate() {
+    use kajiba_proto::git::v1::SessionKind;
+    let repositories = Repositories::new("/unused".into());
+    let index = crate::metrics::kind_index(SessionKind::Import.into()).unwrap();
+    repositories.sessions.lock().unwrap().completed[index][0] = u64::MAX;
+    repositories
+        .register(Session {
+            session_id: "one".into(),
+            kind: SessionKind::Import.into(),
+            ..Default::default()
+        })
+        .unwrap();
+    repositories.finished("one", 0);
+    assert_eq!(
+        repositories.sessions.lock().unwrap().completed[index][0],
+        u64::MAX
+    );
+}
+
+#[test]
 fn creation_head_and_quarantine_validate_the_boundary_and_preserve_data() {
     let temp = TempDir::new();
     let _lock = prepare(&temp.0).unwrap();

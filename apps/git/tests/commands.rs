@@ -78,6 +78,14 @@ fn both_commands_reject_invalid_configuration_naming_the_field() {
             "state_dir",
         ),
         ("state_dir = '/var/lib/kajiba-git'", "hooks_path"),
+        (
+            "hooks_path = '/nix/store/example-hooks'\n[metrics]\nlisten = '0.0.0.0:9433'",
+            "metrics.listen",
+        ),
+        (
+            "hooks_path = '/nix/store/example-hooks'\n[metrics]\nlisten = '[::]:9433'",
+            "metrics.listen",
+        ),
     ] {
         std::fs::write(&path, input).unwrap();
         for prefix in [["config", "check"], ["serve", "--config"]] {

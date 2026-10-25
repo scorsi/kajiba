@@ -24,6 +24,7 @@ pub struct Repositories {
 struct Sessions {
     running: std::collections::BTreeMap<String, Session>,
     exited: std::collections::BTreeMap<String, (Session, i32)>,
+    completed: [[u64; 2]; 4],
 }
 
 impl Repositories {
@@ -122,6 +123,10 @@ impl Repositories {
     pub fn finished(&self, session_id: &str, status: i32) {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(session) = sessions.running.remove(session_id) {
+            if let Some(kind) = crate::metrics::kind_index(session.kind) {
+                let count = &mut sessions.completed[kind][usize::from(status != 0)];
+                *count = count.saturating_add(1);
+            }
             tracing::info!(
                 event = "session-exited",
                 session = session.session_id,
@@ -145,6 +150,17 @@ impl Repositories {
 
     pub fn acknowledged(&self, session: &str) {
         self.sessions.lock().unwrap().exited.remove(session);
+    }
+
+    pub fn metrics(&self) -> String {
+        let sessions = self.sessions.lock().unwrap();
+        let mut active = [0; 4];
+        for session in sessions.running.values() {
+            if let Some(kind) = crate::metrics::kind_index(session.kind) {
+                active[kind] += 1;
+            }
+        }
+        crate::metrics::exposition(env!("CARGO_PKG_VERSION"), active, sessions.completed)
     }
 
     pub fn fetch(&self, request: FetchRequest) -> Result<(), Status> {
