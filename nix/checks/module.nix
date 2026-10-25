@@ -468,7 +468,7 @@ in
           "PermitRootLogin no"
           "UsePAM no"
           "AuthorizedKeysFile none"
-          "AuthorizedKeysCommand ${lib.getExe services.kajiba-git.package} ssh-keys %f"
+          "AuthorizedKeysCommand /etc/kajiba/authorized-keys-command %f"
           "AuthorizedKeysCommandUser kajiba-git"
           "DisableForwarding yes"
           "PermitTTY no"

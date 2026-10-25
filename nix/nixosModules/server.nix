@@ -430,6 +430,15 @@ in
     environment.etc."kajiba/server.toml".source = configFile;
     # Root runs `kajiba-server admin enroll` over the local socket (0003, 0014).
     environment.etc."kajiba/git.toml".source = gitConfigFile;
+    # sshd refuses an AuthorizedKeysCommand under the group-writable /nix/store:
+    # a copied (mode-set) file in /etc is root-owned along its whole path.
+    environment.etc."kajiba/authorized-keys-command" = {
+      mode = "0755";
+      text = ''
+        #!${pkgs.runtimeShell}
+        exec ${lib.getExe gitCfg.package} ssh-keys "$@"
+      '';
+    };
     environment.etc."kajiba/sshd_config".text = ''
       Port ${toString gitCfg.ssh.port}
       HostKey ${sshHostKey}
@@ -444,7 +453,7 @@ in
       PermitRootLogin no
       UsePAM no
       AuthorizedKeysFile none
-      AuthorizedKeysCommand ${lib.getExe gitCfg.package} ssh-keys %f
+      AuthorizedKeysCommand /etc/kajiba/authorized-keys-command %f
       AuthorizedKeysCommandUser kajiba-git
       DisableForwarding yes
       PermitTTY no
