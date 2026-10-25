@@ -1,3 +1,6 @@
+mod daemon;
+mod state;
+
 use clap::{Parser, Subcommand};
 use kajiba_core::{config::GitConfig, log};
 use std::{path::PathBuf, process::ExitCode};
@@ -32,7 +35,8 @@ enum ConfigCommand {
 }
 
 // Exit codes: 0 success (including help/version), 1 runtime error, 2 usage error.
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     log::install_panic_hook();
     let command = match Args::try_parse() {
         Ok(args) => args.command,
@@ -66,9 +70,13 @@ fn main() -> ExitCode {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
-            // shortcut: no daemon runtime yet; J3 task 9 adds the lock, socket and readiness.
-            log::error("fatal", "git-side daemon is not implemented yet");
-            ExitCode::FAILURE
+            match daemon::serve(config).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    log::error("fatal", &err);
+                    ExitCode::FAILURE
+                }
+            }
         }
     }
 }

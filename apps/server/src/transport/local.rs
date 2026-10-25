@@ -1,7 +1,9 @@
 use super::correlation;
 use crate::metrics::Registry;
 use axum::middleware;
-use hyper_util::rt::TokioIo;
+pub(super) use kajiba_core::local::Local;
+pub use kajiba_core::local::Serving;
+use kajiba_core::local::channel;
 use kajiba_proto::admin::v1::{
     EnrollRequest, EnrollResponse, ImportRequest, ImportResponse, ListReposRequest,
     ListReposResponse, Repo,
@@ -15,46 +17,14 @@ use kajiba_proto::hook::v1::{
     hook_service_server::{HookService, HookServiceServer},
 };
 use std::{
-    fs,
-    future::Future,
     io,
-    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
-    pin::Pin,
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
-    task::{Context, Poll, ready},
+    sync::Arc,
     time::Duration,
 };
-use tokio::net::{UnixListener, UnixStream};
-use tonic::{
-    Request, Response, Status,
-    codegen::{Service, tokio_stream::Stream},
-    service::Routes,
-};
+use tonic::{Request, Response, Status, service::Routes};
 
 pub const SOCKET_PATH: &str = "/run/kajiba/local.sock";
-
-/// Readiness of the local listener: serving, and its path still names the socket it bound.
-#[derive(Default)]
-pub struct Serving {
-    pub(super) on: AtomicBool,
-    socket: OnceLock<(PathBuf, (u64, u64))>,
-}
-
-impl Serving {
-    pub(super) fn ready(&self) -> bool {
-        self.on.load(Ordering::Acquire)
-            && self.socket.get().is_none_or(|(path, identity)| {
-                fs::symlink_metadata(path).is_ok_and(|metadata| {
-                    metadata.file_type().is_socket()
-                        && (metadata.dev(), metadata.ino()) == *identity
-                })
-            })
-    }
-}
 
 pub struct Admin {
     pub writer: crate::db::Writer,
@@ -273,164 +243,32 @@ impl HookService for Admin {
     }
 }
 
-pub(super) struct Local {
-    listener: UnixListener,
-    path: PathBuf,
-    identity: (u64, u64),
-    allowed_uids: Vec<u32>,
-    serving: Arc<Serving>,
-    backoff: Option<Pin<Box<tokio::time::Sleep>>>,
+pub(super) fn bind(path: &Path, serving: Arc<Serving>) -> io::Result<Local> {
+    Local::bind(
+        path,
+        serving,
+        0o600,
+        vec![0, kajiba_core::local::effective_uid()],
+    )
 }
 
-impl Local {
-    pub(super) fn bind(path: &Path, serving: Arc<Serving>) -> io::Result<Self> {
-        match fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_socket() => {
-                match std::os::unix::net::UnixStream::connect(path) {
-                    Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => {
-                        fs::remove_file(path)?
-                    }
-                    Err(err) => return Err(err),
-                    Ok(_) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::AddrInUse,
-                            "local socket is already serving",
-                        ));
-                    }
-                }
-            }
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "local socket path is not a socket",
-                ));
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
-        }
-        let listener = UnixListener::bind(path)?;
-        let metadata = fs::symlink_metadata(path)?;
-        let _ = serving
-            .socket
-            .set((path.into(), (metadata.dev(), metadata.ino())));
-        let local = Self {
-            listener,
-            path: path.into(),
-            identity: (metadata.dev(), metadata.ino()),
-            // The service runs as kajiba; use its socket's UID without a user database lookup.
-            allowed_uids: vec![0, metadata.uid()],
-            serving,
-            backoff: None,
-        };
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        Ok(local)
-    }
-
-    fn allows_uid(&self, uid: u32) -> bool {
-        self.allowed_uids.contains(&uid)
-    }
-
-    pub(super) async fn serve(
-        self,
-        admin: Admin,
-        registry: Arc<Registry>,
-        shutdown: impl std::future::Future<Output = ()>,
-    ) -> io::Result<()> {
-        let admin = Arc::new(admin);
-        // An enroll request is a user name: a few bytes, never tonic's 4 MiB default.
-        let routes = Routes::new(
-            AdminServiceServer::from_arc(admin.clone()).max_decoding_message_size(4096),
-        )
-        .add_service(HookServiceServer::from_arc(admin))
-        .into_axum_router()
-        .layer(middleware::from_fn_with_state(
-            registry,
-            correlation::request,
-        ));
-        self.serving.on.store(true, Ordering::Release);
-        let serving = self.serving.clone();
-        tonic::transport::Server::builder()
-            .add_routes(routes.into())
-            .serve_with_incoming_shutdown(self, async move {
-                shutdown.await;
-                serving.on.store(false, Ordering::Release);
-            })
-            .await
-            .map_err(io::Error::other)
-    }
-}
-
-impl Stream for Local {
-    type Item = io::Result<UnixStream>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        loop {
-            if let Some(backoff) = &mut this.backoff {
-                ready!(backoff.as_mut().poll(cx));
-                this.backoff = None;
-            }
-            // Never yield Err: tonic would re-poll a still-failing listener at once.
-            let stream = match ready!(this.listener.poll_accept(cx)) {
-                Ok((stream, _)) => stream,
-                Err(err) => {
-                    this.backoff = super::accept_backoff(&err)
-                        .map(|delay| Box::pin(tokio::time::sleep(delay)));
-                    continue;
-                }
-            };
-            // Fail closed before any HTTP/2 or RPC processing, including credential lookup errors.
-            if stream
-                .peer_cred()
-                .is_ok_and(|cred| this.allows_uid(cred.uid()))
-            {
-                return Poll::Ready(Some(Ok(stream)));
-            }
-        }
-    }
-}
-
-impl Drop for Local {
-    fn drop(&mut self) {
-        self.serving.on.store(false, Ordering::Release);
-        if fs::symlink_metadata(&self.path)
-            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == self.identity)
-        {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-#[derive(Clone)]
-struct Connector(PathBuf);
-
-impl Service<axum::http::Uri> for Connector {
-    type Response = TokioIo<UnixStream>;
-    type Error = io::Error;
-    type Future = Pin<Box<dyn std::future::Future<Output = io::Result<Self::Response>> + Send>>;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, _: axum::http::Uri) -> Self::Future {
-        let path = self.0.clone();
-        Box::pin(async move { UnixStream::connect(path).await.map(TokioIo::new) })
-    }
-}
-
-async fn channel(
-    path: &Path,
-    timeout: Option<Duration>,
-) -> Result<tonic::transport::Channel, Box<dyn std::error::Error>> {
-    let mut endpoint = tonic::transport::Endpoint::from_static("http://localhost")
-        .connect_timeout(Duration::from_secs(5));
-    if let Some(timeout) = timeout {
-        endpoint = endpoint.timeout(timeout);
-    }
-    Ok(endpoint
-        .connect_with_connector(Connector(path.into()))
-        .await?)
+pub(super) async fn serve(
+    local: Local,
+    admin: Admin,
+    registry: Arc<Registry>,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> io::Result<()> {
+    let admin = Arc::new(admin);
+    // An enroll request is a user name: a few bytes, never tonic's 4 MiB default.
+    let routes =
+        Routes::new(AdminServiceServer::from_arc(admin.clone()).max_decoding_message_size(4096))
+            .add_service(HookServiceServer::from_arc(admin))
+            .into_axum_router()
+            .layer(middleware::from_fn_with_state(
+                registry,
+                correlation::request,
+            ));
+    local.serve(routes.into(), shutdown).await
 }
 
 async fn client(

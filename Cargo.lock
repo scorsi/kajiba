@@ -1979,11 +1979,14 @@ name = "kajiba-core"
 version = "0.1.0"
 dependencies = [
  "http",
+ "hyper-util",
  "libc",
  "serde",
  "serde_json",
  "ssh-key",
+ "tokio",
  "toml",
+ "tonic",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2000,6 +2003,9 @@ dependencies = [
  "kajiba-core",
  "kajiba-gitstore",
  "serde_json",
+ "tokio",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]

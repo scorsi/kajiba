@@ -53,7 +53,7 @@ fn help_succeeds_and_usage_errors_exit_two() {
 }
 
 #[test]
-fn config_check_loads_example_and_serve_refuses_until_runtime_is_implemented() {
+fn config_check_loads_example() {
     let fixture = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../crates/kajiba-core/tests/fixtures/git.toml"
@@ -61,13 +61,6 @@ fn config_check_loads_example_and_serve_refuses_until_runtime_is_implemented() {
     let output = run(&["config", "check", fixture]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert!(output.stdout.is_empty() && output.stderr.is_empty());
-
-    let output = run(&["serve", "--config", fixture]);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert!(output.stdout.is_empty());
-    let line: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert_eq!(line["event"], "fatal");
-    assert_eq!(line["err"], "git-side daemon is not implemented yet");
 }
 
 #[test]

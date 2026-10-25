@@ -175,19 +175,7 @@ async fn request_timeout(
         .unwrap_or(refused)
 }
 
-/// Accept errors other than a peer giving up (EMFILE, ENFILE, ENOBUFS) persist:
-/// back off instead of spinning on a listener that keeps failing.
-fn accept_backoff(err: &io::Error) -> Option<Duration> {
-    use io::ErrorKind::{ConnectionAborted, ConnectionRefused, ConnectionReset};
-    if matches!(
-        err.kind(),
-        ConnectionAborted | ConnectionRefused | ConnectionReset
-    ) {
-        return None;
-    }
-    tracing::warn!(event = "accept-failed", err = %err);
-    Some(Duration::from_secs(1))
-}
+use kajiba_core::local::accept_backoff;
 
 /// Resolve once stop is requested (or the sender is gone), holding no watch borrow.
 async fn stopping(stopped: &mut watch::Receiver<bool>) {
@@ -264,7 +252,7 @@ pub async fn serve(
     admin: local::Admin,
 ) -> std::io::Result<()> {
     let registry = Arc::new(Registry::default());
-    let local = local::Local::bind(
+    let local = local::bind(
         std::path::Path::new(local::SOCKET_PATH),
         health.local_serving.clone(),
     )?;
@@ -295,7 +283,7 @@ async fn serve_listeners(
     let mut local_stopped = stopped;
     let servers = async move {
         tokio::try_join!(
-            local.serve(admin, registry, async move {
+            local::serve(local, admin, registry, async move {
                 let _ = local_stopped.changed().await;
             }),
             serve_tcp(listener, app, PUBLIC, http_stopped),

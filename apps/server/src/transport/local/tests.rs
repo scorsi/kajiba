@@ -1,5 +1,7 @@
 use super::*;
 use std::sync::atomic::AtomicUsize;
+use std::{fs, os::unix::fs::MetadataExt, sync::atomic::Ordering};
+use tokio::net::UnixListener;
 use tonic::Code;
 use tonic_types::StatusExt;
 
@@ -50,14 +52,14 @@ impl Drop for SocketDir {
 async fn peer_uid_gate_accepts_owner_and_refuses_foreign_uid() {
     let dir = SocketDir::new();
     let serving = Arc::default();
-    let mut local = Local::bind(&dir.socket(), serving).unwrap();
+    let mut local = bind(&dir.socket(), serving).unwrap();
     let owner = fs::metadata(dir.socket()).unwrap().uid();
-    assert_eq!(local.allowed_uids, [0, owner]);
     for allowed in [vec![owner], vec![owner.wrapping_add(1)]] {
         let accepted = allowed.contains(&owner);
-        local.allowed_uids = allowed;
+        drop(local);
+        local = Local::bind(&dir.socket(), Arc::default(), 0o600, allowed).unwrap();
         let admin = admin(&dir.0, "").await;
-        let server = tokio::spawn(local.serve(admin, Arc::default(), std::future::pending()));
+        let server = tokio::spawn(serve(local, admin, Arc::default(), std::future::pending()));
         let result = tokio::time::timeout(
             Duration::from_secs(2),
             enroll(&dir.socket(), "alice".into()),
@@ -82,35 +84,25 @@ async fn peer_uid_gate_accepts_owner_and_refuses_foreign_uid() {
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
         assert!(!dir.socket().exists());
-        local = Local::bind(&dir.socket(), Arc::default()).unwrap();
+        local = bind(&dir.socket(), Arc::default()).unwrap();
     }
-}
-
-#[tokio::test]
-async fn allowed_uids_include_root_and_socket_owner() {
-    let dir = SocketDir::new();
-    let mut local = Local::bind(&dir.socket(), Arc::default()).unwrap();
-    local.allowed_uids = vec![0, 1234];
-    assert!(local.allows_uid(0));
-    assert!(local.allows_uid(1234));
-    assert!(!local.allows_uid(5678));
 }
 
 #[tokio::test]
 async fn socket_permissions_stale_recovery_and_path_safety() {
     let dir = SocketDir::new();
     fs::write(dir.socket(), "preserve").unwrap();
-    assert!(Local::bind(&dir.socket(), Arc::default()).is_err());
+    assert!(bind(&dir.socket(), Arc::default()).is_err());
     assert_eq!(fs::read(dir.socket()).unwrap(), b"preserve");
     fs::remove_file(dir.socket()).unwrap();
     std::os::unix::fs::symlink("missing", dir.socket()).unwrap();
-    assert!(Local::bind(&dir.socket(), Arc::default()).is_err());
+    assert!(bind(&dir.socket(), Arc::default()).is_err());
     fs::remove_file(dir.socket()).unwrap();
     let stale = UnixListener::bind(dir.socket()).unwrap();
     drop(stale);
-    let local = Local::bind(&dir.socket(), Arc::default()).unwrap();
+    let local = bind(&dir.socket(), Arc::default()).unwrap();
     assert_eq!(fs::metadata(dir.socket()).unwrap().mode() & 0o777, 0o600);
-    assert!(Local::bind(&dir.socket(), Arc::default()).is_err());
+    assert!(bind(&dir.socket(), Arc::default()).is_err());
     drop(local);
     assert!(!dir.socket().exists());
 }
@@ -125,14 +117,14 @@ async fn readiness_tracks_local_listener_and_admin_command_reaches_the_service()
         .on
         .store(false, Ordering::Release);
     let dir = SocketDir::new();
-    let local = Local::bind(&dir.socket(), state.health.local_serving.clone()).unwrap();
+    let local = bind(&dir.socket(), state.health.local_serving.clone()).unwrap();
     let mut app = super::super::router(state.health.clone(), false, Arc::default()).unwrap();
     assert_eq!(
         super::super::tests::get(&mut app, "/readyz").await,
         axum::http::StatusCode::SERVICE_UNAVAILABLE
     );
     let admin = admin(&dir.0, "[users.alice]").await;
-    let server = tokio::spawn(local.serve(admin, Arc::default(), std::future::pending()));
+    let server = tokio::spawn(serve(local, admin, Arc::default(), std::future::pending()));
     // This is the same command handler used by `kajiba-server admin enroll`.
     assert_eq!(
         crate::admin_enroll(&dir.socket(), "alice".into()).await,
@@ -271,9 +263,9 @@ async fn cli_prints_the_link_and_logs_enrollment_without_the_token() {
     }
     kajiba_core::log::init("info").unwrap();
     let dir = SocketDir::new();
-    let local = Local::bind(&dir.socket(), Arc::default()).unwrap();
+    let local = bind(&dir.socket(), Arc::default()).unwrap();
     let admin = admin(&dir.0, "[users.alice]").await;
-    let server = tokio::spawn(local.serve(admin, Arc::default(), std::future::pending()));
+    let server = tokio::spawn(serve(local, admin, Arc::default(), std::future::pending()));
     assert_eq!(
         crate::admin_enroll(&dir.socket(), "alice".into()).await,
         std::process::ExitCode::SUCCESS
@@ -284,7 +276,7 @@ async fn cli_prints_the_link_and_logs_enrollment_without_the_token() {
 #[tokio::test]
 async fn list_repos_maps_ids_to_names_by_pages_and_marks_archived() {
     let dir = SocketDir::new();
-    let local = Local::bind(&dir.socket(), Arc::default()).unwrap();
+    let local = bind(&dir.socket(), Arc::default()).unwrap();
     let admin = admin(&dir.0, "[users.alice]\n[users.bob]").await;
     sqlx::query(
         "INSERT INTO repo (public_id, config_key, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, archived_at)
@@ -296,7 +288,7 @@ async fn list_repos_maps_ids_to_names_by_pages_and_marks_archived() {
     .execute(&mut *admin.writer.lock().await)
     .await
     .unwrap();
-    let server = tokio::spawn(local.serve(admin, Arc::default(), std::future::pending()));
+    let server = tokio::spawn(serve(local, admin, Arc::default(), std::future::pending()));
     let all = list_repos(&dir.socket()).await.unwrap();
     let names: Vec<_> = all
         .iter()
@@ -396,7 +388,7 @@ async fn import_never_returns_or_logs_source_credentials() {
     kajiba_core::log::init("debug").unwrap();
     let dir = SocketDir::new();
     let _lock = crate::state::prepare(&dir.0).unwrap();
-    let local = Local::bind(&dir.socket(), Arc::default()).unwrap();
+    let local = bind(&dir.socket(), Arc::default()).unwrap();
     let admin = admin(&dir.0, "[users.alice]").await;
     let config = kajiba_core::config::ServerConfig::parse(&format!(
         "[http]\npublic_url='{PUBLIC_URL}'\n[users.alice]\n[repos.demo]\nowner='alice'\ndescription=''\n"
@@ -411,7 +403,7 @@ async fn import_never_returns_or_logs_source_credentials() {
     .await
     .unwrap()
     .committed();
-    let server = tokio::spawn(local.serve(admin, Arc::default(), std::future::pending()));
+    let server = tokio::spawn(serve(local, admin, Arc::default(), std::future::pending()));
     let socket = dir.socket();
     let import = |source: &str, credentials_file: Option<PathBuf>| {
         crate::admin_import(
@@ -467,14 +459,14 @@ const SIGNING_FP: &str = "SHA256:F34nin7tcaYH6WR5LSWSfj6weFBPfBpuyUUoPFP9YjA";
 #[tokio::test]
 async fn auth_key_lookup_resolves_only_active_users_auth_keys() {
     let dir = SocketDir::new();
-    let local = Local::bind(&dir.socket(), Arc::default()).unwrap();
+    let local = bind(&dir.socket(), Arc::default()).unwrap();
     // The comment tries to smuggle options into the authorized_keys line.
     let alice = format!(
         "[users.alice]\nssh_keys=['{AUTH} x\",command=\"sh\" restrict']\nsigning_keys=['{SIGNING}']\n[users.bob]\n"
     );
     let admin = admin(&dir.0, &alice).await;
     let writer = admin.writer.clone();
-    let server = tokio::spawn(local.serve(admin, Arc::default(), std::future::pending()));
+    let server = tokio::spawn(serve(local, admin, Arc::default(), std::future::pending()));
     let public_id = |name: &'static str| {
         let writer = writer.clone();
         async move {
@@ -595,7 +587,7 @@ async fn hooks_make_one_call_per_invocation_and_send_nothing_when_malformed() {
     use std::process::ExitCode;
     for allowed in [true, false] {
         let dir = SocketDir::new();
-        let local = Local::bind(&dir.socket(), Arc::default()).unwrap();
+        let local = bind(&dir.socket(), Arc::default()).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = Arc::default();
         let fake = FakeHook {
@@ -666,9 +658,9 @@ async fn hooks_fail_explicitly_without_server_and_admission_stays_refused() {
             ExitCode::FAILURE
         );
     }
-    let local = Local::bind(&dir.socket(), Arc::default()).unwrap();
+    let local = bind(&dir.socket(), Arc::default()).unwrap();
     let admin = admin(&dir.0, "[users.alice]").await;
-    let server = tokio::spawn(local.serve(admin, Arc::default(), std::future::pending()));
+    let server = tokio::spawn(serve(local, admin, Arc::default(), std::future::pending()));
     let response = pre_receive(
         &dir.socket(),
         PreReceiveRequest {

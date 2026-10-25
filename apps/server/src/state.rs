@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     ffi::OsString,
-    fs::{self, File, OpenOptions, TryLockError},
+    fs::{self, File},
     io,
     path::Path,
 };
@@ -11,21 +11,9 @@ pub fn prepare(state_dir: &Path) -> Result<StateLock, String> {
     prepare_with_sync(state_dir, &mut sync_dir)
 }
 
-/// The flock belongs to the open file description, which a concurrently spawned
-/// child shares until its exec closes the descriptor: unlock explicitly on drop
-/// instead of relying on the last close.
-#[derive(Debug)]
-pub struct StateLock(File);
-
-impl Drop for StateLock {
-    fn drop(&mut self) {
-        let _ = self.0.unlock();
-    }
-}
-
-pub(crate) fn sync_dir(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
-}
+pub use kajiba_core::state::StateLock;
+pub(crate) use kajiba_core::state::sync_dir;
+use kajiba_core::state::{create_dir_all, real_dir};
 
 /// Every file and directory under `path`, then `path` itself.
 pub(crate) fn sync_tree(path: &Path) -> io::Result<()> {
@@ -40,39 +28,12 @@ pub(crate) fn sync_tree(path: &Path) -> io::Result<()> {
     sync_dir(path)
 }
 
-fn create_dir_all(path: &Path, sync: &mut impl FnMut(&Path) -> io::Result<()>) -> io::Result<()> {
-    if path.is_dir() {
-        return Ok(());
-    }
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    create_dir_all(parent, sync)?;
-    match fs::create_dir(path) {
-        Ok(()) => sync(parent),
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
-        Err(err) => Err(err),
-    }
-}
-
 fn prepare_with_sync(
     state_dir: &Path,
     sync: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> Result<StateLock, String> {
     create_dir_all(state_dir, sync).map_err(|err| format!("{}: {err}", state_dir.display()))?;
-    let path = state_dir.join("kajiba.lock");
-    let lock = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|err| format!("{}: {err}", path.display()))?;
-    lock.try_lock().map_err(|err| match err {
-        TryLockError::WouldBlock => format!("another instance holds {}", path.display()),
-        TryLockError::Error(err) => format!("{}: {err}", path.display()),
-    })?;
-    let lock = StateLock(lock);
+    let lock = StateLock::acquire(&state_dir.join("kajiba.lock"))?;
     for name in ["repos", "db", "ci/logs", "ci/artifacts", "tmp"] {
         let path = state_dir.join(name);
         create_dir_all(&path, sync).map_err(|err| format!("{}: {err}", path.display()))?;
@@ -81,19 +42,6 @@ fn prepare_with_sync(
         real_dir(&state_dir.join(name)).map_err(|err| err.to_string())?;
     }
     Ok(lock)
-}
-
-/// A managed directory must be a directory itself, never a symlink: cleanup deletes
-/// recursively under `tmp/`, and a `tmp` link to `repos` would delete repositories.
-fn real_dir(path: &Path) -> io::Result<()> {
-    if fs::symlink_metadata(path)?.is_dir() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "{}: not a directory (symlinks are refused)",
-            path.display()
-        )))
-    }
 }
 
 // Run after migrations, while holding the state lock and before admitting work.
@@ -265,11 +213,8 @@ mod tests {
                 temp.0.join("kajiba.lock").display()
             )
         );
-        // A child spawned by another thread holds a copy until its exec.
-        let inherited = first.0.try_clone().unwrap();
         drop(first);
         let _second = prepare(&temp.0).unwrap();
-        drop(inherited);
     }
 
     #[test]

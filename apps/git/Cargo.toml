@@ -13,5 +13,9 @@ clap.workspace = true
 kajiba-core = { path = "../../crates/kajiba-core" }
 kajiba-gitstore = { path = "../../crates/kajiba-gitstore" }
 
+tokio.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+
 [dev-dependencies]
 serde_json.workspace = true

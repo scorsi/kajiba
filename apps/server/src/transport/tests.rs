@@ -449,7 +449,7 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
                 correlation::request,
             ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local = local::Local::bind(
+        let local = local::bind(
             &state.health.state_dir.join("local.sock"),
             state.health.local_serving.clone(),
         )
