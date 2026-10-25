@@ -23,9 +23,9 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Mutex, Semaphore, watch};
 use tonic::{Request, Response, Status, service::Routes};
 
 #[derive(Clone)]
@@ -38,7 +38,10 @@ pub struct Health {
     gate_serving: Arc<local::Serving>,
     git_side: Arc<git_side::Link>,
     ssh_probe: Option<SocketAddr>,
+    ssh_status: Arc<Mutex<Option<(Instant, bool)>>>,
 }
+
+const SSH_PROBE_TTL: Duration = Duration::from_secs(3);
 
 impl Health {
     pub fn new(state_dir: PathBuf, git_state_dir: PathBuf, ssh_probe: Option<SocketAddr>) -> Self {
@@ -51,6 +54,7 @@ impl Health {
             gate_serving: Arc::default(),
             git_side: Arc::default(),
             ssh_probe,
+            ssh_status: Arc::default(),
         }
     }
 
@@ -86,15 +90,26 @@ impl Health {
         let Some(address) = self.ssh_probe else {
             return true;
         };
+        // Coalesce HTTP and RPC probes, including concurrent cache misses.
+        let mut status = self.ssh_status.lock().await;
+        if let Some((checked, ready)) = *status {
+            if checked.elapsed() < SSH_PROBE_TTL {
+                return ready;
+            }
+        }
+        // A canceled request must not let the next caller immediately probe again.
+        *status = Some((Instant::now(), false));
         // Bound both connect and banner read; a listening non-SSH service is not ready.
-        tokio::time::timeout(Duration::from_secs(1), async {
+        let ready = tokio::time::timeout(Duration::from_secs(1), async {
             let mut stream = tokio::net::TcpStream::connect(address).await?;
             let mut banner = [0; 8];
             stream.read_exact(&mut banner).await?;
             Ok::<_, io::Error>(&banner == b"SSH-2.0-")
         })
         .await
-        .is_ok_and(|result| result.unwrap_or(false))
+        .is_ok_and(|result| result.unwrap_or(false));
+        *status = Some((Instant::now(), ready));
+        ready
     }
 }
 
