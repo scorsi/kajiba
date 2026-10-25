@@ -70,12 +70,12 @@ The ADRs describe the product. Values of a particular deployment (hosts, ports, 
 | 0060 | Mutation gate excludes read sessions                                         | Accepted                                                                                                                                                                                                                                                                                                                                                             |
 | 0061 | Session opening and cancellation                                             | Accepted                                                                                                                                                                                                                                                                                                                                                             |
 | 0062 | Push input and quarantine limits                                             | Accepted                                                                                                                                                                                                                                                                                                                                                             |
-| 0063 | SSH session resource limits |
-| 0064 | Push verification resource limits |
-| 0065 | HTTP Git process group cleanup |
-| 0066 | Incoming Git object validation |
-| 0067 | Quarantine eligibility and repository identity reservation |
-| 0068 | Shared request middleware dependencies |
+| 0063 | SSH session resource limits                                                  |
+| 0064 | Push verification resource limits                                            |
+| 0065 | HTTP Git process group cleanup                                               |
+| 0066 | Incoming Git object validation                                               |
+| 0067 | Quarantine eligibility and repository identity reservation                   |
+| 0068 | Shared request middleware dependencies                                       |
 
 Relational schema: [`docs/schema.md`](../schema.md) (Accepted).
 

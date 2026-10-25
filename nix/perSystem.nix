@@ -232,6 +232,11 @@
             kajibaServerPackage = config.packages.kajiba-server;
             kajibaGitPackage = config.packages.kajiba-git;
           };
+          nixos-import-recovery = import ./tests/import-recovery.nix {
+            inherit pkgs testLib;
+            kajibaServerPackage = config.packages.kajiba-server;
+            kajibaGitPackage = config.packages.kajiba-git;
+          };
           nixos-repo-lifecycle = import ./tests/repo-lifecycle.nix {
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
