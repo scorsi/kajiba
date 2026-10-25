@@ -25,6 +25,7 @@ pub enum Error {
 /// What a read exceeded (ADR 0043, 0047).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Limit {
+    Revision,
     Blob,
     Tree,
     Commit,
@@ -39,6 +40,7 @@ impl fmt::Display for Error {
                 f,
                 "{} too large",
                 match limit {
+                    Limit::Revision => "revision",
                     Limit::Blob => "blob",
                     Limit::Tree => "tree",
                     Limit::Commit => "commit",
@@ -59,6 +61,19 @@ impl From<gix::Error> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Input and candidate-lookup budget for revision resolution (ADR 0056).
+pub const MAX_REVISION_BYTES: usize = 4096;
+pub const MAX_REVISION_COMPONENTS: usize = 128;
+
+pub fn check_revision(spec: &str) -> Result<()> {
+    if spec.len() > MAX_REVISION_BYTES
+        || spec.bytes().filter(|&byte| byte == b'/').count() >= MAX_REVISION_COMPONENTS
+    {
+        return Err(Error::TooLarge(Limit::Revision));
+    }
+    Ok(())
+}
 
 /// A ref and the object it points to (an annotated tag points to its tag object).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -829,7 +844,7 @@ impl GitStore for Gix<'_> {
     }
 
     fn resolve<'a>(&self, repo_path: &Path, spec: &'a str) -> Result<(String, &'a str)> {
-        // Exact names from the listing: gix's lookup would also try `refs/tags/<name>`, ….
+        check_revision(spec)?;
         let refs = self.refs(repo_path)?;
         let repo = self.open(repo_path)?;
         let ends: Vec<usize> = spec
@@ -839,10 +854,12 @@ impl GitStore for Gix<'_> {
             .collect();
         let rest = |end: usize| spec.get(end + 1..).unwrap_or("");
         for namespace in ["refs/heads/", "refs/tags/"] {
+            let mut name = format!("{namespace}{spec}");
             for &end in ends.iter().rev() {
-                let name = format!("{namespace}{}", &spec[..end]);
-                if let Some(found) = refs.iter().find(|r| r.name == name) {
-                    let id = gix::ObjectId::from_hex(found.target.as_bytes())
+                name.truncate(namespace.len() + end);
+                // refs() is sorted; each bounded candidate needs only a binary search.
+                if let Ok(index) = refs.binary_search_by(|reference| reference.name.cmp(&name)) {
+                    let id = gix::ObjectId::from_hex(refs[index].target.as_bytes())
                         .map_err(|err| Error::Git(err.to_string()))?;
                     let commit = peel_to_commit(&repo, id)?;
                     return Ok((commit.id.to_string(), rest(end)));

@@ -615,6 +615,32 @@ async fn forged_commit_cursors_are_bounded_and_history_ends_without_a_token() {
 }
 
 #[tokio::test]
+async fn revision_limits_precede_repository_access_and_blocking_work() {
+    let state = super::super::tests::State::new();
+    let repos = Repos(state.health.clone());
+    for revision in [
+        "a".repeat(kajiba_gitstore::MAX_REVISION_BYTES + 1),
+        vec!["a"; kajiba_gitstore::MAX_REVISION_COMPONENTS + 1].join("/"),
+    ] {
+        for status in [
+            tree(&repos, "alice/demo", &revision, "").await.unwrap_err(),
+            blob(&repos, "alice/demo", &revision, "file")
+                .await
+                .unwrap_err(),
+            commits(&repos, &revision, 1, String::new())
+                .await
+                .unwrap_err(),
+            diff(&repos, &revision).await.unwrap_err(),
+        ] {
+            assert_eq!(
+                (status.code(), reason(&status).as_str()),
+                (Code::ResourceExhausted, "REVISION_TOO_LARGE")
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn browsing_shares_the_public_read_budget() {
     let fixture = Fixture::new(DEMO).await;
     fixture

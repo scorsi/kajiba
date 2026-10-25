@@ -164,6 +164,14 @@ fn git_error(reason: &'static str) -> impl Fn(kajiba_gitstore::Error) -> Status 
         ),
         kajiba_gitstore::Error::TooLarge(limit) => {
             let (reason, message) = match limit {
+                Limit::Revision => (
+                    "REVISION_TOO_LARGE",
+                    format!(
+                        "revision exceeds {} bytes or {} components",
+                        kajiba_gitstore::MAX_REVISION_BYTES,
+                        kajiba_gitstore::MAX_REVISION_COMPONENTS
+                    ),
+                ),
                 Limit::Blob => (
                     "BLOB_TOO_LARGE",
                     format!("the file exceeds {MAX_BLOB_BYTES} bytes; download it from /raw/"),
@@ -389,6 +397,8 @@ impl RepoService for Repos {
         request: Request<GetTreeRequest>,
     ) -> Result<Response<GetTreeResponse>, Status> {
         let request = request.into_inner();
+        kajiba_gitstore::check_revision(&request.revision)
+            .map_err(git_error("REVISION_NOT_FOUND"))?;
         path(&request.path)?;
         let dir = self.browse_dir(&request.repo).await?;
         let permit = self.browse_permit()?;
@@ -423,6 +433,8 @@ impl RepoService for Repos {
         request: Request<GetBlobRequest>,
     ) -> Result<Response<GetBlobResponse>, Status> {
         let request = request.into_inner();
+        kajiba_gitstore::check_revision(&request.revision)
+            .map_err(git_error("REVISION_NOT_FOUND"))?;
         path(&request.path)?;
         let dir = self.browse_dir(&request.repo).await?;
         let permit = self.browse_permit()?;
@@ -444,6 +456,8 @@ impl RepoService for Repos {
     ) -> Result<Response<ListCommitsResponse>, Status> {
         const METHOD: &str = "v1.ListCommits";
         let request = request.into_inner();
+        kajiba_gitstore::check_revision(&request.revision)
+            .map_err(git_error("REVISION_NOT_FOUND"))?;
         let size = cursor::page_size(request.page_size)? as usize;
         // The cursor holds the first page's tip and the commits already returned, so
         // pages stay stable under pushes and follow every parent of a merge.
@@ -504,6 +518,8 @@ impl RepoService for Repos {
         request: Request<GetCommitDiffRequest>,
     ) -> Result<Response<GetCommitDiffResponse>, Status> {
         let request = request.into_inner();
+        kajiba_gitstore::check_revision(&request.revision)
+            .map_err(git_error("REVISION_NOT_FOUND"))?;
         let dir = self.browse_dir(&request.repo).await?;
         let permit = self.browse_permit()?;
         let root = self.0.git_state_dir.join("repos");

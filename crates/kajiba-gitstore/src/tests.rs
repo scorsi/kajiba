@@ -491,6 +491,85 @@ fn transport_spawns_git_upload_pack() {
 }
 
 #[test]
+fn revision_limits_are_checked_before_opening_a_repository() {
+    for spec in [
+        "a".repeat(MAX_REVISION_BYTES),
+        "é".repeat(MAX_REVISION_BYTES / 2),
+        vec!["a"; MAX_REVISION_COMPONENTS].join("/"),
+    ] {
+        assert_eq!(check_revision(&spec), Ok(()));
+    }
+    for spec in [
+        "a".repeat(MAX_REVISION_BYTES + 1),
+        "é".repeat(MAX_REVISION_BYTES / 2 + 1),
+        vec!["a"; MAX_REVISION_COMPONENTS + 1].join("/"),
+        "/".repeat(1 << 20),
+    ] {
+        assert_eq!(
+            Gix.resolve(Path::new("/missing-revision-test"), &spec),
+            Err(Error::TooLarge(Limit::Revision))
+        );
+    }
+}
+
+#[test]
+fn revision_lookup_is_exact_and_bounded() {
+    let dir = scratch("revision-budget");
+    let repo = gix::init_bare(&dir).unwrap();
+    let signature =
+        gix::actor::SignatureRef::from_bytes(b"Alice <alice@example.org> 1700000000 +0000")
+            .unwrap();
+    let id = repo
+        .commit_as(
+            signature,
+            signature,
+            "refs/heads/main",
+            "test",
+            repo.empty_tree().id,
+            Vec::<gix::ObjectId>::new(),
+        )
+        .unwrap()
+        .to_string();
+    // Packed refs can contain overlapping names, unlike loose-ref directories.
+    fs::write(dir.join("packed-refs"), format!(
+        "# pack-refs with: sorted\n{id} refs/heads/feature\n{id} refs/heads/feature/x\n{id} refs/tags/feature/x/deeper\n{id} refs/tags/main/path\n{id} refs/tags/refs/heads/shadow\n{id} refs/tags/v1\n"
+    )).unwrap();
+    fs::write(dir.join("refs/heads/alias"), "ref: refs/heads/main\n").unwrap();
+    for (spec, path) in [
+        ("feature/x/deeper/file", "deeper/file"),
+        ("feature/other", "other"),
+        ("main/path", "path"),
+        ("alias/file", "file"),
+        ("v1/file", "file"),
+        ("main/", ""),
+        (id.as_str(), ""),
+    ] {
+        assert_eq!(Gix.resolve(&dir, spec), Ok((id.clone(), path)), "{spec}");
+    }
+    for spec in [
+        "shadow",
+        "HEAD",
+        "heads/main",
+        "refs/heads/main",
+        "",
+        "/main",
+    ] {
+        assert_eq!(Gix.resolve(&dir, spec), Err(Error::NotFound), "{spec}");
+    }
+    let path = vec!["a"; MAX_REVISION_COMPONENTS - 1].join("/");
+    assert_eq!(
+        Gix.resolve(&dir, &format!("main/{path}")),
+        Ok((id.clone(), path.as_str()))
+    );
+    let path = "a".repeat(MAX_REVISION_BYTES - "main/".len());
+    assert_eq!(
+        Gix.resolve(&dir, &format!("main/{path}")),
+        Ok((id, path.as_str()))
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn resolve_prefers_the_longest_branch_then_tag_then_commit_id() {
     let f = fixture("resolve");
     // A tag with a branch's name loses to the branch.

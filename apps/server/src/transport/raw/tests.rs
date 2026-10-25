@@ -18,6 +18,22 @@ async fn get(fixture: &Fixture, path: &str) -> (u16, String) {
 }
 
 #[tokio::test]
+async fn revision_limits_precede_repository_access_and_blocking_work() {
+    let state = super::super::tests::State::new();
+    for spec in [
+        "a".repeat(kajiba_gitstore::MAX_REVISION_BYTES + 1),
+        vec!["a"; kajiba_gitstore::MAX_REVISION_COMPONENTS + 1].join("/"),
+    ] {
+        let response = super::raw(
+            axum::extract::State(super::Repos(state.health.clone())),
+            axum::extract::Path(("alice".into(), "demo".into(), spec)),
+        )
+        .await;
+        assert_eq!(response.status(), http::StatusCode::PAYLOAD_TOO_LARGE);
+    }
+}
+
+#[tokio::test]
 async fn raw_serves_files_by_branch_nested_branch_tag_and_commit() {
     let mut fixture = Fixture::new(DEMO).await;
     fixture

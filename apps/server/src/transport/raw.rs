@@ -52,6 +52,9 @@ async fn raw(
     State(repos): State<Repos>,
     Path((owner, name, spec)): Path<(String, String, String)>,
 ) -> Response {
+    if kajiba_gitstore::check_revision(&spec).is_err() {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "revision too large\n").into_response();
+    }
     let path = match repos.git_dir(&owner, &name).await {
         Ok(path) => path,
         Err(response) => return response,
