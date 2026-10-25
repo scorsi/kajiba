@@ -170,9 +170,23 @@ fn import_commands_keep_credentials_out_of_the_command_line() {
     assert_eq!(env["KAJIBA_IMPORT_USERNAME"], "alice");
     assert_eq!(env["KAJIBA_IMPORT_PASSWORD"], "s@cret");
     assert_eq!(env["GIT_ALLOW_PROTOCOL"], "http:https:ssh:git");
-    assert!(env["GIT_CONFIG_VALUE_3"].starts_with("!f() { printf 'username=%s"));
+    assert!(env["GIT_CONFIG_VALUE_4"].starts_with("!f() { printf 'username=%s"));
     assert_eq!(env["GIT_CONFIG_KEY_0"], "core.hooksPath");
     assert!(env.contains_key("PATH"), "{env:?}");
+    // The source itself may carry a secret (a token in its path): it is configured
+    // as a named remote in the environment and never appears in argv.
+    let source = "https://example.org/s3cret-token/demo.git";
+    for command in [
+        ls_remote_command(source, ""),
+        fetch_command(Path::new("/srv/repo.git"), source, ""),
+    ] {
+        let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert!(!args.iter().any(|a| a.contains("s3cret")), "{args:?}");
+        assert_eq!(args.last(), Some(&IMPORT_REMOTE));
+        let env = envs(&command);
+        assert_eq!(env["GIT_CONFIG_KEY_3"], "remote.kajiba-import.url");
+        assert_eq!(env["GIT_CONFIG_VALUE_3"], source);
+    }
     // A token alone gets a fixed user name; a token containing ':' keeps its tail.
     let env = envs(&import_command("https://example.org/demo.git", "t0:k:en"));
     assert_eq!(env["KAJIBA_IMPORT_USERNAME"], "t0");
@@ -184,7 +198,7 @@ fn import_commands_keep_credentials_out_of_the_command_line() {
     let env = envs(&import_command("/srv/source.git", ""));
     assert_eq!(env.keys().filter(|k| k.starts_with("KAJIBA_")).count(), 0);
     assert_eq!(env["GIT_ALLOW_PROTOCOL"], "file:http:https:ssh:git");
-    assert_eq!(env["GIT_CONFIG_COUNT"], "3");
+    assert_eq!(env["GIT_CONFIG_COUNT"], "4");
 }
 
 fn sh(script: &str) -> Command {

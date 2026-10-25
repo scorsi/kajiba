@@ -62,8 +62,14 @@ enum AdminCommand {
     /// Import the branches and tags of a path, bundle or URL into a declared, empty repository.
     Import {
         repo: String,
-        /// An absolute path, or a URL without credentials (no userinfo, query or fragment).
-        source: String,
+        /// An absolute path, or a URL without credentials (no userinfo, query or fragment);
+        /// visible to every local user like any command argument.
+        #[arg(required_unless_present = "source_file")]
+        source: Option<String>,
+        /// File holding the complete source instead of the argument, for a source that
+        /// itself carries a secret (a token in its path); not readable by others.
+        #[arg(long, conflicts_with = "source")]
+        source_file: Option<PathBuf>,
         /// File holding `user:token` or a token for an http(s) source; not readable by others.
         #[arg(long)]
         credentials_file: Option<PathBuf>,
@@ -194,12 +200,14 @@ async fn main() -> ExitCode {
             AdminCommand::Import {
                 repo,
                 source,
+                source_file,
                 credentials_file,
             } => {
                 return admin_import(
                     std::path::Path::new(transport::local::SOCKET_PATH),
                     repo,
                     source,
+                    source_file,
                     credentials_file,
                 )
                 .await;
@@ -240,24 +248,30 @@ async fn admin_enroll(path: &std::path::Path, user: String) -> ExitCode {
 async fn admin_import(
     path: &std::path::Path,
     repo: String,
-    source: String,
+    source: Option<String>,
+    source_file: Option<PathBuf>,
     credentials_file: Option<PathBuf>,
 ) -> ExitCode {
+    // Read here, sent in the request: a secret-bearing source or a credential never
+    // appears in any command line (ADR 0048).
+    let secret = |file: &Option<PathBuf>, flag| match file {
+        Some(file) => kajiba_core::config::read_secret(file, flag),
+        None => Ok(String::new()),
+    };
+    let (source, credentials) = match (
+        secret(&source_file, "--source-file"),
+        secret(&credentials_file, "--credentials-file"),
+    ) {
+        (Ok(from_file), Ok(credentials)) => (source.unwrap_or(from_file), credentials),
+        (Err(err), _) | (_, Err(err)) => {
+            log::error("fatal", &format!("admin import {repo}: {err}"));
+            return ExitCode::FAILURE;
+        }
+    };
     // The server resolves paths from its own working directory: pass them absolute.
     let source = match std::fs::canonicalize(&source) {
         Ok(absolute) => absolute.to_string_lossy().into_owned(),
         Err(_) => source,
-    };
-    // Read here, sent in the request: a credential never appears in any command line.
-    let credentials = match &credentials_file {
-        Some(file) => match kajiba_core::config::read_secret(file, "--credentials-file") {
-            Ok(secret) => secret,
-            Err(err) => {
-                log::error("fatal", &format!("admin import {repo}: {err}"));
-                return ExitCode::FAILURE;
-            }
-        },
-        None => String::new(),
     };
     match transport::local::import(path, repo.clone(), source, credentials).await {
         Ok(_) => ExitCode::SUCCESS,
@@ -354,7 +368,8 @@ mod tests {
                 vec!["import", "alice/demo", "https://example.org/demo.git"],
                 AdminCommand::Import {
                     repo: "alice/demo".into(),
-                    source: "https://example.org/demo.git".into(),
+                    source: Some("https://example.org/demo.git".into()),
+                    source_file: None,
                     credentials_file: None,
                 },
             ),
@@ -368,8 +383,23 @@ mod tests {
                 ],
                 AdminCommand::Import {
                     repo: "alice/demo".into(),
-                    source: "https://example.org/demo.git".into(),
+                    source: Some("https://example.org/demo.git".into()),
+                    source_file: None,
                     credentials_file: Some("/run/secrets/import".into()),
+                },
+            ),
+            (
+                vec![
+                    "import",
+                    "alice/demo",
+                    "--source-file",
+                    "/run/secrets/source",
+                ],
+                AdminCommand::Import {
+                    repo: "alice/demo".into(),
+                    source: None,
+                    source_file: Some("/run/secrets/source".into()),
+                    credentials_file: None,
                 },
             ),
             (
@@ -384,6 +414,15 @@ mod tests {
                     .unwrap()
                     .command,
                 Command::Admin { command }
+            );
+        }
+        // Exactly one of the source argument and --source-file.
+        for args in [
+            vec!["import", "alice/demo"],
+            vec!["import", "alice/demo", "/srv/a.git", "--source-file", "/s"],
+        ] {
+            assert!(
+                Args::try_parse_from(["kajiba-server", "admin"].into_iter().chain(args)).is_err()
             );
         }
     }

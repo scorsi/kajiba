@@ -377,18 +377,20 @@ async fn import_never_returns_or_logs_source_credentials() {
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .filter(|line| line["event"] == "fatal")
             .collect();
-        assert_eq!(fatal.len(), 4, "{stderr}");
-        for line in &fatal[..3] {
-            assert!(
-                line.to_string().contains("the source cannot be read"),
-                "{line}"
-            );
+        assert_eq!(fatal.len(), 6, "{stderr}");
+        for (i, needle) in [
+            "the source cannot be read",
+            "the source cannot be read",
+            "the source cannot be read",
+            "--credentials-file",
+            "the source cannot be read",
+            "--source-file",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(fatal[i].to_string().contains(needle), "{}", fatal[i]);
         }
-        assert!(
-            fatal[3].to_string().contains("--credentials-file"),
-            "{}",
-            fatal[3]
-        );
         return;
     }
     kajiba_core::log::init("debug").unwrap();
@@ -415,7 +417,8 @@ async fn import_never_returns_or_logs_source_credentials() {
         crate::admin_import(
             &socket,
             "alice/demo".into(),
-            source.into(),
+            Some(source.into()),
+            None,
             credentials_file,
         )
     };
@@ -441,5 +444,15 @@ async fn import_never_returns_or_logs_source_credentials() {
         import("https://127.0.0.1:9/demo.git", Some(file)).await,
         std::process::ExitCode::FAILURE
     );
+    // A secret-bearing source comes from a file under the same rules (ADR 0048); git's
+    // failure never echoes it.
+    let file = dir.0.join("source");
+    std::fs::write(&file, "https://127.0.0.1:9/secret/demo.git\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let import_file =
+        || crate::admin_import(&socket, "alice/demo".into(), None, Some(file.clone()), None);
+    assert_eq!(import_file().await, std::process::ExitCode::FAILURE);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(import_file().await, std::process::ExitCode::FAILURE);
     server.abort();
 }

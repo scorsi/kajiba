@@ -114,8 +114,10 @@ pub async fn import(
 }
 
 /// An absolute path, or a URL that cannot carry a credential: no userinfo (an ssh
-/// user name excepted), query or fragment (ADR 0041, 0044). The CLI's original
-/// arguments stay readable by every local user for the whole import.
+/// user name excepted), query or fragment (ADR 0041, 0044). A token in the path is
+/// indistinguishable from a path segment: such a source must come from the CLI's
+/// `--source-file`, as a positional argument stays readable by every local user for
+/// the whole import (ADR 0048).
 pub fn check_source(source: &str) -> Result<(), &'static str> {
     let Some((scheme, rest)) = source.split_once("://") else {
         // The server would resolve a relative path from its own working directory.

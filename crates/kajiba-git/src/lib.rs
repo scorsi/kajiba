@@ -185,10 +185,15 @@ fn git() -> Command {
     command
 }
 
-/// A git child reading an import source: credentials travel in the environment,
-/// never on the command line (readable by every local user), and the source cannot
-/// steer the protocol or run hooks. `credentials` is `user:token` or a token alone
-/// (then the user name is `token`, which every forge accepts with a token).
+/// Name under which the import source is configured in the child's environment:
+/// the command line (readable by every local user) only ever names the remote.
+const IMPORT_REMOTE: &str = "kajiba-import";
+
+/// A git child reading an import source: the source and the credentials travel in
+/// the environment, never on the command line (readable by every local user), and
+/// the source cannot steer the protocol or run hooks. `credentials` is `user:token`
+/// or a token alone (then the user name is `token`, which every forge accepts with
+/// a token).
 fn import_command(source: &str, credentials: &str) -> Command {
     let local = !source.contains("://") || source.starts_with("file://");
     let mut command = git();
@@ -200,11 +205,13 @@ fn import_command(source: &str, credentials: &str) -> Command {
             "http:https:ssh:git"
         },
     );
+    let url_key = format!("remote.{IMPORT_REMOTE}.url");
     let mut config = vec![
         ("core.hooksPath", "/dev/null".to_owned()),
         // A stalled transfer ends on its own; IMPORT_TIMEOUT is the backstop.
         ("http.lowSpeedLimit", "1".to_owned()),
         ("http.lowSpeedTime", "60".to_owned()),
+        (url_key.as_str(), source.to_owned()),
     ];
     if !credentials.is_empty() {
         let (username, password) = credentials
@@ -225,6 +232,29 @@ fn import_command(source: &str, credentials: &str) -> Command {
             .env(format!("GIT_CONFIG_KEY_{i}"), key)
             .env(format!("GIT_CONFIG_VALUE_{i}"), value);
     }
+    command
+}
+
+/// `git ls-remote` of an import source (ADR 0041).
+fn ls_remote_command(source: &str, credentials: &str) -> Command {
+    let mut command = import_command(source, credentials);
+    command.args(["ls-remote", "--refs", "--", IMPORT_REMOTE]);
+    command
+}
+
+/// `git fetch` of an import source into `repo`, refspecs on stdin (ADR 0041).
+fn fetch_command(repo: &Path, source: &str, credentials: &str) -> Command {
+    let mut command = import_command(source, credentials);
+    command.arg("--git-dir").arg(repo).args([
+        "fetch",
+        "--atomic",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "--quiet",
+        "--stdin",
+        "--",
+        IMPORT_REMOTE,
+    ]);
     command
 }
 
@@ -666,10 +696,8 @@ impl GitStore for Gix {
     }
 
     fn remote_refs(&self, source: &str, credentials: &str) -> Result<Vec<Ref>> {
-        let mut command = import_command(source, credentials);
-        command.args(["ls-remote", "--refs", "--", source]);
         let mut refs = Vec::new();
-        for line in run(command, "", IMPORT_TIMEOUT)?.lines() {
+        for line in run(ls_remote_command(source, credentials), "", IMPORT_TIMEOUT)?.lines() {
             let (target, name) = line
                 .split_once('\t')
                 .ok_or_else(|| Error::Git(format!("unexpected ls-remote line: {line}")))?;
@@ -687,22 +715,16 @@ impl GitStore for Gix {
     }
 
     fn fetch(&self, repo: &Path, source: &str, credentials: &str, refs: &[Ref]) -> Result<()> {
-        let mut command = import_command(source, credentials);
-        command.arg("--git-dir").arg(repo).args([
-            "fetch",
-            "--atomic",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "--quiet",
-            "--stdin",
-            "--",
-            source,
-        ]);
         let refspecs: String = refs
             .iter()
             .map(|r| format!("{}:{}\n", r.target, r.name))
             .collect();
-        run(command, &refspecs, IMPORT_TIMEOUT).map(drop)
+        run(
+            fetch_command(repo, source, credentials),
+            &refspecs,
+            IMPORT_TIMEOUT,
+        )
+        .map(drop)
     }
 }
 
