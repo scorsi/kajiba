@@ -224,6 +224,67 @@ in
   # As in oroshi, discard the Linux toplevel context so Darwin never builds it.
   module-eval =
     assert assertionsPass { };
+    assert lib.all
+      (
+        mode:
+        assertionsPass {
+          systemd.tmpfiles.settings."10-kajiba-secret"."/run/secrets/kajiba-runner-build-1".f = {
+            inherit mode;
+            group = "kajiba-server";
+          };
+        }
+      )
+      [
+        "0600"
+        "0640"
+      ];
+    assert lib.all
+      (
+        secret:
+        !(assertionsPass {
+          systemd.tmpfiles.settings."10-kajiba-secret"."/run/secrets/kajiba-runner-build-1".f = secret;
+        })
+      )
+      [
+        {
+          mode = "0640";
+          group = "kajiba-git";
+        }
+        {
+          mode = "0660";
+          group = "kajiba-server";
+        }
+        {
+          mode = "0601";
+          group = "kajiba-server";
+        }
+      ];
+    assert
+      !(assertionsPass {
+        users.groups.kajiba-git.gid = 999;
+        systemd.tmpfiles.settings."10-kajiba-secret"."/run/secrets/kajiba-runner-build-1".f = {
+          mode = "0640";
+          group = "999";
+        };
+      });
+    assert
+      !(assertionsPass {
+        users.users.kajiba-git.extraGroups = [ "shared-secret" ];
+        users.groups.shared-secret = { };
+        systemd.tmpfiles.settings."10-kajiba-secret"."/run/secrets/kajiba-github-token".f = {
+          mode = "0640";
+          group = "shared-secret";
+        };
+      });
+    assert
+      !(assertionsPass {
+        services.kajiba-server.runners.build-1.tokenFile = lib.mkForce "/etc/kajiba-secret";
+        environment.etc.kajiba-secret = {
+          text = "test credential";
+          mode = "0640";
+          group = "kajiba-git";
+        };
+      });
     # Generated unit, identity and persisted paths (0012, 0015, 0022), full then default options.
     assert
       let

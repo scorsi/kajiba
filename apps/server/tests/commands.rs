@@ -101,17 +101,23 @@ fn config_check_validates_without_opening_secrets_and_files_checks_access() {
     );
     std::fs::write(&secret, "DO-NOT-PRINT").unwrap();
     use std::os::unix::fs::PermissionsExt;
-    // A secret readable by others is refused, then accepted once private.
-    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let output = run(&args);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    let error = String::from_utf8(output.stderr).unwrap();
-    assert!(error.contains("readable or writable by others"), "{error}");
-    assert!(!error.contains("DO-NOT-PRINT"));
-    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let output = run(&args);
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    for mode in [0o644, 0o660, 0o601] {
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            error.contains("group-writable or accessible by others"),
+            "{error}"
+        );
+        assert!(!error.contains("DO-NOT-PRINT"));
+    }
+    for mode in [0o600, 0o640] {
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    }
 
     std::fs::write(
         &path,

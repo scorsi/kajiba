@@ -37,6 +37,79 @@ let
       description = "Named credentials; the secret itself is only a file path.";
     };
 
+  secretPaths = map (credential: credential.tokenFile) (
+    lib.attrValues cfg.runners ++ lib.attrValues cfg.mirror.credentials
+  );
+  gitUser = config.users.users.kajiba-git;
+  gitGroups = lib.unique (
+    [
+      "kajiba-git"
+      gitUser.group
+    ]
+    ++ gitUser.extraGroups
+    ++ lib.attrNames (
+      lib.filterAttrs (_: group: lib.elem "kajiba-git" group.members) config.users.groups
+    )
+    ++ (config.systemd.services.kajiba-git.serviceConfig.SupplementaryGroups or [ ])
+  );
+  gitGroupIds = lib.concatMap (
+    name:
+    lib.optional ((config.users.groups.${name}.gid or null) != null) (
+      toString config.users.groups.${name}.gid
+    )
+  ) gitGroups;
+  safeSecret =
+    mode: group:
+    let
+      bits = if builtins.isString mode then builtins.match "[0-7]?[0-7]([0-7])([0-7])" mode else null;
+      groupBits = if bits == null then "" else builtins.elemAt bits 0;
+      groupName = if group == null then "" else toString group;
+      groupId = config.users.groups.${groupName}.gid or null;
+    in
+    bits != null
+    && builtins.elemAt bits 1 == "0"
+    && lib.elem groupBits [
+      "0"
+      "1"
+      "4"
+      "5"
+    ]
+    && (
+      !(lib.elem groupBits [
+        "4"
+        "5"
+      ])
+      || (
+        group != null
+        && !(lib.elem groupName (gitGroups ++ gitGroupIds))
+        && !(groupId != null && lib.elem (toString groupId) gitGroupIds)
+      )
+    );
+  # Only declared metadata is available at evaluation; arbitrary runtime paths are checked by Rust.
+  knownSecrets =
+    lib.filter
+      (
+        secret:
+        secret.mode != null
+        && !(lib.elem secret.mode [
+          "-"
+          "symlink"
+        ])
+      )
+      (
+        lib.concatMap (
+          rules:
+          lib.concatMap (path: lib.optionals (lib.elem path secretPaths) (lib.attrValues rules.${path})) (
+            lib.attrNames rules
+          )
+        ) (lib.attrValues config.systemd.tmpfiles.settings)
+        ++ lib.filter (entry: lib.elem "/etc/${entry.target}" secretPaths) (
+          lib.attrValues config.environment.etc
+        )
+        ++ lib.filter (entry: lib.elem entry.path secretPaths) (lib.attrValues (config.sops.secrets or { }))
+        ++ lib.filter (entry: lib.elem entry.path secretPaths) (lib.attrValues (config.age.secrets or { }))
+      );
+
   settings = lib.filterAttrsRecursive (_: value: value != null) {
     state_dir = if cfg.stateDir == "/var/lib/kajiba-server" then null else cfg.stateDir;
     git = {
@@ -426,7 +499,11 @@ in
         [
           "kajiba-server"
           "kajiba-git"
-        ];
+        ]
+      ++ map (secret: {
+        assertion = safeSecret secret.mode secret.group;
+        message = "kajiba-server secret files must not be group-writable, world-accessible or readable by a git-side group (0073).";
+      }) knownSecrets;
     # Stable path for `kajiba-server config check --files /etc/kajiba/server.toml`.
     environment.etc."kajiba/server.toml".source = configFile;
     # Root runs `kajiba-server admin enroll` over the local socket (0003, 0014).

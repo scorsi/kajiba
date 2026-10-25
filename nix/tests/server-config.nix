@@ -80,6 +80,24 @@ pkgs.testers.runNixOSTest {
         status, lines = check(config, files=True)
         assert status == 0 and lines == [], f"config check --files {config}: exit {status}, output {lines}"
 
+    with subtest("server secrets reject git-group reads, group writes and world access"):
+        machine.succeed(f"chgrp kajiba-server {token_file}", f"chmod 0640 {token_file}")
+        machine.fail(f"runuser -u kajiba-git -- cat {token_file}")
+        status, lines = check(config, files=True)
+        assert status == 0 and lines == [], (status, lines)
+        for group, mode, reason in [
+            ("kajiba-git", "0640", "readable by group kajiba-git"),
+            ("kajiba-server", "0660", "group-writable"),
+            ("kajiba-server", "0601", "accessible by others"),
+        ]:
+            machine.succeed(f"chgrp {group} {token_file}", f"chmod {mode} {token_file}")
+            if group == "kajiba-git":
+                machine.succeed(f"runuser -u kajiba-git -- cat {token_file} >/dev/null")
+            status, lines = check(config, files=True)
+            assert status == 1 and len(lines) == 1, (status, lines)
+            assert lines[0]["event"] == "config-invalid" and reason in lines[0]["err"], lines
+        machine.succeed(f"chgrp kajiba-server {token_file}", f"chmod 0400 {token_file}")
+
     with subtest("an inline secret is refused by config check, naming token_file"):
         inline = variant("/tmp/inline.toml", lambda text: text.replace(f'token_file = "{token_file}"', 'token = "DO-NOT-PRINT"'))
         assert_refused(inline, "token_file")

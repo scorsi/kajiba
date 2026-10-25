@@ -5,7 +5,7 @@ use std::{
     fs::{File, Metadata, OpenOptions},
     io::Read,
     net::SocketAddr,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -549,11 +549,33 @@ pub fn read_config(path: &Path) -> Result<String, String> {
 fn open_file(path: &Path, field: &str) -> Result<File, String> {
     let (file, metadata) = open_regular(path, field)?;
     // A symlink (secret manager) is followed: the mode checked is the secret's own.
-    if metadata.permissions().mode() & 0o006 != 0 {
+    if metadata.permissions().mode() & 0o027 != 0 {
         return Err(format!(
-            "{field} ({}): must not be readable or writable by others",
+            "{field} ({}): must not be group-writable or accessible by others",
             path.display()
         ));
+    }
+    Ok(file)
+}
+
+fn open_server_secret(path: &Path, field: &str) -> Result<File, String> {
+    let file = open_file(path, field)?;
+    let metadata = file
+        .metadata()
+        .map_err(|err| format!("{field} ({}): {err}", path.display()))?;
+    if metadata.permissions().mode() & 0o040 != 0 {
+        match crate::local::group_id(c"kajiba-git") {
+            Ok(gid) if metadata.gid() == gid => {
+                return Err(format!(
+                    "{field} ({}): must not be readable by group kajiba-git",
+                    path.display()
+                ));
+            }
+            // Offline checks may run on a host without the service identities.
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("{field}: cannot resolve group kajiba-git: {err}")),
+        }
     }
     Ok(file)
 }
@@ -562,9 +584,9 @@ fn open_file(path: &Path, field: &str) -> Result<File, String> {
 pub const MAX_SECRET_BYTES: u64 = 4096;
 
 /// Reads a secret file under the same rules as the configuration's secret files
-/// (`open_file`), without its trailing newline.
+/// (`open_server_secret`), without its trailing newline.
 pub fn read_secret(path: &Path, field: &str) -> Result<String, String> {
-    let file = open_file(path, field)?;
+    let file = open_server_secret(path, field)?;
     let mut secret = String::new();
     file.take(MAX_SECRET_BYTES + 1)
         .read_to_string(&mut secret)
@@ -801,13 +823,13 @@ impl ServerConfig {
     /// Check access as the current user, without reading or returning secret contents.
     pub fn check_files(&self) -> Result<(), String> {
         for (name, credential) in &self.runners {
-            open_file(
+            open_server_secret(
                 &credential.token_file,
                 &format!("runners.{name}.token_file"),
             )?;
         }
         for (name, credential) in &self.mirror.credentials {
-            open_file(
+            open_server_secret(
                 &credential.token_file,
                 &format!("mirror.credentials.{name}.token_file"),
             )?;

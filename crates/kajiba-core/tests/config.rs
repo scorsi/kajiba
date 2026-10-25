@@ -513,7 +513,7 @@ fn read_secret_follows_the_secret_file_rules_and_drops_the_newline() {
     assert_eq!(read_secret(&secret, "f").unwrap(), "alice:DO-NOT-PRINT");
     std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644)).unwrap();
     let error = read_secret(&secret, "f").unwrap_err();
-    assert!(error.contains("readable or writable by others"), "{error}");
+    assert!(error.contains("accessible by others"), "{error}");
     assert!(!error.contains("DO-NOT-PRINT"), "{error}");
     assert!(read_secret(&dir.0.join("absent"), "f").is_err());
 }
@@ -533,18 +533,46 @@ fn secret_files_must_not_be_accessible_to_others_and_symlinks_are_followed() {
         .unwrap()
         .check_files()
     };
-    for mode in [0o600, 0o400, 0o640, 0o660] {
+    for mode in [0o600, 0o400, 0o640] {
         std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
         assert!(runner(&secret).is_ok(), "{mode:o}");
         assert!(runner(&link).is_ok(), "{mode:o}");
     }
-    for mode in [0o604, 0o602, 0o644, 0o666] {
+    for mode in [0o604, 0o602, 0o601, 0o644, 0o620, 0o660, 0o666] {
         std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
         for path in [&secret, &link] {
             let error = runner(path).unwrap_err();
             assert!(error.contains("token_file"), "{error}");
-            assert!(error.contains("readable or writable by others"), "{error}");
+            assert!(
+                error.contains("group-writable or accessible by others"),
+                "{error}"
+            );
             assert!(!error.contains("DO-NOT-PRINT"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn server_secret_modes_are_checked_for_every_credential() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("server-secret-modes");
+    let secret = dir.private_file("secret");
+    for table in ["runners.build-1", "mirror.credentials.github"] {
+        let config = ServerConfig::parse(&format!(
+            "{MINIMAL}\n[{table}]\ntoken_file='{}'",
+            secret.display()
+        ))
+        .unwrap();
+        for mode in [0o600, 0o640, 0o620, 0o660, 0o601, 0o604] {
+            std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
+            let result = config.check_files();
+            if mode & 0o027 == 0 {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err();
+                assert!(error.contains(table), "{error}");
+                assert!(!error.contains("DO-NOT-PRINT"), "{error}");
+            }
         }
     }
 }
