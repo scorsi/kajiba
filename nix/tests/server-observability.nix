@@ -72,8 +72,10 @@ pkgs.testers.runNixOSTest {
         assert state == "active", f"ActiveState: {state!r}"
 
     with subtest("a request from the other node moves kajiba_requests_total"):
+        # Local service readiness and multi-user.target can precede the test VLAN addresses.
+        for machine in [server, client]:
+            machine.wait_until_succeeds("systemctl is-active --quiet network-addresses-eth1.service")
         before = sample(metrics_url, series)
-        client.wait_for_unit("multi-user.target")
         code = client.succeed("curl -s -o /dev/null -w '%{http_code}' http://server:8080/healthz")
         assert code == "200", f"client /healthz: {code}"
         # The counter is updated once the response body is done: allow it a moment.
