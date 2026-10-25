@@ -12,17 +12,35 @@ use std::time::Duration;
 pub enum Error {
     /// The object, ref or path does not exist (or is not of the expected kind).
     NotFound,
-    /// The blob exceeds the caller's allocation limit.
-    TooLarge,
+    /// The object or listing exceeds the caller's limit or an object cap.
+    TooLarge(Limit),
     /// Any other failure, with gix's message.
     Git(String),
+}
+
+/// What a read exceeded (ADR 0043, 0047).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Limit {
+    Blob,
+    Tree,
+    Commit,
+    Diff,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound => f.write_str("not found"),
-            Self::TooLarge => f.write_str("blob too large"),
+            Self::TooLarge(limit) => write!(
+                f,
+                "{} too large",
+                match limit {
+                    Limit::Blob => "blob",
+                    Limit::Tree => "tree",
+                    Limit::Commit => "commit",
+                    Limit::Diff => "diff",
+                }
+            ),
             Self::Git(err) => f.write_str(err),
         }
     }
@@ -103,14 +121,31 @@ pub trait GitStore {
     fn set_head(&self, repo: &Path, branch: &str) -> Result<()>;
     /// Every ref except `HEAD`, sorted by name (as `git for-each-ref`).
     fn refs(&self, repo: &Path) -> Result<Vec<Ref>>;
-    fn tree(&self, repo: &Path, commit: &str, path: &str) -> Result<Vec<TreeEntry>>;
+    /// The entries of a tree, refused while listing past `limit` of them.
+    fn tree(&self, repo: &Path, commit: &str, path: &str, limit: usize) -> Result<Vec<TreeEntry>>;
     /// Refuses blobs larger than `limit` after reading their object header.
     fn blob(&self, repo: &Path, commit: &str, path: &str, limit: u64) -> Result<Vec<u8>>;
     /// Up to `limit` commits reachable from `commit`, newest first, after passing over
-    /// the first `skip` without building them.
-    fn log(&self, repo: &Path, commit: &str, skip: usize, limit: usize) -> Result<Vec<Commit>>;
-    /// Changes from `from` (the empty tree when `None`) to `to`.
-    fn diff(&self, repo: &Path, from: Option<&str>, to: &str) -> Result<Vec<Change>>;
+    /// the first `skip` without building them; ends early after the commit whose
+    /// message takes the page's message bytes past `max_bytes`.
+    fn log(
+        &self,
+        repo: &Path,
+        commit: &str,
+        skip: usize,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<Commit>>;
+    /// Changes from `from` (the empty tree when `None`) to `to`, refused during the
+    /// walk past `max_changes` of them or `max_bytes` of paths.
+    fn diff(
+        &self,
+        repo: &Path,
+        from: Option<&str>,
+        to: &str,
+        max_changes: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<Change>>;
     /// Splits `<ref>/<path>` (0021) into a commit id and the remaining path (`""`
     /// when none): the longest leading run of segments naming a branch, then a tag,
     /// otherwise a full commit id as the first segment.
@@ -283,24 +318,75 @@ fn open(repo: &Path) -> Result<gix::Repository> {
     Ok(gix::open_opts(repo, gix::open::Options::isolated())?)
 }
 
+/// Caps on the objects browsing loads whole (ADR 0047), checked on the object header
+/// before the object is read: a tree, and a commit or the tag leading to one.
+pub const MAX_TREE_OBJECT_BYTES: u64 = 4 << 20;
+pub const MAX_COMMIT_OBJECT_BYTES: u64 = 1 << 20;
+
+fn header(repo: &gix::Repository, id: gix::ObjectId) -> Result<gix::odb::find::Header> {
+    repo.try_find_header(id)?.ok_or(Error::NotFound)
+}
+
+/// The commit a ref target names, through annotated tags; every object's kind and
+/// size are checked before it is loaded, so a blob target is never read.
+fn peel_to_commit<'r>(repo: &'r gix::Repository, mut id: gix::ObjectId) -> Result<gix::Commit<'r>> {
+    use gix::object::Kind;
+    loop {
+        let header = header(repo, id)?;
+        if !matches!(header.kind(), Kind::Commit | Kind::Tag) {
+            return Err(Error::NotFound);
+        }
+        if header.size() > MAX_COMMIT_OBJECT_BYTES {
+            return Err(Error::TooLarge(Limit::Commit));
+        }
+        let object = repo.find_object(id)?;
+        if header.kind() == Kind::Commit {
+            return Ok(object.into_commit());
+        }
+        id = object
+            .into_tag()
+            .target_id()
+            .map_err(|err| Error::Git(err.to_string()))?
+            .detach();
+    }
+}
+
+/// The commit named by a full hex id (a tag id is not a commit, 0021).
 fn commit<'r>(repo: &'r gix::Repository, id: &str) -> Result<gix::Commit<'r>> {
     let id = gix::ObjectId::from_hex(id.as_bytes()).map_err(|_| Error::NotFound)?;
-    repo.try_find_object(id)?
-        .ok_or(Error::NotFound)?
-        .try_into_commit()
-        .map_err(|_| Error::NotFound)
+    if header(repo, id)?.kind() != gix::object::Kind::Commit {
+        return Err(Error::NotFound);
+    }
+    peel_to_commit(repo, id)
+}
+
+/// A tree object, its kind and size checked before it is loaded.
+fn load_tree(repo: &gix::Repository, id: gix::ObjectId) -> Result<gix::Tree<'_>> {
+    let header = header(repo, id)?;
+    if header.kind() != gix::object::Kind::Tree {
+        return Err(Error::NotFound);
+    }
+    if header.size() > MAX_TREE_OBJECT_BYTES {
+        return Err(Error::TooLarge(Limit::Tree));
+    }
+    Ok(repo.find_object(id)?.into_tree())
 }
 
 fn tree_at<'r>(repo: &'r gix::Repository, commit_id: &str, path: &str) -> Result<gix::Tree<'r>> {
-    let root = commit(repo, commit_id)?.tree()?;
-    if path.is_empty() {
-        return Ok(root);
+    let mut id = commit(repo, commit_id)?
+        .tree_id()
+        .map_err(|err| Error::Git(err.to_string()))?
+        .detach();
+    // Segment by segment, so every tree on the way is checked before it is loaded.
+    for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+        let tree = load_tree(repo, id)?;
+        let entry = tree.find_entry(segment).ok_or(Error::NotFound)?;
+        if !entry.mode().is_tree() {
+            return Err(Error::NotFound);
+        }
+        id = entry.oid().to_owned();
     }
-    root.lookup_entry_by_path(path)?
-        .ok_or(Error::NotFound)?
-        .object()?
-        .try_into_tree()
-        .map_err(|_| Error::NotFound)
+    load_tree(repo, id)
 }
 
 impl GitStore for Gix {
@@ -363,12 +449,15 @@ impl GitStore for Gix {
         Ok(refs)
     }
 
-    fn tree(&self, repo: &Path, commit: &str, path: &str) -> Result<Vec<TreeEntry>> {
+    fn tree(&self, repo: &Path, commit: &str, path: &str, limit: usize) -> Result<Vec<TreeEntry>> {
         let repo = open(repo)?;
         let tree = tree_at(&repo, commit, path)?;
         let mut entries = Vec::new();
         for entry in tree.iter() {
             let entry = entry?;
+            if entries.len() == limit {
+                return Err(Error::TooLarge(Limit::Tree));
+            }
             use gix::object::tree::EntryKind as K;
             entries.push(TreeEntry {
                 name: entry.filename().to_string(),
@@ -394,13 +483,20 @@ impl GitStore for Gix {
             return Err(Error::NotFound);
         }
         if repo.find_header(entry.id())?.size() > limit {
-            return Err(Error::TooLarge);
+            return Err(Error::TooLarge(Limit::Blob));
         }
         let data = entry.object()?.detach().data;
         Ok(data)
     }
 
-    fn log(&self, repo: &Path, commit_id: &str, skip: usize, limit: usize) -> Result<Vec<Commit>> {
+    fn log(
+        &self,
+        repo: &Path,
+        commit_id: &str,
+        skip: usize,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<Commit>> {
         let repo = open(repo)?;
         let tip = commit(&repo, commit_id)?.id;
         let walk = repo
@@ -410,30 +506,55 @@ impl GitStore for Gix {
             ))
             .all()?;
         let mut commits = Vec::new();
+        let mut bytes = 0;
         // Skipped entries are walk infos only (id, parents): no object is decoded.
         for info in walk.skip(skip).take(limit) {
             let info = info?;
+            if header(&repo, info.id)?.size() > MAX_COMMIT_OBJECT_BYTES {
+                return Err(Error::TooLarge(Limit::Commit));
+            }
             let object = info.object()?;
             let author = object.author()?;
+            let message = object.message_raw_sloppy().to_string();
+            bytes += message.len();
             commits.push(Commit {
                 id: info.id.to_string(),
                 parents: info.parent_ids().map(|id| id.to_string()).collect(),
                 author_name: author.name.to_string(),
                 author_email: author.email.to_string(),
                 time: object.time()?.seconds,
-                message: object.message_raw_sloppy().to_string(),
+                message,
             });
+            if bytes > max_bytes {
+                break;
+            }
         }
         Ok(commits)
     }
 
-    fn diff(&self, repo: &Path, from: Option<&str>, to: &str) -> Result<Vec<Change>> {
+    fn diff(
+        &self,
+        repo: &Path,
+        from: Option<&str>,
+        to: &str,
+        max_changes: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<Change>> {
         let repo = open(repo)?;
-        let old = from.map(|id| tree_at(&repo, id, "")).transpose()?;
+        let old = match from {
+            Some(id) => tree_at(&repo, id, "")?,
+            None => repo.empty_tree(),
+        };
         let new = tree_at(&repo, to, "")?;
         let mut changes = Vec::new();
-        for change in repo.diff_tree_to_tree(old.as_ref(), &new, gix::diff::Options::default())? {
-            use gix::object::tree::diff::ChangeDetached as C;
+        let mut bytes = 0;
+        let mut exceeded = None;
+        let mut platform = old.changes()?;
+        platform.options(|options| {
+            options.track_path().track_rewrites(None);
+        });
+        let walked = platform.for_each_to_obtain_tree(&new, |change| {
+            use gix::object::tree::diff::{Action, Change as C};
             let (path, kind, old_id, new_id, tree) = match change {
                 C::Addition {
                     location,
@@ -444,7 +565,7 @@ impl GitStore for Gix {
                     location,
                     ChangeKind::Added,
                     None,
-                    Some(id),
+                    Some(id.detach()),
                     entry_mode.is_tree(),
                 ),
                 C::Deletion {
@@ -455,7 +576,7 @@ impl GitStore for Gix {
                 } => (
                     location,
                     ChangeKind::Deleted,
-                    Some(id),
+                    Some(id.detach()),
                     None,
                     entry_mode.is_tree(),
                 ),
@@ -468,21 +589,42 @@ impl GitStore for Gix {
                 } => (
                     location,
                     ChangeKind::Modified,
-                    Some(previous_id),
-                    Some(id),
+                    Some(previous_id.detach()),
+                    Some(id.detach()),
                     entry_mode.is_tree(),
                 ),
                 C::Rewrite { .. } => unreachable!("rewrite tracking is disabled"),
             };
-            if !tree {
-                changes.push(Change {
-                    path: path.to_string(),
-                    kind,
-                    old_id: old_id.map(|id| id.to_string()),
-                    new_id: new_id.map(|id| id.to_string()),
-                });
+            if tree {
+                // gix reports a changed subtree before loading it to descend: an
+                // oversized one is refused here, unread.
+                let oversized = |id: &gix::ObjectId| {
+                    repo.find_header(*id)
+                        .is_ok_and(|header| header.size() > MAX_TREE_OBJECT_BYTES)
+                };
+                if old_id.iter().chain(&new_id).any(oversized) {
+                    exceeded = Some(Limit::Tree);
+                    return Ok(Action::Break(()));
+                }
+                return Ok(Action::Continue(()));
             }
+            bytes += path.len();
+            changes.push(Change {
+                path: path.to_string(),
+                kind,
+                old_id: old_id.map(|id| id.to_string()),
+                new_id: new_id.map(|id| id.to_string()),
+            });
+            if changes.len() > max_changes || bytes > max_bytes {
+                exceeded = Some(Limit::Diff);
+                return Ok(Action::Break(()));
+            }
+            Ok(Action::Continue(()))
+        });
+        if let Some(limit) = exceeded {
+            return Err(Error::TooLarge(limit));
         }
+        walked?;
         Ok(changes)
     }
 
@@ -502,10 +644,7 @@ impl GitStore for Gix {
                 if let Some(found) = refs.iter().find(|r| r.name == name) {
                     let id = gix::ObjectId::from_hex(found.target.as_bytes())
                         .map_err(|err| Error::Git(err.to_string()))?;
-                    let commit = repo
-                        .find_object(id)?
-                        .peel_to_kind(gix::object::Kind::Commit)
-                        .map_err(|_| Error::NotFound)?;
+                    let commit = peel_to_commit(&repo, id)?;
                     return Ok((commit.id.to_string(), rest(end)));
                 }
             }

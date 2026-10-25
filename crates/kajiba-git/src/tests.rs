@@ -270,7 +270,7 @@ fn refs_match_the_git_binary() {
 #[test]
 fn tree_lists_entries_with_their_kind() {
     let f = fixture("tree");
-    let root = Gix.tree(&f.bare, &f.first, "").unwrap();
+    let root = Gix.tree(&f.bare, &f.first, "", usize::MAX).unwrap();
     let kinds: Vec<(&str, EntryKind)> = root.iter().map(|e| (e.name.as_str(), e.kind)).collect();
     assert_eq!(
         kinds,
@@ -281,7 +281,7 @@ fn tree_lists_entries_with_their_kind() {
             ("src", EntryKind::Tree),
         ]
     );
-    let src = Gix.tree(&f.bare, &f.first, "src").unwrap();
+    let src = Gix.tree(&f.bare, &f.first, "src", usize::MAX).unwrap();
     assert_eq!(src.len(), 1);
     assert_eq!(src[0].name, "lib.rs");
     assert_eq!(
@@ -294,12 +294,15 @@ fn tree_lists_entries_with_their_kind() {
     );
     for path in ["missing", "README.md", "src/lib.rs"] {
         assert_eq!(
-            Gix.tree(&f.bare, &f.first, path),
+            Gix.tree(&f.bare, &f.first, path, usize::MAX),
             Err(Error::NotFound),
             "{path}"
         );
     }
-    assert_eq!(Gix.tree(&f.bare, &f.second, "src"), Err(Error::NotFound));
+    assert_eq!(
+        Gix.tree(&f.bare, &f.second, "src", usize::MAX),
+        Err(Error::NotFound)
+    );
 }
 
 #[test]
@@ -349,15 +352,23 @@ fn unknown_commits_are_not_found() {
         f.first[..7].into(),
         tree_id,
     ] {
-        assert_eq!(Gix.tree(&f.bare, &id, ""), Err(Error::NotFound), "{id:?}");
-        assert_eq!(Gix.log(&f.bare, &id, 0, 1), Err(Error::NotFound), "{id:?}");
+        assert_eq!(
+            Gix.tree(&f.bare, &id, "", usize::MAX),
+            Err(Error::NotFound),
+            "{id:?}"
+        );
+        assert_eq!(
+            Gix.log(&f.bare, &id, 0, 1, usize::MAX),
+            Err(Error::NotFound),
+            "{id:?}"
+        );
     }
 }
 
 #[test]
 fn log_walks_newest_first() {
     let f = fixture("log");
-    let log = Gix.log(&f.bare, &f.third, 0, 10).unwrap();
+    let log = Gix.log(&f.bare, &f.third, 0, 10, usize::MAX).unwrap();
     let ids: Vec<&str> = log.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids, [&f.third, &f.second, &f.first]);
     assert_eq!(log[1].parents, std::slice::from_ref(&f.first));
@@ -366,17 +377,29 @@ fn log_walks_newest_first() {
     assert_eq!(log[1].author_email, "alice@example.org");
     assert_eq!(log[1].time, 1_700_000_100);
     assert_eq!(log[1].message, "second\n\nbody\n");
-    assert_eq!(Gix.log(&f.bare, &f.third, 0, 1).unwrap().len(), 1);
-    assert_eq!(Gix.log(&f.bare, &f.first, 0, 10).unwrap().len(), 1);
-    let skipped = Gix.log(&f.bare, &f.third, 1, 1).unwrap();
+    assert_eq!(
+        Gix.log(&f.bare, &f.third, 0, 1, usize::MAX).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        Gix.log(&f.bare, &f.first, 0, 10, usize::MAX).unwrap().len(),
+        1
+    );
+    let skipped = Gix.log(&f.bare, &f.third, 1, 1, usize::MAX).unwrap();
     assert_eq!(skipped[0].id, f.second);
-    assert!(Gix.log(&f.bare, &f.third, 3, 10).unwrap().is_empty());
+    assert!(
+        Gix.log(&f.bare, &f.third, 3, 10, usize::MAX)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
 fn diff_lists_changed_files() {
     let f = fixture("diff");
-    let changes = Gix.diff(&f.bare, Some(&f.first), &f.second).unwrap();
+    let changes = Gix
+        .diff(&f.bare, Some(&f.first), &f.second, usize::MAX, usize::MAX)
+        .unwrap();
     let summary: Vec<(&str, ChangeKind)> =
         changes.iter().map(|c| (c.path.as_str(), c.kind)).collect();
     assert_eq!(
@@ -400,10 +423,16 @@ fn diff_lists_changed_files() {
     assert_eq!(changes[1].old_id, None);
     assert_eq!(changes[2].new_id, None);
 
-    let root = Gix.diff(&f.bare, None, &f.first).unwrap();
+    let root = Gix
+        .diff(&f.bare, None, &f.first, usize::MAX, usize::MAX)
+        .unwrap();
     assert!(root.iter().all(|c| c.kind == ChangeKind::Added));
     assert_eq!(root.len(), 4);
-    assert_eq!(Gix.diff(&f.bare, Some(&f.first), &f.first).unwrap(), []);
+    assert_eq!(
+        Gix.diff(&f.bare, Some(&f.first), &f.first, usize::MAX, usize::MAX)
+            .unwrap(),
+        []
+    );
 }
 
 #[test]
@@ -499,7 +528,165 @@ fn blob_checks_header_size_before_loading() {
         );
         assert_eq!(
             Gix.blob(&f.bare, &f.first, "README.md", size - 1),
-            Err(Error::TooLarge)
+            Err(Error::TooLarge(Limit::Blob))
         );
     }
+}
+
+/// `git mktree` over `listing`, in `dir`.
+fn mktree(dir: &Path, listing: &str) -> String {
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .current_dir(dir)
+        .arg("mktree")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(listing.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Cuts a loose object after its header: its kind and size stay readable, reading it
+/// whole fails with `Error::Git`, so a read that still happens shows.
+fn truncate_loose(bare: &Path, id: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = bare.join(format!("objects/{}/{}", &id[..2], &id[2..]));
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::write(&path, &bytes[..64]).unwrap();
+    let repo = open(bare).unwrap();
+    let id = gix::ObjectId::from_hex(id.as_bytes()).unwrap();
+    assert!(repo.find_header(id).is_ok() && repo.find_object(id).is_err());
+}
+
+#[test]
+fn non_commit_revisions_are_refused_on_their_header_without_a_read() {
+    let f = fixture("header");
+    let t = "0 +0000";
+    std::fs::write(
+        f.bare.join("big"),
+        "a".repeat(MAX_COMMIT_OBJECT_BYTES as usize + 1),
+    )
+    .unwrap();
+    let blob = git(&f.bare, &["hash-object", "-w", "big"], t);
+    git(&f.bare, &["update-ref", "refs/tags/big", &blob], t);
+    truncate_loose(&f.bare, &blob);
+    assert_eq!(
+        Gix.tree(&f.bare, &blob, "", usize::MAX),
+        Err(Error::NotFound)
+    );
+    assert_eq!(
+        Gix.log(&f.bare, &blob, 0, 1, usize::MAX),
+        Err(Error::NotFound)
+    );
+    assert_eq!(
+        Gix.diff(&f.bare, None, &blob, usize::MAX, usize::MAX),
+        Err(Error::NotFound)
+    );
+    assert_eq!(Gix.resolve(&f.bare, &blob), Err(Error::NotFound));
+    // A ref whose target is a blob peels to no commit.
+    assert_eq!(Gix.resolve(&f.bare, "big"), Err(Error::NotFound));
+}
+
+#[test]
+fn oversized_tree_and_commit_objects_are_refused_before_they_are_read() {
+    let f = fixture("caps");
+    let t = "1700000300 +0000";
+    let blob = git(
+        &f.bare,
+        &["rev-parse", &format!("{}:README.md", f.first)],
+        t,
+    );
+    // Past the tree cap: 21 000 entries with 200-byte names.
+    let listing: String = (0..21_000)
+        .map(|i| format!("100644 blob {blob}\t{i:0>200}\n"))
+        .collect();
+    let big_tree = mktree(&f.bare, &listing);
+    let root = mktree(
+        &f.bare,
+        &format!("100644 blob {blob}\tREADME.md\n040000 tree {big_tree}\tbig\n"),
+    );
+    let at_root = git(&f.bare, &["commit-tree", &big_tree, "-m", "big root"], t);
+    let under = git(&f.bare, &["commit-tree", &root, "-m", "big subtree"], t);
+    truncate_loose(&f.bare, &big_tree);
+    let tree = Error::TooLarge(Limit::Tree);
+    assert_eq!(
+        Gix.tree(&f.bare, &at_root, "", usize::MAX).unwrap_err(),
+        tree
+    );
+    assert_eq!(
+        Gix.tree(&f.bare, &under, "big", usize::MAX).unwrap_err(),
+        tree
+    );
+    assert_eq!(
+        Gix.blob(&f.bare, &under, "big/x", u64::MAX).unwrap_err(),
+        tree
+    );
+    assert_eq!(
+        Gix.diff(&f.bare, Some(&f.first), &under, usize::MAX, usize::MAX)
+            .unwrap_err(),
+        tree
+    );
+    assert_eq!(Gix.tree(&f.bare, &under, "", usize::MAX).unwrap().len(), 2);
+
+    let message = f.bare.join("message");
+    std::fs::write(&message, "m".repeat(MAX_COMMIT_OBJECT_BYTES as usize + 1)).unwrap();
+    let message = message.to_str().unwrap();
+    let huge = git(&f.bare, &["commit-tree", &root, "-F", message], t);
+    let child = git(
+        &f.bare,
+        &["commit-tree", &root, "-p", &huge, "-m", "child"],
+        t,
+    );
+    git(&f.bare, &["update-ref", "refs/tags/huge", &huge], t);
+    let commit = Error::TooLarge(Limit::Commit);
+    // Reached by the walk, which reads commits for their parents: the page refuses it.
+    assert_eq!(Gix.log(&f.bare, &child, 0, 1, usize::MAX).unwrap().len(), 1);
+    assert_eq!(
+        Gix.log(&f.bare, &child, 0, 2, usize::MAX).unwrap_err(),
+        commit
+    );
+    truncate_loose(&f.bare, &huge);
+    // Named directly or through a tag: refused on its header.
+    assert_eq!(
+        Gix.tree(&f.bare, &huge, "", usize::MAX).unwrap_err(),
+        commit
+    );
+    assert_eq!(
+        Gix.log(&f.bare, &huge, 0, 1, usize::MAX).unwrap_err(),
+        commit
+    );
+    assert_eq!(Gix.resolve(&f.bare, &huge).unwrap_err(), commit);
+    assert_eq!(Gix.resolve(&f.bare, "huge").unwrap_err(), commit);
+}
+
+#[test]
+fn listing_limits_stop_trees_diffs_and_pages() {
+    let f = fixture("limits");
+    let tree = Error::TooLarge(Limit::Tree);
+    assert_eq!(Gix.tree(&f.bare, &f.first, "", 4).unwrap().len(), 4);
+    assert_eq!(Gix.tree(&f.bare, &f.first, "", 3).unwrap_err(), tree);
+    // Four files added: README.md, link, run.sh, src/lib.rs, 29 bytes of paths.
+    let diff = Error::TooLarge(Limit::Diff);
+    assert_eq!(Gix.diff(&f.bare, None, &f.first, 4, 29).unwrap().len(), 4);
+    assert_eq!(Gix.diff(&f.bare, None, &f.first, 3, 29).unwrap_err(), diff);
+    assert_eq!(Gix.diff(&f.bare, None, &f.first, 4, 28).unwrap_err(), diff);
+    // A page ends after the commit that takes its messages past the budget.
+    let newest = Gix.log(&f.bare, &f.third, 0, 1, usize::MAX).unwrap()[0]
+        .message
+        .len();
+    assert_eq!(Gix.log(&f.bare, &f.third, 0, 10, 0).unwrap().len(), 1);
+    assert_eq!(
+        Gix.log(&f.bare, &f.third, 0, 10, newest - 1).unwrap().len(),
+        1
+    );
+    assert_eq!(Gix.log(&f.bare, &f.third, 0, 10, newest).unwrap().len(), 2);
 }

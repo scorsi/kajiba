@@ -19,7 +19,7 @@ service RepoService {
 
   // The entries of a directory.
   rpc GetTree(GetTreeRequest) returns (GetTreeResponse);
-  // A file's content; above 16 MiB, RESOURCE_EXHAUSTED / BLOB_TOO_LARGE.
+  // A file's content; above 1 MiB, RESOURCE_EXHAUSTED / BLOB_TOO_LARGE: /raw/ serves larger files.
   rpc GetBlob(GetBlobRequest) returns (GetBlobResponse);
   // The commits reachable from `revision`, newest first (0020 pagination).
   rpc ListCommits(ListCommitsRequest) returns (ListCommitsResponse);

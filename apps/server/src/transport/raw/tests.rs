@@ -132,6 +132,24 @@ async fn raw_blob_size_limit_and_permit_follow_the_allocation() {
         fixture.repos.0.public_reads.available_permits(),
         super::super::PUBLIC_READS
     );
+    // The oversized blob's id as the revision names no commit: refused on its header.
+    let blob = git(
+        &fixture.bare("alice/demo").await,
+        &["rev-parse", "main:above-limit"],
+    );
+    let response = app
+        .call(
+            http::Request::get(format!("/raw/alice/demo/{}/x", blob.trim()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+    assert_eq!(
+        fixture.repos.0.public_reads.available_permits(),
+        super::super::PUBLIC_READS
+    );
 
     let response = app
         .call(

@@ -118,16 +118,20 @@ impl Repos {
     }
 }
 
-/// GetBlob refuses larger files: a response is held in memory whole.
-pub const MAX_BLOB_BYTES: usize = 16 << 20;
-/// Response bounds of ADR 0043: larger trees and diffs are refused, deeper history is
-/// reached from an older revision.
+/// GetBlob refuses larger files (ADR 0047): a unary response is held in memory whole
+/// and outlives its permit; `/raw/` streams the larger ones.
+pub const MAX_BLOB_BYTES: usize = 1 << 20;
+/// Response bounds of ADR 0043 and 0047: larger trees and diffs are refused, deeper
+/// history is reached from an older revision, a commit page ends early past its bytes.
 pub const MAX_TREE_ENTRIES: usize = 10_000;
 pub const MAX_DIFF_CHANGES: usize = 10_000;
+pub const MAX_DIFF_PATH_BYTES: usize = 4 << 20;
 pub const MAX_COMMIT_SKIP: usize = 10_000;
+pub const MAX_COMMIT_PAGE_BYTES: usize = 1 << 20;
 
 /// A GitStore read, off the async runtime, holding a public-read permit until the
 /// response is built; a cancelled handler keeps the permit with the running work.
+/// The bounds above keep every response small, so what outlives the permit is too.
 async fn blocking<T: Send + 'static>(
     permit: tokio::sync::OwnedSemaphorePermit,
     read: impl FnOnce() -> Result<T, Status> + Send + 'static,
@@ -140,19 +144,10 @@ async fn blocking<T: Send + 'static>(
     .map_err(|err| Status::internal(format!("git: {err}")))?
 }
 
-fn too_large<T>(items: Vec<T>, max: usize, reason: &'static str) -> Result<Vec<T>, Status> {
-    if items.len() > max {
-        return Err(refused(
-            tonic::Code::ResourceExhausted,
-            reason,
-            format!("more than {max} items; narrow the request"),
-        ));
-    }
-    Ok(items)
-}
-
-/// `NotFound` from git becomes `<reason>`, anything else INTERNAL.
+/// `NotFound` from git becomes `<reason>`, `TooLarge` the RESOURCE_EXHAUSTED of what
+/// was exceeded (ADR 0043, 0047), anything else INTERNAL.
 fn git_error(reason: &'static str) -> impl Fn(kajiba_git::Error) -> Status {
+    use kajiba_git::{Limit, MAX_COMMIT_OBJECT_BYTES, MAX_TREE_OBJECT_BYTES};
     move |err| match err {
         kajiba_git::Error::NotFound => refused(
             tonic::Code::NotFound,
@@ -163,11 +158,31 @@ fn git_error(reason: &'static str) -> impl Fn(kajiba_git::Error) -> Status {
             }
             .into(),
         ),
-        kajiba_git::Error::TooLarge => refused(
-            tonic::Code::ResourceExhausted,
-            "BLOB_TOO_LARGE",
-            format!("the file exceeds {MAX_BLOB_BYTES} bytes"),
-        ),
+        kajiba_git::Error::TooLarge(limit) => {
+            let (reason, message) = match limit {
+                Limit::Blob => (
+                    "BLOB_TOO_LARGE",
+                    format!("the file exceeds {MAX_BLOB_BYTES} bytes; download it from /raw/"),
+                ),
+                Limit::Tree => (
+                    "TREE_TOO_LARGE",
+                    format!(
+                        "a tree exceeds {MAX_TREE_ENTRIES} entries or {MAX_TREE_OBJECT_BYTES} bytes"
+                    ),
+                ),
+                Limit::Commit => (
+                    "COMMIT_TOO_LARGE",
+                    format!("a commit object exceeds {MAX_COMMIT_OBJECT_BYTES} bytes"),
+                ),
+                Limit::Diff => (
+                    "DIFF_TOO_LARGE",
+                    format!(
+                        "the diff exceeds {MAX_DIFF_CHANGES} changes or {MAX_DIFF_PATH_BYTES} bytes of paths"
+                    ),
+                ),
+            };
+            refused(tonic::Code::ResourceExhausted, reason, message)
+        }
         kajiba_git::Error::Git(err) => Status::internal(format!("git: {err}")),
     }
 }
@@ -374,9 +389,8 @@ impl RepoService for Repos {
         blocking(permit, move || {
             let commit_id = revision(&dir, &request.revision)?;
             let entries = Gix
-                .tree(&dir, &commit_id, &request.path)
-                .map_err(git_error("PATH_NOT_FOUND"))?;
-            let entries = too_large(entries, MAX_TREE_ENTRIES, "TREE_TOO_LARGE")?
+                .tree(&dir, &commit_id, &request.path, MAX_TREE_ENTRIES)
+                .map_err(git_error("PATH_NOT_FOUND"))?
                 .into_iter()
                 .map(|entry| TreeEntry {
                     name: entry.name,
@@ -453,13 +467,16 @@ impl RepoService for Repos {
             };
             // shortcut: each page walks the history from the tip again, quadratic over deep paging; keep the walk state if that gets slow.
             let mut page = Gix
-                .log(&dir, &tip, skip, size + 1)
+                .log(&dir, &tip, skip, size + 1, MAX_COMMIT_PAGE_BYTES)
                 .map_err(git_error("REVISION_NOT_FOUND"))?;
-            let next_page_token = if page.len() > size && skip + size <= MAX_COMMIT_SKIP {
-                page.truncate(size);
-                cursor::encode(METHOD, &tip, (skip + size) as i64)
+            // A page cut short by its bytes may have more behind it; the next page is
+            // then empty at worst, as past the end of history.
+            let cut = page.iter().map(|c| c.message.len()).sum::<usize>() > MAX_COMMIT_PAGE_BYTES;
+            let more = page.len() > size || cut;
+            page.truncate(size);
+            let next_page_token = if more && skip + page.len() <= MAX_COMMIT_SKIP {
+                cursor::encode(METHOD, &tip, (skip + page.len()) as i64)
             } else {
-                page.truncate(size);
                 String::new()
             };
             Ok(Response::new(ListCommitsResponse {
@@ -480,14 +497,19 @@ impl RepoService for Repos {
         blocking(permit, move || {
             let id = revision(&dir, &request.revision)?;
             let found = Gix
-                .log(&dir, &id, 0, 1)
+                .log(&dir, &id, 0, 1, MAX_COMMIT_PAGE_BYTES)
                 .map_err(git_error("REVISION_NOT_FOUND"))?
                 .pop()
                 .ok_or_else(|| git_error("REVISION_NOT_FOUND")(kajiba_git::Error::NotFound))?;
             let changes = Gix
-                .diff(&dir, found.parents.first().map(String::as_str), &id)
-                .map_err(git_error("REVISION_NOT_FOUND"))?;
-            let changes = too_large(changes, MAX_DIFF_CHANGES, "DIFF_TOO_LARGE")?
+                .diff(
+                    &dir,
+                    found.parents.first().map(String::as_str),
+                    &id,
+                    MAX_DIFF_CHANGES,
+                    MAX_DIFF_PATH_BYTES,
+                )
+                .map_err(git_error("REVISION_NOT_FOUND"))?
                 .into_iter()
                 .map(|change| FileChange {
                     path: change.path,

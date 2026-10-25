@@ -78,8 +78,9 @@ async fn raw(
         )
             .into_response(),
         Ok(Err(Error::NotFound)) => (StatusCode::NOT_FOUND, "file not found\n").into_response(),
-        Ok(Err(Error::TooLarge)) => {
-            (StatusCode::PAYLOAD_TOO_LARGE, "blob too large\n").into_response()
+        // The blob past 16 MiB, or a commit or tree object past its cap (ADR 0047).
+        Ok(Err(Error::TooLarge(_))) => {
+            (StatusCode::PAYLOAD_TOO_LARGE, "object too large\n").into_response()
         }
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }

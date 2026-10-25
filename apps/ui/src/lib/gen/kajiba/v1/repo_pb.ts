@@ -704,7 +704,7 @@ export const RepoService: GenService<{
     output: typeof GetTreeResponseSchema;
   },
   /**
-   * A file's content; above 16 MiB, RESOURCE_EXHAUSTED / BLOB_TOO_LARGE.
+   * A file's content; above 1 MiB, RESOURCE_EXHAUSTED / BLOB_TOO_LARGE: /raw/ serves larger files.
    *
    * @generated from rpc kajiba.v1.RepoService.GetBlob
    */

@@ -715,4 +715,74 @@ async fn a_blob_above_the_cap_is_resource_exhausted() {
         (status.code(), reason(&status).as_str()),
         (Code::ResourceExhausted, "BLOB_TOO_LARGE")
     );
+    // Its id is no revision and no cursor tip: refused on the object header.
+    let bare = fixture.bare("alice/demo").await;
+    let blob_id = git(&bare, &["rev-parse", "main:above"]).trim().to_owned();
+    for status in [
+        tree(repos, "alice/demo", &blob_id, "").await.unwrap_err(),
+        blob(repos, "alice/demo", &blob_id, "at").await.unwrap_err(),
+        commits(repos, &blob_id, 1, String::new())
+            .await
+            .unwrap_err(),
+        commits(repos, "", 1, cursor::encode("v1.ListCommits", &blob_id, 0))
+            .await
+            .unwrap_err(),
+        diff(repos, &blob_id).await.unwrap_err(),
+    ] {
+        assert_eq!(
+            (status.code(), reason(&status).as_str()),
+            (Code::NotFound, "REVISION_NOT_FOUND")
+        );
+    }
+}
+
+#[tokio::test]
+async fn commit_pages_end_at_their_byte_budget_and_oversized_commits_are_refused() {
+    let fixture = Fixture::new(DEMO).await;
+    fixture
+        .fill("alice/demo", &[("flake.nix", "{ }\n")], &[])
+        .await;
+    let bare = fixture.bare("alice/demo").await;
+    let tree_id = git(&bare, &["rev-parse", "main^{tree}"]).trim().to_owned();
+    let message = |bytes: usize| {
+        let path = bare.join("message");
+        std::fs::write(&path, "m".repeat(bytes)).unwrap();
+        path.to_str().unwrap().to_owned()
+    };
+    // Three commits of half a page each: a page of three ends after two.
+    let mut parent = git(&bare, &["rev-parse", "main"]).trim().to_owned();
+    for _ in 0..3 {
+        let path = message(MAX_COMMIT_PAGE_BYTES / 2 + 1);
+        parent = git(
+            &bare,
+            &["commit-tree", &tree_id, "-p", &parent, "-F", &path],
+        )
+        .trim()
+        .to_owned();
+    }
+    git(&bare, &["update-ref", "refs/heads/pages", &parent]);
+    let repos = &fixture.repos;
+    let page = commits(repos, "pages", 3, String::new()).await.unwrap();
+    assert_eq!(page.commits.len(), 2);
+    assert!(!page.next_page_token.is_empty());
+    // The third big commit, then main's small one.
+    let rest = commits(repos, "", 3, page.next_page_token).await.unwrap();
+    assert_eq!(rest.commits.len(), 2);
+    assert!(rest.next_page_token.is_empty());
+
+    let path = message(kajiba_git::MAX_COMMIT_OBJECT_BYTES as usize + 1);
+    let huge = git(&bare, &["commit-tree", &tree_id, "-F", &path])
+        .trim()
+        .to_owned();
+    git(&bare, &["update-ref", "refs/heads/huge", &huge]);
+    for status in [
+        tree(repos, "alice/demo", "huge", "").await.unwrap_err(),
+        commits(repos, "huge", 1, String::new()).await.unwrap_err(),
+        diff(repos, "huge").await.unwrap_err(),
+    ] {
+        assert_eq!(
+            (status.code(), reason(&status).as_str()),
+            (Code::ResourceExhausted, "COMMIT_TOO_LARGE")
+        );
+    }
 }
