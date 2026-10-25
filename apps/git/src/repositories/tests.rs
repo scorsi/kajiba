@@ -185,7 +185,6 @@ fn init_fetch_and_ref_updates_keep_group_read_without_group_write() {
             assert!(output.status.success(), "{output:?}");
             String::from_utf8(output.stdout).unwrap().trim().to_owned()
         };
-        assert_eq!(git(&path, &["config", "core.sharedRepository"]), "0640");
         let tree = git(&source, &["mktree"]);
         let commit = git(&source, &["commit-tree", &tree, "-m", "initial"]);
         git(&source, &["update-ref", "refs/heads/main", &commit]);

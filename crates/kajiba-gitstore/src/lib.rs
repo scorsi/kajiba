@@ -6,6 +6,7 @@
 pub mod import;
 
 use std::fmt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -195,6 +196,14 @@ fn git() -> Command {
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Group-read, never group-write, whatever the ambient umask (ADR 0055).
+    // SAFETY: umask(2) is async-signal-safe and touches no shared state.
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0o027);
+            Ok(())
+        });
+    }
     command
 }
 
@@ -485,14 +494,7 @@ impl GitStore for Gix<'_> {
             .map_err(|err| Error::Git(err.to_string()))?;
         let mut command = git();
         command
-            .args([
-                "-c",
-                "core.fsync=all",
-                "init",
-                "--bare",
-                "--template=",
-                "--shared=0640",
-            ])
+            .args(["-c", "core.fsync=all", "init", "--bare", "--template="])
             .arg(format!("--initial-branch={default_branch}"))
             .arg(path);
         run(command, "", IMPORT_TIMEOUT)?;
