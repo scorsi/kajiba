@@ -313,6 +313,38 @@ async fn ssh_readiness_refuses_wrong_truncated_and_stalled_banners() {
 }
 
 #[tokio::test]
+async fn ssh_readiness_recovers_after_a_banner_timeout() {
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let health = Health::new(
+        PathBuf::new(),
+        PathBuf::new(),
+        Some(listener.local_addr().unwrap()),
+    );
+    let peer = tokio::spawn(async move {
+        // Keep the first connection open without a banner until the next probe.
+        let (_stalled, _) = listener.accept().await.unwrap();
+        let (mut stream, _) = listener.accept().await.unwrap();
+        stream.write_all(b"SSH-2.0-OpenSSH_test\r\n").await.unwrap();
+    });
+
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(2), health.ssh_ready())
+            .await
+            .unwrap()
+    );
+    assert!(!health.ssh_ready().await);
+    health.ssh_status.lock().await.as_mut().unwrap().0 -= SSH_PROBE_TTL;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), health.ssh_ready())
+            .await
+            .unwrap()
+    );
+    peer.await.unwrap();
+}
+
+#[tokio::test]
 async fn ssh_readiness_reuses_cached_results_until_expiry() {
     let mut health = Health::new(
         PathBuf::new(),

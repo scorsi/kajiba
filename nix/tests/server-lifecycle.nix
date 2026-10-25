@@ -83,9 +83,9 @@ pkgs.testers.runNixOSTest {
         events = invocation_events()
         probes = [e for e in events if e["event"] == "request" and e.get("method") == "readyz" and e.get("status") == 200]
         assert probes, f"no /readyz 200 request in this invocation: {events}"
-        for path in ["healthz", "readyz"]:
-            code = machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:8080/{path}")
-            assert code == "200", f"/{path}: {code}"
+        machine.succeed("curl -fsS --max-time 2 http://127.0.0.1:8080/healthz")
+        # A fresh SSH banner probe can time out under VM load after startup's success.
+        machine.wait_until_succeeds("curl -fsS --max-time 2 http://127.0.0.1:8080/readyz", timeout=30)
 
 
     with subtest("ready through the module after migrating a fresh stateDir"):
