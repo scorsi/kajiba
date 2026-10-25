@@ -1,10 +1,11 @@
 use super::users::new_public_id;
+use crate::transport::git_side::{Repositories, mutation_error};
 use kajiba_core::config::{RepoConfig, Role};
-use kajiba_gitstore::GitStore;
+use kajiba_proto::git::v1::{CreateRepositoryRequest, SetHeadRequest};
 use sqlx::{Connection, SqliteConnection};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -26,10 +27,9 @@ enum Log {
 }
 
 /// Repository changes applied in the caller's transaction: log them once it commits,
-/// or remove the directories created for its rows if it does not.
+/// leaving abandoned creations for the next orphan sweep (0053).
 #[must_use]
 pub struct Applied {
-    created: Vec<PathBuf>,
     logs: Vec<Log>,
 }
 
@@ -48,13 +48,6 @@ impl Applied {
             }
         }
     }
-
-    pub fn abandoned(self) {
-        // Directories of rows that were never committed: remove them, they hold nothing.
-        for path in self.created {
-            let _ = std::fs::remove_dir_all(path);
-        }
-    }
 }
 
 /// ADR 0026: make `repo`, `repo_redirect`, `repo_permission` and the declared
@@ -63,43 +56,52 @@ impl Applied {
 pub async fn reconcile_repos(
     writer: &mut SqliteConnection,
     state_dir: &Path,
-    store: &impl GitStore,
+    git: &mut Repositories,
     declared: &BTreeMap<String, RepoConfig>,
 ) -> Result<Applied, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| format!("repository reconciliation: {err}"))?
         .as_millis() as i64;
-    let mut applied = Applied {
-        created: Vec::new(),
-        logs: Vec::new(),
-    };
-    let result = apply(
-        writer,
-        state_dir,
-        store,
-        declared,
-        now,
-        &mut applied.created,
-        &mut applied.logs,
-    )
-    .await;
-    match result {
-        Ok(()) => Ok(applied),
-        Err(err) => {
-            applied.abandoned();
-            Err(format!("repository reconciliation: {err}"))
-        }
+    let mut applied = Applied { logs: Vec::new() };
+    apply(writer, state_dir, git, declared, now, &mut applied.logs)
+        .await
+        .map_err(|err| format!("repository reconciliation: {err}"))?;
+    Ok(applied)
+}
+
+/// Compare the file, not just the previous row: a failed transaction may have changed HEAD.
+async fn set_head(
+    state_dir: &Path,
+    git: &mut Repositories,
+    id: &str,
+    branch: &str,
+) -> Result<(), String> {
+    let path = state_dir.join(format!("repos/{id}.git/HEAD"));
+    if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file())
+        && std::fs::read(&path)
+            .is_ok_and(|head| head == format!("ref: refs/heads/{branch}\n").as_bytes())
+    {
+        return Ok(());
     }
+    git.client()
+        .await
+        .map_err(mutation_error)?
+        .set_head(SetHeadRequest {
+            repo_public_id: id.into(),
+            branch: branch.into(),
+        })
+        .await
+        .map_err(mutation_error)?;
+    Ok(())
 }
 
 async fn apply(
     writer: &mut SqliteConnection,
     state_dir: &Path,
-    store: &impl GitStore,
+    git: &mut Repositories,
     declared: &BTreeMap<String, RepoConfig>,
     now: i64,
-    created: &mut Vec<PathBuf>,
     logs: &mut Vec<Log>,
 ) -> Result<(), String> {
     let sql = |err: sqlx::Error| err.to_string();
@@ -133,9 +135,8 @@ async fn apply(
     .collect();
     // Repair uncommitted HEAD changes before declarations, including archived rows.
     for row in &rows {
-        let path = state_dir.join(format!("repos/{}.git", row.public_id));
-        store
-            .set_head(&path, &row.default_branch)
+        set_head(state_dir, git, &row.public_id, &row.default_branch)
+            .await
             .map_err(|err| format!("repos.{}.default_branch: {err}", row.key))?;
     }
     let redirects: Vec<(i64, String)> =
@@ -218,9 +219,8 @@ async fn apply(
             .execute(&mut *tx)
             .await
             .map_err(sql)?;
-            let path = state_dir.join(format!("repos/{}.git", row.public_id));
-            store
-                .set_head(&path, &repo.default_branch)
+            set_head(state_dir, git, &row.public_id, &repo.default_branch)
+                .await
                 .map_err(|err| format!("repos.{key}.default_branch: {err}"))?;
             let previous = format!("{}/{}", row.owner, row.name);
             if previous != current {
@@ -383,20 +383,17 @@ async fn apply(
         logs.push(Log::Archived(format!("{}/{}", row.owner, row.name)));
     }
 
-    // ADR 0026: init in tmp/, rename into repos/, then commit the rows.
+    // The daemon makes the directory durable before the row commits (0053).
     for (public_id, branch) in new {
-        let name = format!("{public_id}.git");
-        let tmp = state_dir.join("tmp").join(&name);
-        let path = state_dir.join("repos").join(&name);
-        store
-            .init_bare(&tmp, branch)
-            .map_err(|err| format!("{}: {err}", tmp.display()))?;
-        // The staged content is durable before the row that points at it (ADR 0003).
-        crate::state::sync_tree(&tmp).map_err(|err| format!("{}: {err}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).map_err(|err| format!("{}: {err}", path.display()))?;
-        created.push(path);
-        crate::state::sync_dir(&state_dir.join("repos"))
-            .map_err(|err| format!("{}/repos: {err}", state_dir.display()))?;
+        git.client()
+            .await
+            .map_err(mutation_error)?
+            .create_repository(CreateRepositoryRequest {
+                repo_public_id: public_id,
+                default_branch: branch.into(),
+            })
+            .await
+            .map_err(mutation_error)?;
     }
     tx.commit().await.map_err(sql)
 }

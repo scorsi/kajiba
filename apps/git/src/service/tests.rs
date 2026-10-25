@@ -11,6 +11,9 @@ use tonic::service::Routes;
 async fn hello_requires_exact_version_and_returns_this_process_generation() {
     let git = Git {
         generation: kajiba_core::new_id().unwrap(),
+        repositories: Arc::new(crate::repositories::Repositories::new(
+            TempDir::new().0.clone(),
+        )),
     };
     assert!(kajiba_core::names::is_public_id(&git.generation));
     assert_ne!(git.generation, kajiba_core::new_id().unwrap());

@@ -530,9 +530,14 @@ async fn a_killed_import_converts_once_after_restart() {
 
         // Restart on the same state directory, as `serve` does.
         let mut state = State::at(dir).await;
-        crate::state::cleanup(&state.dir.0, &mut state.writer)
-            .await
-            .unwrap();
+        crate::state::cleanup(
+            &state.dir.0,
+            &state.dir.0,
+            &mut state.daemon.client,
+            &mut state.writer,
+        )
+        .await
+        .unwrap();
         let (gate, bus) = (Arc::new(Gate::default()), Arc::new(EventBus::default()));
         gate.reconcile(&mut state.writer, &bus, &state.dir.0, &Gix)
             .await

@@ -193,3 +193,94 @@ async fn daemon_emits_shared_json_logs_on_stderr() {
     assert_eq!(line["level"], "info");
     assert!(line["ts"].is_string());
 }
+
+#[tokio::test]
+async fn repository_rpcs_run_in_the_real_daemon() {
+    use kajiba_proto::git::v1::{
+        CreateRepositoryRequest, QuarantineRepositoryRequest, SetHeadRequest,
+        git_service_client::GitServiceClient,
+    };
+    let temp = TempDir::new();
+    let root = temp.0.join("state");
+    let socket = temp.0.join("local.sock");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let daemon = tokio::spawn({
+        let root = root.clone();
+        let socket = socket.clone();
+        let server = temp.0.join("absent.sock");
+        async move {
+            run(
+                &root,
+                &server,
+                &socket,
+                vec![kajiba_core::local::effective_uid()],
+                None,
+                async {
+                    let _ = stopped.await;
+                },
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !socket.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut client =
+        GitServiceClient::new(kajiba_core::local::channel(&socket, None).await.unwrap());
+    let id = "00000000000000000000000001";
+    client
+        .create_repository(CreateRepositoryRequest {
+            repo_public_id: id.into(),
+            default_branch: "main".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .create_repository(CreateRepositoryRequest {
+                repo_public_id: id.into(),
+                default_branch: "main".into()
+            })
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::AlreadyExists
+    );
+    client
+        .set_head(SetHeadRequest {
+            repo_public_id: id.into(),
+            branch: "dev".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join(format!("repos/{id}.git/HEAD"))).unwrap(),
+        "ref: refs/heads/dev\n"
+    );
+    let destination = client
+        .quarantine_repository(QuarantineRepositoryRequest {
+            repo_public_id: id.into(),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .destination;
+    assert!(Path::new(&destination).join("HEAD").is_file());
+    assert_eq!(
+        client
+            .set_head(SetHeadRequest {
+                repo_public_id: id.into(),
+                branch: "main".into()
+            })
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::NotFound
+    );
+    stop.send(()).unwrap();
+    daemon.await.unwrap().unwrap();
+}

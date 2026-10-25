@@ -1,4 +1,5 @@
 mod daemon;
+mod repositories;
 mod service;
 mod state;
 

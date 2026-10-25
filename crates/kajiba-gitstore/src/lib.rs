@@ -356,11 +356,45 @@ fn run(mut command: Command, stdin: &str, deadline: Duration) -> Result<String> 
 }
 
 /// The gix + `git` binary implementation.
-pub struct Gix;
+pub struct Gix<'a> {
+    trusted_repos: Option<&'a Path>,
+}
 
-fn open(repo: &Path) -> Result<gix::Repository> {
-    // Isolated: the server's environment and global configuration never apply.
-    Ok(gix::open_opts(repo, gix::open::Options::isolated())?)
+/// Ordinary ownership checks for callers reading repositories they own.
+#[allow(non_upper_case_globals)]
+pub const Gix: Gix<'static> = Gix {
+    trusted_repos: None,
+};
+
+impl<'a> Gix<'a> {
+    /// Trust only canonical bare repository paths directly under the configured repos/.
+    pub fn shared(repos: &'a Path) -> Self {
+        Self {
+            trusted_repos: Some(repos),
+        }
+    }
+
+    fn trusted(&self, repo: &Path) -> Option<std::path::PathBuf> {
+        let root = self.trusted_repos?.canonicalize().ok()?;
+        let path = repo.canonicalize().ok()?;
+        (path.parent() == Some(root.as_path())
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".git"))
+                .is_some_and(kajiba_core::names::is_public_id)
+            && std::fs::symlink_metadata(repo).is_ok_and(|meta| meta.is_dir())
+            && !path.join("commondir").exists())
+        .then_some(path)
+    }
+
+    fn open(&self, repo: &Path) -> Result<gix::Repository> {
+        let mut options = gix::open::Options::isolated().bail_if_untrusted(true);
+        if self.trusted(repo).is_some() {
+            options = options.with(gix::sec::Trust::Full);
+        }
+        Ok(gix::open_opts(repo, options)?)
+    }
 }
 
 /// Caps on the objects browsing loads whole (ADR 0047), checked on the object header
@@ -443,54 +477,73 @@ fn tree_at<'r>(repo: &'r gix::Repository, commit_id: &str, path: &str) -> Result
     load_tree(repo, id)
 }
 
-impl GitStore for Gix {
+impl GitStore for Gix<'_> {
     fn init_bare(&self, path: &Path, default_branch: &str) -> Result<()> {
         kajiba_core::names::validate_ref(&format!("refs/heads/{default_branch}"))
             .map_err(|err| Error::Git(err.to_string()))?;
-        gix::init_bare(path)?;
-        // Objects and refs reach the disk before the database records them (ADR 0003).
-        let config = path.join("config");
-        let mut file =
-            gix::config::File::from_path_no_includes(config.clone(), gix::config::Source::Local)
-                .map_err(|err| Error::Git(err.to_string()))?;
-        file.set_raw_value_by("core", None, "fsync", "all")
-            .map_err(|err| Error::Git(err.to_string()))?;
-        std::fs::write(&config, file.to_bstring()).map_err(|err| Error::Git(err.to_string()))?;
-        self.set_head(path, default_branch)
+        let mut command = git();
+        command
+            .args([
+                "-c",
+                "core.fsync=all",
+                "init",
+                "--bare",
+                "--template=",
+                "--shared=0640",
+            ])
+            .arg(format!("--initial-branch={default_branch}"))
+            .arg(path);
+        run(command, "", IMPORT_TIMEOUT)?;
+        let mut command = git();
+        command
+            .arg("--git-dir")
+            .arg(path)
+            .args(["config", "core.fsync", "all"]);
+        run(command, "", IMPORT_TIMEOUT)?;
+        Ok(())
     }
 
     fn set_head(&self, repo: &Path, branch: &str) -> Result<()> {
-        use std::io::Write;
         let head = format!("refs/heads/{branch}");
         kajiba_core::names::validate_ref(&head).map_err(|err| Error::Git(err.to_string()))?;
-        let io = |err: std::io::Error| Error::Git(format!("{}/HEAD: {err}", repo.display()));
         let path = repo.join("HEAD");
-        let content = format!("ref: {head}\n");
-        // Idempotent: startup calls this for every declared repository, so a HEAD left
-        // behind by a failed or interrupted run converges without touching the others.
-        let current = std::fs::symlink_metadata(&path).map_err(io)?;
-        if current.is_file() && std::fs::read(&path).map_err(io)? == content.as_bytes() {
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file())
+            && std::fs::read(&path).is_ok_and(|bytes| bytes == format!("ref: {head}\n").as_bytes())
+        {
             return Ok(());
         }
-        // Temp file, fsync, rename over HEAD, fsync the directory: git never sees a
-        // truncated HEAD. `create_new` refuses to write through a planted symlink.
-        let tmp = repo.join("HEAD.tmp");
-        let _ = std::fs::remove_file(&tmp);
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(io)?;
-        file.write_all(content.as_bytes()).map_err(io)?;
-        file.sync_all().map_err(io)?;
-        std::fs::rename(&tmp, &path).map_err(io)?;
-        std::fs::File::open(repo)
-            .and_then(|dir| dir.sync_all())
-            .map_err(io)
+        // Re-init repairs an interrupted HEAD replacement without touching refs.
+        let metadata = std::fs::symlink_metadata(&path);
+        let missing = metadata
+            .as_ref()
+            .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound);
+        if missing
+            || metadata.is_ok_and(|meta| meta.is_symlink())
+            || std::fs::read(&path).is_ok_and(|bytes| bytes.is_empty())
+        {
+            kajiba_core::state::real_dir(&repo.join("objects"))
+                .map_err(|err| Error::Git(err.to_string()))?;
+            kajiba_core::state::real_dir(&repo.join("refs"))
+                .map_err(|err| Error::Git(err.to_string()))?;
+            if !missing {
+                std::fs::remove_file(&path).map_err(|err| Error::Git(err.to_string()))?;
+            }
+            self.init_bare(repo, branch)?;
+        }
+        let mut command = git();
+        command
+            .arg("--git-dir")
+            .arg(repo)
+            .args(["symbolic-ref", "HEAD", &head]);
+        run(command, "", IMPORT_TIMEOUT)?;
+        std::fs::File::open(repo.join("HEAD"))
+            .and_then(|f| f.sync_all())
+            .and_then(|()| kajiba_core::state::sync_dir(repo))
+            .map_err(|err| Error::Git(err.to_string()))
     }
 
     fn refs(&self, repo: &Path) -> Result<Vec<Ref>> {
-        let repo = open(repo)?;
+        let repo = self.open(repo)?;
         let mut refs = Vec::new();
         for reference in repo.references()?.all()? {
             let mut reference = reference?;
@@ -504,7 +557,7 @@ impl GitStore for Gix {
     }
 
     fn tree(&self, repo: &Path, commit: &str, path: &str, limit: usize) -> Result<Vec<TreeEntry>> {
-        let repo = open(repo)?;
+        let repo = self.open(repo)?;
         let tree = tree_at(&repo, commit, path)?;
         let mut entries = Vec::new();
         for entry in tree.iter() {
@@ -529,7 +582,7 @@ impl GitStore for Gix {
     }
 
     fn blob(&self, repo: &Path, commit: &str, path: &str, limit: u64) -> Result<Vec<u8>> {
-        let repo = open(repo)?;
+        let repo = self.open(repo)?;
         let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
         let tree = tree_at(&repo, commit, dir)?;
         let entry = tree.find_entry(name).ok_or(Error::NotFound)?;
@@ -553,7 +606,7 @@ impl GitStore for Gix {
     ) -> Result<Vec<Commit>> {
         use std::cmp::Reverse;
         use std::collections::{BinaryHeap, HashSet};
-        let repo = open(repo)?;
+        let repo = self.open(repo)?;
         let tip = commit(&repo, commit_id)?;
         // The product's own commit-time walk (ADR 0051): newest first, insertion order
         // among equal times; every ancestor's header is checked by `load_commit` before
@@ -604,7 +657,7 @@ impl GitStore for Gix {
         max_changes: usize,
         max_bytes: usize,
     ) -> Result<Vec<Change>> {
-        let repo = open(repo)?;
+        let repo = self.open(repo)?;
         let old = match from {
             Some(id) => tree_at(&repo, id, "")?,
             None => repo.empty_tree(),
@@ -695,7 +748,7 @@ impl GitStore for Gix {
     fn resolve<'a>(&self, repo_path: &Path, spec: &'a str) -> Result<(String, &'a str)> {
         // Exact names from the listing: gix's lookup would also try `refs/tags/<name>`, ….
         let refs = self.refs(repo_path)?;
-        let repo = open(repo_path)?;
+        let repo = self.open(repo_path)?;
         let ends: Vec<usize> = spec
             .match_indices('/')
             .map(|(end, _)| end)
@@ -719,6 +772,11 @@ impl GitStore for Gix {
 
     fn transport(&self, service: Service, repo: &Path, options: &[&str]) -> Command {
         let mut command = git();
+        if let Some(path) = self.trusted(repo) {
+            command
+                .arg("-c")
+                .arg(format!("safe.directory={}", path.display()));
+        }
         command
             .arg(match service {
                 Service::UploadPack => "upload-pack",

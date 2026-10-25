@@ -52,6 +52,9 @@ async fn run(
     let routes = Routes::new(
         kajiba_proto::git::v1::git_service_server::GitServiceServer::new(crate::service::Git {
             generation: generation.clone(),
+            repositories: std::sync::Arc::new(crate::repositories::Repositories::new(
+                state_dir.to_owned(),
+            )),
         }),
     );
     tokio::select! {

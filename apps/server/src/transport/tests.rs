@@ -28,8 +28,9 @@ impl State {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let lock = crate::state::prepare(&dir).unwrap();
+        fs::create_dir(dir.join("repos")).unwrap();
         Self {
-            health: Health::new(dir),
+            health: Health::new(dir.clone(), dir),
             _lock: lock,
         }
     }
@@ -39,9 +40,14 @@ impl State {
             crate::db::open(&self.health.state_dir.join("db/kajiba.sqlite"))
                 .await
                 .unwrap();
-        crate::state::cleanup(&self.health.state_dir, &mut writer)
-            .await
-            .unwrap();
+        crate::state::cleanup(
+            &self.health.state_dir,
+            &self.health.git_state_dir,
+            &mut git_side::Repositories::new(PathBuf::from("/missing").as_path()),
+            &mut writer,
+        )
+        .await
+        .unwrap();
         crate::db::reconcile(&mut writer, &Default::default())
             .await
             .unwrap();

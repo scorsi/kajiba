@@ -140,7 +140,8 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let health = transport::Health::new(config.state_dir.clone());
+            let health =
+                transport::Health::new(config.state_dir.clone(), config.git.state_dir.clone());
             let (mut writer, readers) =
                 match db::open(&config.state_dir.join("db/kajiba.sqlite")).await {
                     Ok(database) => database,
@@ -149,20 +150,28 @@ async fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
                 };
-            if let Err(err) = state::cleanup(&config.state_dir, &mut writer).await {
-                log::error("fatal", &err);
-                return ExitCode::FAILURE;
-            }
-            if let Err(err) =
-                db::reconcile_declared(&mut writer, &config, &kajiba_gitstore::Gix).await
+            let mut git = transport::git_side::Repositories::new(&config.git.socket);
+            if let Err(err) = state::cleanup(
+                &config.state_dir,
+                &config.git.state_dir,
+                &mut git,
+                &mut writer,
+            )
+            .await
             {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
+            if let Err(err) = db::reconcile_declared(&mut writer, &config, &mut git).await {
+                log::error("fatal", &err);
+                return ExitCode::FAILURE;
+            }
+            let repos_root = config.git.state_dir.join("repos");
+            let store = kajiba_gitstore::Gix::shared(&repos_root);
             let bus = std::sync::Arc::new(db::events::EventBus::default());
             let gate = std::sync::Arc::new(db::pushes::Gate::default());
             if let Err(err) = gate
-                .reconcile(&mut writer, &bus, &config.state_dir, &kajiba_gitstore::Gix)
+                .reconcile(&mut writer, &bus, &config.git.state_dir, &store)
                 .await
             {
                 log::error("fatal", &err);
@@ -178,13 +187,13 @@ async fn main() -> ExitCode {
                 enrollment_ttl: config.auth.enrollment_ttl,
                 gate: gate.clone(),
                 bus: bus.clone(),
-                state_dir: config.state_dir.clone(),
+                state_dir: config.git.state_dir.clone(),
             };
             health.started(readers.clone());
             return match tokio::select! {
                 result = transport::serve(&config.http, &config.metrics, &config.git, health, readers, bus.clone(), admin) => result,
                 () = dispatcher.run(&bus, &writer) => unreachable!("dispatcher runs until shutdown"),
-                () = gate.recover_periodically(&db::events::SystemClock, &writer, &bus, &config.state_dir, &kajiba_gitstore::Gix) => unreachable!("recovery runs until shutdown"),
+                () = gate.recover_periodically(&db::events::SystemClock, &writer, &bus, &config.git.state_dir, &store) => unreachable!("recovery runs until shutdown"),
             } {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {

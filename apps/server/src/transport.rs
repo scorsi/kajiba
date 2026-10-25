@@ -31,6 +31,7 @@ use tonic::{Request, Response, Status, service::Routes};
 pub struct Health {
     database: Arc<OnceLock<SqlitePool>>,
     state_dir: PathBuf,
+    git_state_dir: PathBuf,
     local_serving: Arc<local::Serving>,
     public_reads: Arc<Semaphore>,
     gate_serving: Arc<local::Serving>,
@@ -38,9 +39,10 @@ pub struct Health {
 }
 
 impl Health {
-    pub fn new(state_dir: PathBuf) -> Self {
+    pub fn new(state_dir: PathBuf, git_state_dir: PathBuf) -> Self {
         Self {
             database: Arc::default(),
+            git_state_dir,
             state_dir,
             local_serving: Arc::default(),
             public_reads: Arc::new(Semaphore::new(PUBLIC_READS)),
@@ -64,7 +66,8 @@ impl Health {
         self.local_serving.ready()
             && self.gate_serving.ready()
             && self.git_side.ready()
-            && ["repos", "db", "ci/logs", "ci/artifacts", "tmp"]
+            && self.git_state_dir.join("repos").is_dir()
+            && ["db", "ci/logs", "ci/artifacts", "tmp"]
                 .iter()
                 .all(|name| self.state_dir.join(name).is_dir())
             && sqlx::query_scalar::<_, i64>("SELECT 1")
@@ -349,7 +352,7 @@ pub mod correlation;
 pub mod cursor;
 mod gate;
 pub mod git_http;
-mod git_side;
+pub(crate) mod git_side;
 pub mod local;
 pub mod raw;
 pub mod repos;

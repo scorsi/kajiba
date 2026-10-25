@@ -1,5 +1,4 @@
 use super::*;
-use kajiba_gitstore::Gix;
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicUsize, Ordering},
@@ -10,6 +9,7 @@ use tonic_types::StatusExt;
 
 /// A started state directory whose repositories are reconciled from `repos.<key>` tables.
 pub(in crate::transport) struct Fixture {
+    daemon: crate::transport::git_side::fake::Fake,
     pub(in crate::transport) dir: PathBuf,
     _lock: crate::state::StateLock,
     writer: SqliteConnection,
@@ -24,13 +24,15 @@ impl Fixture {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        let lock = crate::state::prepare(&dir).unwrap();
-        let (writer, readers) = crate::db::open(&dir.join("db/kajiba.sqlite"))
+        let lock = crate::state::prepare(&dir.join("server")).unwrap();
+        let (writer, readers) = crate::db::open(&dir.join("server/db/kajiba.sqlite"))
             .await
             .unwrap();
-        let health = Health::new(dir.clone());
+        let health = Health::new(dir.join("server"), dir.clone());
         health.started(readers);
+        let daemon = crate::transport::git_side::fake::Fake::start(&dir).await;
         let mut fixture = Self {
+            daemon,
             dir,
             _lock: lock,
             writer,
@@ -46,8 +48,9 @@ impl Fixture {
              [mirror.credentials.github]\ntoken_file='/run/secrets/github'\n{repos}"
         ))
         .unwrap();
-        config.state_dir = self.dir.clone();
-        crate::db::reconcile_declared(&mut self.writer, &config, &Gix)
+        config.state_dir = self.dir.join("server");
+        config.git.state_dir = self.dir.clone();
+        crate::db::reconcile_declared(&mut self.writer, &config, &mut self.daemon.client)
             .await
             .unwrap();
     }

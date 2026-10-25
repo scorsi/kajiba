@@ -68,7 +68,7 @@ pub async fn import(
     {
         // Emptiness and admission under one writer hold: two imports cannot both pass.
         let mut connection = writer.lock().await;
-        let existing = Gix
+        let existing = Gix::shared(&state_dir.join("repos"))
             .refs(&path)
             .map_err(|err| Error::Internal(err.to_string()))?;
         if !existing.is_empty() {
@@ -157,8 +157,14 @@ pub(crate) fn supervise(
             .map_err(|err| err.to_string());
         checkpoint("fetched");
         gate.exited(repo_id);
-        gate.reconcile_repo(&mut *writer.lock().await, &bus, &state_dir, &Gix, repo_id)
-            .await?;
+        gate.reconcile_repo(
+            &mut *writer.lock().await,
+            &bus,
+            &state_dir,
+            &Gix::shared(&state_dir.join("repos")),
+            repo_id,
+        )
+        .await?;
         mutated
     })
 }

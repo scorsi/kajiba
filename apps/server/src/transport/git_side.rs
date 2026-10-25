@@ -4,6 +4,62 @@ use std::{path::Path, sync::Mutex, time::Duration};
 use tonic::{Status, transport::Channel};
 use tonic_types::StatusExt;
 
+/// Startup mutations connect on demand; a read-only startup needs no daemon.
+pub struct Repositories {
+    socket: std::path::PathBuf,
+    client: Option<GitServiceClient<Channel>>,
+}
+
+impl Repositories {
+    pub fn new(socket: &Path) -> Self {
+        Self {
+            socket: socket.into(),
+            client: None,
+        }
+    }
+
+    pub async fn client(&mut self) -> Result<&mut GitServiceClient<Channel>, Status> {
+        if self.client.is_none() {
+            self.client = Some(GitServiceClient::new(
+                channel(&self.socket, Some(Duration::from_secs(5)))
+                    .await
+                    .map_err(unavailable)?,
+            ));
+        }
+        let client = self.client.as_mut().unwrap();
+        let hello = client
+            .hello(HelloRequest {
+                version: env!("CARGO_PKG_VERSION").into(),
+            })
+            .await
+            .map_err(unavailable)?
+            .into_inner();
+        if let Some(err) = version_error(env!("CARGO_PKG_VERSION"), &hello.version) {
+            return Err(unavailable(err));
+        }
+        Ok(client)
+    }
+}
+
+pub fn unavailable(err: impl std::fmt::Display) -> Status {
+    rpc_error(
+        tonic::Code::Unavailable,
+        "GIT_SIDE_UNAVAILABLE",
+        format!("GIT_SIDE_UNAVAILABLE: {err}"),
+    )
+}
+
+pub fn mutation_error(err: Status) -> String {
+    if matches!(
+        err.code(),
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+    ) {
+        unavailable(err).to_string()
+    } else {
+        err.to_string()
+    }
+}
+
 #[derive(Default)]
 pub struct Link {
     client: Mutex<Option<GitServiceClient<Channel>>>,
@@ -129,3 +185,6 @@ impl Link {
 
 #[cfg(test)]
 pub(super) mod tests;
+
+#[cfg(test)]
+pub(crate) mod fake;

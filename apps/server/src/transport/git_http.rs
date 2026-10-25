@@ -49,12 +49,16 @@ fn protocol(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn command(
+    root: &std::path::Path,
     path: &std::path::Path,
     options: &[&str],
     headers: &HeaderMap,
 ) -> tokio::process::Command {
-    let mut command =
-        tokio::process::Command::from(Gix.transport(Service::UploadPack, path, options));
+    let mut command = tokio::process::Command::from(Gix::shared(root).transport(
+        Service::UploadPack,
+        path,
+        options,
+    ));
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -90,9 +94,14 @@ async fn info_refs(
         Ok(permit) => permit,
         Err(response) => return response,
     };
-    let child = match command(&path, &["--stateless-rpc", "--advertise-refs"], &headers)
-        .stdin(Stdio::null())
-        .spawn()
+    let child = match command(
+        &repos.0.git_state_dir.join("repos"),
+        &path,
+        &["--stateless-rpc", "--advertise-refs"],
+        &headers,
+    )
+    .stdin(Stdio::null())
+    .spawn()
     {
         Ok(child) => child,
         Err(err) => return internal(err),
@@ -184,9 +193,14 @@ async fn upload_pack(
         },
         Some(_) => return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
     };
-    let child = match command(&path, &["--stateless-rpc"], &parts.headers)
-        .stdin(Stdio::piped())
-        .spawn()
+    let child = match command(
+        &repos.0.git_state_dir.join("repos"),
+        &path,
+        &["--stateless-rpc"],
+        &parts.headers,
+    )
+    .stdin(Stdio::piped())
+    .spawn()
     {
         Ok(child) => child,
         Err(err) => return internal(err),

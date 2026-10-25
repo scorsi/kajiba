@@ -66,9 +66,11 @@ async fn raw(
     };
     // The permit travels with the blocking work and its allocation, including after
     // handler cancellation.
+    let root = repos.0.git_state_dir.join("repos");
     let blob = tokio::task::spawn_blocking(move || {
-        let (commit, file) = Gix.resolve(&path, &spec)?;
-        Gix.blob(&path, &commit, file, BLOB_LIMIT)
+        let (commit, file) = Gix::shared(&root).resolve(&path, &spec)?;
+        Gix::shared(&root)
+            .blob(&path, &commit, file, BLOB_LIMIT)
             .map(|data| (data, permit))
     })
     .await;

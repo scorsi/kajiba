@@ -1,5 +1,5 @@
 use super::*;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 /// Runs the `git` binary with an isolated configuration and fixed identity.
 fn git(dir: &Path, args: &[&str], date: &str) -> String {
@@ -148,6 +148,12 @@ fn set_head_is_idempotent_and_replaces_head_atomically() {
         "ref: refs/heads/main\n"
     );
     assert!(!bare.join("HEAD.tmp").exists());
+    std::fs::remove_file(&head).unwrap();
+    Gix.set_head(&bare, "trunk").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&head).unwrap(),
+        "ref: refs/heads/trunk\n"
+    );
     assert!(Gix.set_head(&dir.join("missing.git"), "main").is_err());
 }
 
@@ -577,7 +583,7 @@ fn truncate_loose(bare: &Path, id: &str) {
     let bytes = std::fs::read(&path).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     std::fs::write(&path, &bytes[..64]).unwrap();
-    let repo = open(bare).unwrap();
+    let repo = Gix.open(bare).unwrap();
     let id = gix::ObjectId::from_hex(id.as_bytes()).unwrap();
     assert!(repo.find_header(id).is_ok() && repo.find_object(id).is_err());
 }
@@ -851,4 +857,55 @@ fn page_budget_counts_author_fields_and_parents() {
         assert_eq!(Gix.log(&f.bare, tip, 0, 10, bytes).unwrap().len(), 2);
     }
     assert_eq!(Gix.log(&f.bare, &wide, 0, 10, 4000).unwrap().len(), 1);
+}
+
+#[test]
+fn shared_repository_trust_is_scoped_to_configured_canonical_ulid_paths() {
+    let root = scratch("trust");
+    let repos = root.join("repos");
+    fs::create_dir(&repos).unwrap();
+    let id = "00000000000000000000000001.git";
+    let own = repos.join(id);
+    let outside = root.join(id);
+    Gix.init_bare(&own, "main").unwrap();
+    Gix.init_bare(&outside, "main").unwrap();
+    let shared = Gix::shared(&repos);
+    assert!(shared.trusted(&own).is_some());
+    assert!(shared.trusted(&outside).is_none());
+    assert!(Gix.trusted(&own).is_none());
+    let alias = repos.join("00000000000000000000000002.git");
+    std::os::unix::fs::symlink(&outside, &alias).unwrap();
+    assert!(shared.trusted(&alias).is_none());
+    let unrelated = repos.join("not-a-public-id.git");
+    Gix.init_bare(&unrelated, "main").unwrap();
+    assert!(shared.trusted(&unrelated).is_none());
+    for path in [&own, &outside, &alias, &unrelated] {
+        let command = shared.transport(
+            Service::UploadPack,
+            path,
+            &["--stateless-rpc", "--advertise-refs"],
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let trusted: Vec<_> = args
+            .iter()
+            .filter(|arg| arg.starts_with("safe.directory="))
+            .collect();
+        if path == &own {
+            assert_eq!(
+                trusted,
+                [&format!(
+                    "safe.directory={}",
+                    own.canonicalize().unwrap().display()
+                )]
+            );
+            assert!(shared.refs(path).unwrap().is_empty());
+        } else {
+            assert!(trusted.is_empty(), "{args:?}");
+        }
+    }
+    fs::write(own.join("commondir"), outside.to_str().unwrap()).unwrap();
+    assert!(shared.trusted(&own).is_none());
 }

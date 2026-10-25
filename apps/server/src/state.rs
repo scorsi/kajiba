@@ -1,10 +1,4 @@
-use std::{
-    collections::HashSet,
-    ffi::OsString,
-    fs::{self, File},
-    io,
-    path::Path,
-};
+use std::{collections::HashSet, ffi::OsString, fs, io, path::Path};
 
 // Keep the returned lock for the server lifetime; never unlink the lock file.
 pub fn prepare(state_dir: &Path) -> Result<StateLock, String> {
@@ -15,45 +9,31 @@ pub use kajiba_core::state::StateLock;
 pub(crate) use kajiba_core::state::sync_dir;
 use kajiba_core::state::{create_dir_all, real_dir};
 
-/// Every file and directory under `path`, then `path` itself.
-pub(crate) fn sync_tree(path: &Path) -> io::Result<()> {
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            sync_tree(&entry.path())?;
-        } else {
-            File::open(entry.path())?.sync_all()?;
-        }
-    }
-    sync_dir(path)
-}
-
 fn prepare_with_sync(
     state_dir: &Path,
     sync: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> Result<StateLock, String> {
     create_dir_all(state_dir, sync).map_err(|err| format!("{}: {err}", state_dir.display()))?;
     let lock = StateLock::acquire(&state_dir.join("kajiba.lock"))?;
-    for name in ["repos", "db", "ci/logs", "ci/artifacts", "tmp"] {
+    for name in ["db", "ci/logs", "ci/artifacts", "tmp"] {
         let path = state_dir.join(name);
         create_dir_all(&path, sync).map_err(|err| format!("{}: {err}", path.display()))?;
     }
-    for name in ["repos", "db", "ci", "ci/logs", "ci/artifacts", "tmp"] {
+    for name in ["db", "ci", "ci/logs", "ci/artifacts", "tmp"] {
         real_dir(&state_dir.join(name)).map_err(|err| err.to_string())?;
     }
     Ok(lock)
 }
 
 // Run after migrations, while holding the state lock and before admitting work.
-pub async fn cleanup(state_dir: &Path, writer: &mut sqlx::SqliteConnection) -> Result<(), String> {
-    cleanup_with_sync(state_dir, writer, &mut sync_dir).await
-}
-
-async fn cleanup_with_sync(
+pub async fn cleanup(
     state_dir: &Path,
+    git_state_dir: &Path,
+    git: &mut crate::transport::git_side::Repositories,
     writer: &mut sqlx::SqliteConnection,
-    sync: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> Result<(), String> {
+    use crate::transport::git_side::mutation_error;
+    use kajiba_proto::git::v1::QuarantineRepositoryRequest;
     let ids: Vec<String> = sqlx::query_scalar("SELECT public_id FROM repo")
         .fetch_all(writer)
         .await
@@ -62,15 +42,14 @@ async fn cleanup_with_sync(
         .into_iter()
         .map(|id| format!("{id}.git").into())
         .collect();
-    let result = (|| -> io::Result<()> {
-        let tmp = state_dir.join("tmp");
-        let orphans = tmp.join("orphans");
+    let tmp = state_dir.join("tmp");
+    let repos = git_state_dir.join("repos");
+    let cleanup = || -> io::Result<()> {
         real_dir(&tmp)?;
-        real_dir(&state_dir.join("repos"))?;
+        real_dir(&repos)?;
         for entry in fs::read_dir(&tmp)? {
             let entry = entry?;
             let kind = entry.file_type()?;
-            // Quarantined repositories must survive subsequent startups.
             if entry.file_name() == "orphans" {
                 if !kind.is_dir() {
                     return Err(io::Error::other("tmp/orphans is not a directory"));
@@ -81,40 +60,37 @@ async fn cleanup_with_sync(
                 fs::remove_file(entry.path())?;
             }
         }
-        for entry in fs::read_dir(state_dir.join("repos"))? {
-            let entry = entry?;
-            let name = entry.file_name();
-            if !entry.file_type()?.is_dir() || registered.contains(&name) {
-                continue;
-            }
-            create_dir_all(&orphans, sync)?;
-            let mut destination = orphans.join(&name);
-            let mut suffix = 0_u64;
-            loop {
-                match fs::symlink_metadata(&destination) {
-                    Ok(_) => {
-                        suffix += 1;
-                        let mut unique = name.clone();
-                        unique.push(format!(".{suffix}"));
-                        destination = orphans.join(unique);
-                    }
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => break,
-                    Err(err) => return Err(err),
-                }
-            }
-            fs::rename(entry.path(), &destination)?;
-            sync(&state_dir.join("repos"))?;
-            sync(&orphans)?;
-            tracing::warn!(
-                event = "repo-orphaned",
-                path = %entry.path().display(),
-                destination = %destination.display(),
-                "moved unregistered repository to quarantine"
-            );
-        }
         Ok(())
-    })();
-    result.map_err(|err| format!("cleanup {}: {err}", state_dir.display()))
+    };
+    cleanup().map_err(|err| format!("cleanup {}: {err}", state_dir.display()))?;
+    for entry in fs::read_dir(&repos).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        if !entry.file_type().map_err(|err| err.to_string())?.is_dir()
+            || registered.contains(&entry.file_name())
+        {
+            continue;
+        }
+        let name = entry.file_name();
+        let id = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".git"))
+            .filter(|id| kajiba_core::names::is_public_id(id))
+            .ok_or_else(|| {
+                format!(
+                    "unregistered repository has no valid public id: {}",
+                    entry.path().display()
+                )
+            })?;
+        git.client()
+            .await
+            .map_err(mutation_error)?
+            .quarantine_repository(QuarantineRepositoryRequest {
+                repo_public_id: id.into(),
+            })
+            .await
+            .map_err(mutation_error)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -159,7 +135,7 @@ mod tests {
                 sync_dir(parent)
             })
             .unwrap();
-            for name in ["repos", "db", "ci/logs", "ci/artifacts", "tmp"] {
+            for name in ["db", "ci/logs", "ci/artifacts", "tmp"] {
                 assert!(root.join(name).is_dir(), "{name}");
             }
             assert!(root.join("kajiba.lock").is_file());
@@ -169,7 +145,6 @@ mod tests {
                     [
                         temp.0.clone(),
                         temp.0.join("nested"),
-                        root.clone(),
                         root.clone(),
                         root.clone(),
                         root.join("ci"),
@@ -193,12 +168,12 @@ mod tests {
         let temp = TempDir::new();
         let error = prepare_with_sync(&temp.0, &mut |parent| {
             assert_eq!(parent, temp.0);
-            assert!(parent.join("repos").is_dir());
+            assert!(parent.join("db").is_dir());
             Err(io::Error::other("parent sync failed"))
         })
         .unwrap_err();
         assert!(error.contains("parent sync failed"));
-        assert!(!temp.0.join("db").exists());
+        assert!(!temp.0.join("ci").exists());
         let _lock = prepare(&temp.0).unwrap();
     }
 
@@ -251,6 +226,7 @@ mod tests {
         let (mut writer, readers) = crate::db::open(&temp.0.join("db/kajiba.sqlite"))
             .await
             .unwrap();
+        let mut daemon = crate::transport::git_side::fake::Fake::start(&temp.0).await;
         let id = "00000000000000000000000001";
         sqlx::query("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, ?1, 'owner', 'local', 0, 'config', 0)")
             .bind(id).execute(&mut writer).await.unwrap();
@@ -259,8 +235,8 @@ mod tests {
         let registered = temp.0.join(format!("repos/{id}.git"));
         fs::create_dir(&registered).unwrap();
         fs::write(registered.join("HEAD"), "registered").unwrap();
-        // A name matching the ID without the layout's .git suffix is still an orphan.
-        let orphan = temp.0.join(format!("repos/{id}"));
+        // A valid public id without a row is quarantined.
+        let orphan = temp.0.join("repos/00000000000000000000000002.git");
         fs::create_dir(&orphan).unwrap();
         fs::write(orphan.join("HEAD"), "orphan").unwrap();
         fs::write(temp.0.join("tmp/file"), "temporary").unwrap();
@@ -268,25 +244,9 @@ mod tests {
         fs::write(temp.0.join("tmp/nested/dir/file"), "temporary").unwrap();
         fs::write(temp.0.join("repos/file"), "leave non-directories").unwrap();
 
-        let mut synced = Vec::new();
-        cleanup_with_sync(&temp.0, &mut writer, &mut |parent| {
-            if parent != temp.0.join("tmp") {
-                assert!(!orphan.exists());
-                assert!(temp.0.join(format!("tmp/orphans/{id}/HEAD")).is_file());
-            }
-            synced.push(parent.to_path_buf());
-            sync_dir(parent)
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            synced,
-            [
-                temp.0.join("tmp"),
-                temp.0.join("repos"),
-                temp.0.join("tmp/orphans")
-            ]
-        );
+        cleanup(&temp.0, &temp.0, &mut daemon.client, &mut writer)
+            .await
+            .unwrap();
 
         assert!(!temp.0.join("tmp/file").exists());
         assert!(!temp.0.join("tmp/nested").exists());
@@ -295,86 +255,25 @@ mod tests {
             fs::read_to_string(registered.join("HEAD")).unwrap(),
             "registered"
         );
-        let quarantined = temp.0.join(format!("tmp/orphans/{id}/HEAD"));
+        let quarantined = temp
+            .0
+            .join("tmp/orphans/00000000000000000000000002.git/HEAD");
         assert_eq!(fs::read_to_string(&quarantined).unwrap(), "orphan");
         assert_eq!(
             fs::read_to_string(temp.0.join("repos/file")).unwrap(),
             "leave non-directories"
         );
-        cleanup(&temp.0, &mut writer).await.unwrap();
+        cleanup(
+            &temp.0,
+            &temp.0,
+            &mut crate::transport::git_side::Repositories::new(&temp.0.join("fake.sock")),
+            &mut writer,
+        )
+        .await
+        .unwrap();
         assert_eq!(fs::read_to_string(quarantined).unwrap(), "orphan");
         readers.close().await;
         writer.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn cleanup_suffixes_collisions_without_overwriting_quarantined_data() {
-        let temp = TempDir::new();
-        let _lock = prepare(&temp.0).unwrap();
-        let (mut writer, readers) = crate::db::open(&temp.0.join("db/kajiba.sqlite"))
-            .await
-            .unwrap();
-        let orphans = temp.0.join("tmp/orphans");
-        fs::create_dir_all(orphans.join("orphan.git")).unwrap();
-        fs::write(orphans.join("orphan.git.1"), "preserve file").unwrap();
-        fs::create_dir(temp.0.join("repos/orphan.git")).unwrap();
-        fs::write(temp.0.join("repos/orphan.git/HEAD"), "new orphan").unwrap();
-
-        let mut synced = Vec::new();
-        cleanup_with_sync(&temp.0, &mut writer, &mut |parent| {
-            assert!(!temp.0.join("repos/orphan.git").exists());
-            assert!(orphans.join("orphan.git.2/HEAD").is_file());
-            synced.push(parent.to_path_buf());
-            sync_dir(parent)
-        })
-        .await
-        .unwrap();
-        assert_eq!(synced, [temp.0.join("repos"), orphans.clone()]);
-
-        assert!(orphans.join("orphan.git").is_dir());
-        assert!(
-            fs::read_dir(orphans.join("orphan.git"))
-                .unwrap()
-                .next()
-                .is_none()
-        );
-        assert_eq!(
-            fs::read_to_string(orphans.join("orphan.git.1")).unwrap(),
-            "preserve file"
-        );
-        assert_eq!(
-            fs::read_to_string(orphans.join("orphan.git.2/HEAD")).unwrap(),
-            "new orphan"
-        );
-        assert!(!temp.0.join("repos/orphan.git").exists());
-        readers.close().await;
-        writer.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn cleanup_reports_source_and_destination_sync_failures() {
-        for failed_parent in ["repos", "tmp/orphans"] {
-            let temp = TempDir::new();
-            let _lock = prepare(&temp.0).unwrap();
-            let (mut writer, readers) = crate::db::open(&temp.0.join("db/kajiba.sqlite"))
-                .await
-                .unwrap();
-            fs::create_dir(temp.0.join("repos/orphan.git")).unwrap();
-            let error = cleanup_with_sync(&temp.0, &mut writer, &mut |parent| {
-                if parent == temp.0.join(failed_parent) {
-                    assert!(!temp.0.join("repos/orphan.git").exists());
-                    assert!(temp.0.join("tmp/orphans/orphan.git").is_dir());
-                    Err(io::Error::other("parent sync failed"))
-                } else {
-                    sync_dir(parent)
-                }
-            })
-            .await
-            .unwrap_err();
-            assert!(error.contains("parent sync failed"));
-            readers.close().await;
-            writer.close().await.unwrap();
-        }
     }
 
     #[tokio::test]
@@ -385,13 +284,18 @@ mod tests {
             .await
             .unwrap();
         fs::write(temp.0.join("tmp/file"), "preserve").unwrap();
-        fs::create_dir(temp.0.join("repos/orphan.git")).unwrap();
+        fs::create_dir_all(temp.0.join("repos/orphan.git")).unwrap();
 
         assert!(
-            cleanup(&temp.0, &mut writer)
-                .await
-                .unwrap_err()
-                .contains("read registered repositories")
+            cleanup(
+                &temp.0,
+                &temp.0,
+                &mut crate::transport::git_side::Repositories::new(&temp.0.join("fake.sock")),
+                &mut writer
+            )
+            .await
+            .unwrap_err()
+            .contains("read registered repositories")
         );
         assert_eq!(
             fs::read_to_string(temp.0.join("tmp/file")).unwrap(),
@@ -406,7 +310,7 @@ mod tests {
     async fn symlinked_managed_directories_are_refused_before_any_deletion() {
         use std::os::unix::fs::symlink;
 
-        for name in ["tmp", "repos", "db", "ci", "ci/logs"] {
+        for name in ["tmp", "db", "ci", "ci/logs"] {
             let temp = TempDir::new();
             let lock = prepare(&temp.0).unwrap();
             let target = temp.0.join("elsewhere");
@@ -422,10 +326,17 @@ mod tests {
         let (mut writer, readers) = crate::db::open(&temp.0.join("db/kajiba.sqlite"))
             .await
             .unwrap();
-        fs::create_dir(temp.0.join("repos/keep.git")).unwrap();
+        fs::create_dir_all(temp.0.join("repos/keep.git")).unwrap();
         fs::remove_dir(temp.0.join("tmp")).unwrap();
         symlink(temp.0.join("repos"), temp.0.join("tmp")).unwrap();
-        let error = cleanup(&temp.0, &mut writer).await.unwrap_err();
+        let error = cleanup(
+            &temp.0,
+            &temp.0,
+            &mut crate::transport::git_side::Repositories::new(&temp.0.join("fake.sock")),
+            &mut writer,
+        )
+        .await
+        .unwrap_err();
         assert!(error.contains("symlinks are refused"), "{error}");
         assert!(temp.0.join("repos/keep.git").is_dir());
         readers.close().await;
@@ -442,11 +353,19 @@ mod tests {
         let (mut writer, readers) = crate::db::open(&temp.0.join("db/kajiba.sqlite"))
             .await
             .unwrap();
+        fs::create_dir(temp.0.join("repos")).unwrap();
         let outside = temp.0.join("outside");
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("file"), "preserve").unwrap();
         symlink(&outside, temp.0.join("tmp/link")).unwrap();
-        cleanup(&temp.0, &mut writer).await.unwrap();
+        cleanup(
+            &temp.0,
+            &temp.0,
+            &mut crate::transport::git_side::Repositories::new(&temp.0.join("fake.sock")),
+            &mut writer,
+        )
+        .await
+        .unwrap();
         assert!(fs::symlink_metadata(temp.0.join("tmp/link")).is_err());
         assert_eq!(
             fs::read_to_string(outside.join("file")).unwrap(),
@@ -454,15 +373,37 @@ mod tests {
         );
 
         symlink(&outside, temp.0.join("tmp/orphans")).unwrap();
-        fs::create_dir(temp.0.join("repos/orphan.git")).unwrap();
+        fs::create_dir_all(temp.0.join("repos/orphan.git")).unwrap();
         assert!(
-            cleanup(&temp.0, &mut writer)
-                .await
-                .unwrap_err()
-                .contains("tmp/orphans is not a directory")
+            cleanup(
+                &temp.0,
+                &temp.0,
+                &mut crate::transport::git_side::Repositories::new(&temp.0.join("fake.sock")),
+                &mut writer
+            )
+            .await
+            .unwrap_err()
+            .contains("tmp/orphans is not a directory")
         );
         assert!(temp.0.join("repos/orphan.git").is_dir());
         assert!(!outside.join("orphan.git").exists());
+        readers.close().await;
+        writer.close().await.unwrap();
+    }
+    #[tokio::test]
+    async fn malformed_orphan_names_are_preserved_without_widening_the_ulid_rpc() {
+        let temp = TempDir::new();
+        let _lock = prepare(&temp.0).unwrap();
+        let (mut writer, readers) = crate::db::open(&temp.0.join("db/kajiba.sqlite"))
+            .await
+            .unwrap();
+        let mut daemon = crate::transport::git_side::fake::Fake::start(&temp.0).await;
+        fs::create_dir(temp.0.join("repos/not-an-id.git")).unwrap();
+        let err = cleanup(&temp.0, &temp.0, &mut daemon.client, &mut writer)
+            .await
+            .unwrap_err();
+        assert!(err.contains("no valid public id"));
+        assert!(temp.0.join("repos/not-an-id.git").is_dir());
         readers.close().await;
         writer.close().await.unwrap();
     }

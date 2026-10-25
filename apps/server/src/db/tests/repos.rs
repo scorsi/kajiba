@@ -14,6 +14,7 @@ fn config(repos: &str) -> ServerConfig {
 }
 
 pub(super) struct State {
+    pub(super) daemon: crate::transport::git_side::fake::Fake,
     pub(super) dir: TempDir,
     _lock: crate::state::StateLock,
     pub(super) writer: SqliteConnection,
@@ -29,7 +30,9 @@ impl State {
     pub(super) async fn at(dir: TempDir) -> Self {
         let lock = crate::state::prepare(&dir.0).unwrap();
         let (writer, readers) = open(&dir.0.join("db/kajiba.sqlite")).await.unwrap();
+        let daemon = crate::transport::git_side::fake::Fake::start(&dir.0).await;
         Self {
+            daemon,
             dir,
             _lock: lock,
             writer,
@@ -40,9 +43,14 @@ impl State {
     pub(super) async fn apply(&mut self, repos: &str) -> Result<(), String> {
         let config = config(repos);
         reconcile(&mut self.writer, &config.users).await.unwrap();
-        reconcile_repos(&mut self.writer, &self.dir.0, &Gix, &config.repos)
-            .await
-            .map(|applied| applied.committed())
+        reconcile_repos(
+            &mut self.writer,
+            &self.dir.0,
+            &mut self.daemon.client,
+            &config.repos,
+        )
+        .await
+        .map(|applied| applied.committed())
     }
 
     pub(super) async fn repo(&mut self, key: &str) -> (String, String, Option<i64>) {
@@ -378,9 +386,14 @@ async fn archival_keeps_row_directory_history_and_locks_names() {
         ["c"]
     );
     // The orphan sweep counts archived rows.
-    crate::state::cleanup(&state.dir.0, &mut state.writer)
-        .await
-        .unwrap();
+    crate::state::cleanup(
+        &state.dir.0,
+        &state.dir.0,
+        &mut state.daemon.client,
+        &mut state.writer,
+    )
+    .await
+    .unwrap();
     assert_eq!(state.repo_dirs(), dirs);
     assert!(!state.dir.0.join("tmp/orphans").exists());
 
@@ -551,7 +564,8 @@ async fn a_repository_refusal_rolls_back_user_and_credential_changes() {
     let mut config =
         config("[users.carol]\n[repos.copy]\nowner='alice'\nname='demo'\ndescription=''\n");
     config.state_dir = state.dir.0.clone();
-    let error = crate::db::reconcile_declared(&mut state.writer, &config, &Gix)
+    config.git.state_dir = state.dir.0.clone();
+    let error = crate::db::reconcile_declared(&mut state.writer, &config, &mut state.daemon.client)
         .await
         .unwrap_err();
     assert!(
@@ -570,7 +584,7 @@ async fn a_repository_refusal_rolls_back_user_and_credential_changes() {
         "demo".into(),
         self::config(DEMO).repos.remove("demo").unwrap(),
     );
-    crate::db::reconcile_declared(&mut state.writer, &config, &Gix)
+    crate::db::reconcile_declared(&mut state.writer, &config, &mut state.daemon.client)
         .await
         .unwrap();
     assert_eq!(state.repo("demo").await.2, None);
@@ -578,5 +592,123 @@ async fn a_repository_refusal_rolls_back_user_and_credential_changes() {
         state.strings("SELECT name FROM user ORDER BY name").await,
         ["alice", "bob", "carol"]
     );
+    state.close().await;
+}
+
+#[tokio::test]
+async fn abandoned_creation_is_quarantined_by_the_next_sweep() {
+    let mut state = State::new().await;
+    let config = config(DEMO);
+    reconcile(&mut state.writer, &config.users).await.unwrap();
+    let mut transaction = state.writer.begin().await.unwrap();
+    let applied = reconcile_repos(
+        &mut transaction,
+        &state.dir.0,
+        &mut state.daemon.client,
+        &config.repos,
+    )
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    drop(applied);
+    assert!(
+        state
+            .strings("SELECT config_key FROM repo")
+            .await
+            .is_empty()
+    );
+    let dirs = state.repo_dirs();
+    assert_eq!(dirs.len(), 1);
+    crate::state::cleanup(
+        &state.dir.0,
+        &state.dir.0,
+        &mut state.daemon.client,
+        &mut state.writer,
+    )
+    .await
+    .unwrap();
+    assert!(state.repo_dirs().is_empty());
+    assert!(
+        state
+            .dir
+            .0
+            .join("tmp/orphans")
+            .join(&dirs[0])
+            .join("HEAD")
+            .is_file()
+    );
+    state.apply(DEMO).await.unwrap();
+    assert_eq!(state.repo_dirs().len(), 1);
+    state.close().await;
+}
+
+#[tokio::test]
+async fn read_only_repositories_need_no_daemon_for_reconciliation_or_browsing() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut state = State::new().await;
+    state.apply(DEMO).await.unwrap();
+    let (id, _, _) = state.repo("demo").await;
+    let path = state.path(&id);
+    let head = path.join("HEAD");
+    let before = fs::metadata(&head).unwrap().modified().unwrap();
+    let root = state.dir.0.join("repos");
+    fn permissions(path: &std::path::Path, readonly: bool) {
+        let is_dir = path.is_dir();
+        if is_dir {
+            for entry in fs::read_dir(path).unwrap() {
+                permissions(&entry.unwrap().path(), readonly);
+            }
+        }
+        let mode = match (is_dir, readonly) {
+            (true, true) => 0o550,
+            (true, false) => 0o750,
+            (false, true) => 0o440,
+            (false, false) => 0o640,
+        };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+    permissions(&root, true);
+    assert!(fs::write(root.join("forbidden"), "x").is_err());
+    assert!(fs::write(&head, "x").is_err());
+    let mut unavailable =
+        crate::transport::git_side::Repositories::new(&state.dir.0.join("missing.sock"));
+    let mut config = config(DEMO);
+    config.git.state_dir = state.dir.0.clone();
+    config.repos.get_mut("demo").unwrap().description = "changed without repository writes".into();
+    crate::db::reconcile_declared(&mut state.writer, &config, &mut unavailable)
+        .await
+        .unwrap();
+    crate::state::cleanup(
+        &state.dir.0,
+        &state.dir.0,
+        &mut unavailable,
+        &mut state.writer,
+    )
+    .await
+    .unwrap();
+    assert!(Gix::shared(&root).refs(&path).unwrap().is_empty());
+    let output = Gix::shared(&root)
+        .transport(
+            kajiba_gitstore::Service::UploadPack,
+            &path,
+            &["--stateless-rpc", "--advertise-refs"],
+        )
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::metadata(&head).unwrap().modified().unwrap(), before);
+    assert_eq!(fs::read_to_string(&head).unwrap(), "ref: refs/heads/main\n");
+    config.repos.get_mut("demo").unwrap().default_branch = "dev".into();
+    assert!(
+        crate::db::reconcile_declared(&mut state.writer, &config, &mut unavailable)
+            .await
+            .unwrap_err()
+            .contains("GIT_SIDE_UNAVAILABLE")
+    );
+    assert_eq!(
+        state.strings("SELECT default_branch FROM repo").await,
+        ["main"]
+    );
+    permissions(&root, false);
     state.close().await;
 }

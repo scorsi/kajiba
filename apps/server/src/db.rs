@@ -49,7 +49,7 @@ pub async fn reconcile(
 pub async fn reconcile_declared(
     writer: &mut SqliteConnection,
     config: &kajiba_core::config::ServerConfig,
-    store: &impl kajiba_gitstore::GitStore,
+    git: &mut crate::transport::git_side::Repositories,
 ) -> Result<(), String> {
     let mut transaction = writer
         .begin()
@@ -57,18 +57,14 @@ pub async fn reconcile_declared(
         .map_err(|err| format!("reconciliation: {err}"))?;
     let revoked = reconcile(&mut transaction, &config.users).await?;
     let applied =
-        repos::reconcile_repos(&mut transaction, &config.state_dir, store, &config.repos).await?;
-    match transaction.commit().await {
-        Ok(()) => {
-            revoked.committed();
-            applied.committed();
-            Ok(())
-        }
-        Err(err) => {
-            applied.abandoned();
-            Err(format!("reconciliation: {err}"))
-        }
-    }
+        repos::reconcile_repos(&mut transaction, &config.git.state_dir, git, &config.repos).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|err| format!("reconciliation: {err}"))?;
+    revoked.committed();
+    applied.committed();
+    Ok(())
 }
 
 // The caller must hold the state lock for the lifetime of both handles.

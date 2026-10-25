@@ -3,6 +3,7 @@
   craneLib,
   commonCargoArgs,
   cargoArtifacts,
+  git,
 }:
 craneLib.buildPackage (
   commonCargoArgs
@@ -10,6 +11,7 @@ craneLib.buildPackage (
     inherit cargoArtifacts;
     pname = "kajiba-git";
     cargoExtraArgs = "--locked -p kajiba-git";
+    nativeCheckInputs = [ git ];
     meta.mainProgram = "kajiba-git";
   }
 )

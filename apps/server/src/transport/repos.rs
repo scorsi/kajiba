@@ -89,7 +89,7 @@ impl Repos {
             }
             Ok(Some(found)) => Ok(self
                 .0
-                .state_dir
+                .git_state_dir
                 .join(format!("repos/{}.git", found.public_id))),
             Ok(None) => Err(not_found_http()),
             Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
@@ -114,7 +114,7 @@ impl Repos {
                 .map_err(internal)?,
         }
         .ok_or_else(not_found)?;
-        Ok(self.0.state_dir.join(format!("repos/{public_id}.git")))
+        Ok(self.0.git_state_dir.join(format!("repos/{public_id}.git")))
     }
 }
 
@@ -192,8 +192,8 @@ fn git_error(reason: &'static str) -> impl Fn(kajiba_gitstore::Error) -> Status 
 }
 
 /// A branch, a tag or a full commit id, resolved to a commit id.
-fn revision(dir: &Path, revision: &str) -> Result<String, Status> {
-    match Gix.resolve(dir, revision) {
+fn revision(store: &Gix<'_>, dir: &Path, revision: &str) -> Result<String, Status> {
+    match store.resolve(dir, revision) {
         Ok((commit, "")) => Ok(commit),
         // A path left over: `revision` is no ref.
         Ok(_) => Err(git_error("REVISION_NOT_FOUND")(
@@ -392,9 +392,11 @@ impl RepoService for Repos {
         path(&request.path)?;
         let dir = self.browse_dir(&request.repo).await?;
         let permit = self.browse_permit()?;
+        let root = self.0.git_state_dir.join("repos");
         blocking(permit, move || {
-            let commit_id = revision(&dir, &request.revision)?;
-            let entries = Gix
+            let store = Gix::shared(&root);
+            let commit_id = revision(&store, &dir, &request.revision)?;
+            let entries = store
                 .tree(&dir, &commit_id, &request.path, MAX_TREE_ENTRIES)
                 .map_err(git_error("PATH_NOT_FOUND"))?
                 .into_iter()
@@ -424,9 +426,11 @@ impl RepoService for Repos {
         path(&request.path)?;
         let dir = self.browse_dir(&request.repo).await?;
         let permit = self.browse_permit()?;
+        let root = self.0.git_state_dir.join("repos");
         blocking(permit, move || {
-            let commit_id = revision(&dir, &request.revision)?;
-            let content = Gix
+            let store = Gix::shared(&root);
+            let commit_id = revision(&store, &dir, &request.revision)?;
+            let content = store
                 .blob(&dir, &commit_id, &request.path, MAX_BLOB_BYTES as u64)
                 .map_err(git_error("PATH_NOT_FOUND"))?;
             Ok(Response::new(GetBlobResponse { commit_id, content }))
@@ -466,13 +470,15 @@ impl RepoService for Repos {
         }
         let dir = self.browse_dir(&request.repo).await?;
         let permit = self.browse_permit()?;
+        let root = self.0.git_state_dir.join("repos");
         blocking(permit, move || {
+            let store = Gix::shared(&root);
             let (tip, skip) = match cursor {
                 Some(cursor) => cursor,
-                None => (revision(&dir, &request.revision)?, 0),
+                None => (revision(&store, &dir, &request.revision)?, 0),
             };
             // shortcut: each page walks the history from the tip again, quadratic over deep paging; keep the walk state if that gets slow.
-            let mut page = Gix
+            let mut page = store
                 .log(&dir, &tip, skip, size + 1, MAX_COMMIT_PAGE_BYTES)
                 .map_err(git_error("REVISION_NOT_FOUND"))?;
             // A page cut short by its bytes may have more behind it; the next page is
@@ -500,14 +506,16 @@ impl RepoService for Repos {
         let request = request.into_inner();
         let dir = self.browse_dir(&request.repo).await?;
         let permit = self.browse_permit()?;
+        let root = self.0.git_state_dir.join("repos");
         blocking(permit, move || {
-            let id = revision(&dir, &request.revision)?;
-            let found = Gix
+            let store = Gix::shared(&root);
+            let id = revision(&store, &dir, &request.revision)?;
+            let found = store
                 .log(&dir, &id, 0, 1, MAX_COMMIT_PAGE_BYTES)
                 .map_err(git_error("REVISION_NOT_FOUND"))?
                 .pop()
                 .ok_or_else(|| git_error("REVISION_NOT_FOUND")(kajiba_gitstore::Error::NotFound))?;
-            let changes = Gix
+            let changes = store
                 .diff(
                     &dir,
                     found.parents.first().map(String::as_str),

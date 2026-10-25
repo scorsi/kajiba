@@ -200,21 +200,21 @@ fn invalid_config_is_structured_for_check_and_startup() {
 }
 
 #[test]
-fn serve_emits_start_migrations_and_orphan_warning() {
+fn serve_emits_start_migrations_and_refuses_an_unreachable_orphan_writer() {
     use std::io::BufRead;
     use std::process::Stdio;
 
     let dir = std::env::temp_dir().join(format!("kajiba-log-start-{}", std::process::id()));
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("server.toml");
-    let orphan = dir.join("state/repos/orphan.git");
+    let orphan = dir.join("git/repos/00000000000000000000000001.git");
     std::fs::create_dir_all(&orphan).unwrap();
     std::fs::write(orphan.join("HEAD"), "preserve orphan").unwrap();
     std::fs::write(
         &path,
         format!(
-            "state_dir={:?}\n[http]\npublic_url='https://example.org'",
-            dir.join("state").to_str().unwrap()
+            "state_dir={:?}\n[git]\nstate_dir={:?}\nsocket={:?}\n[http]\npublic_url='https://example.org'",
+            dir.join("state").to_str().unwrap(), dir.join("git").to_str().unwrap(), dir.join("missing.sock").to_str().unwrap()
         ),
     )
     .unwrap();
@@ -242,8 +242,7 @@ fn serve_emits_start_migrations_and_orphan_warning() {
         .collect();
     let _ = child.kill();
     child.wait().unwrap();
-    let destination = dir.join("state/tmp/orphans/orphan.git");
-    let contents = std::fs::read_to_string(destination.join("HEAD"));
+    let contents = std::fs::read_to_string(orphan.join("HEAD"));
     let orphan_exists = orphan.exists();
     std::fs::remove_dir_all(dir).unwrap();
     reader.join().unwrap();
@@ -263,12 +262,15 @@ fn serve_emits_start_migrations_and_orphan_warning() {
         assert_eq!(line["event"], "migration-applied");
         assert_eq!(line["version"], version);
     }
-    assert_eq!(later[7]["event"], "repo-orphaned");
-    assert_eq!(later[7]["level"], "warn");
-    assert_eq!(later[7]["path"], orphan.to_str().unwrap());
-    assert_eq!(later[7]["destination"], destination.to_str().unwrap());
+    assert_eq!(later[7]["event"], "fatal");
+    assert!(
+        later[7]["err"]
+            .as_str()
+            .unwrap()
+            .contains("GIT_SIDE_UNAVAILABLE")
+    );
     assert_eq!(contents.unwrap(), "preserve orphan");
-    assert!(!orphan_exists);
+    assert!(orphan_exists);
 }
 
 #[test]
@@ -314,12 +316,13 @@ async fn serve_reconciles_declared_users_keys_and_tokens_before_serving() {
 
     let dir = std::env::temp_dir().join(format!("kajiba-users-start-{}", std::process::id()));
     std::fs::create_dir(&dir).unwrap();
+    std::fs::create_dir(dir.join("repos")).unwrap();
     let path = dir.join("server.toml");
     std::fs::write(
         &path,
         format!(
-            "state_dir={:?}\n[http]\npublic_url='https://example.org'\n[users.alice]\nis_admin=true\nssh_keys=['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea']\n[users.alice.tokens.ci]\nsha256='abababababababababababababababababababababababababababababababab'\nscopes=['repo:read']",
-            dir.to_str().unwrap()
+            "state_dir={:?}\n[git]\nstate_dir={:?}\n[http]\npublic_url='https://example.org'\n[users.alice]\nis_admin=true\nssh_keys=['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea']\n[users.alice.tokens.ci]\nsha256='abababababababababababababababababababababababababababababababab'\nscopes=['repo:read']",
+            dir.to_str().unwrap(), dir.to_str().unwrap()
         ),
     )
     .unwrap();

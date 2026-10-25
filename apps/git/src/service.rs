@@ -1,3 +1,5 @@
+// Tonic handlers return Status by value across the blocking filesystem work.
+#![allow(clippy::result_large_err)]
 use kajiba_core::local::{channel, rpc_error, version_error};
 use kajiba_proto::{gate::v1 as gate, git::v1::*};
 use std::{path::Path, time::Duration};
@@ -5,6 +7,7 @@ use tonic::{Request, Response, Status};
 
 pub struct Git {
     pub generation: String,
+    pub repositories: std::sync::Arc<crate::repositories::Repositories>,
 }
 
 #[tonic::async_trait]
@@ -36,21 +39,43 @@ impl git_service_server::GitService for Git {
 
     async fn create_repository(
         &self,
-        _: Request<CreateRepositoryRequest>,
+        request: Request<CreateRepositoryRequest>,
     ) -> Result<Response<CreateRepositoryResponse>, Status> {
-        Err(not_implemented())
+        let request = request.into_inner();
+        let repositories = self.repositories.clone();
+        let () = tokio::task::spawn_blocking(move || {
+            repositories.create(&request.repo_public_id, &request.default_branch)
+        })
+        .await
+        .map_err(|err| Status::internal(err.to_string()))??;
+        Ok(Response::new(CreateRepositoryResponse {}))
     }
     async fn set_head(
         &self,
-        _: Request<SetHeadRequest>,
+        request: Request<SetHeadRequest>,
     ) -> Result<Response<SetHeadResponse>, Status> {
-        Err(not_implemented())
+        let request = request.into_inner();
+        let repositories = self.repositories.clone();
+        let () = tokio::task::spawn_blocking(move || {
+            repositories.set_head(&request.repo_public_id, &request.branch)
+        })
+        .await
+        .map_err(|err| Status::internal(err.to_string()))??;
+        Ok(Response::new(SetHeadResponse {}))
     }
     async fn quarantine_repository(
         &self,
-        _: Request<QuarantineRepositoryRequest>,
+        request: Request<QuarantineRepositoryRequest>,
     ) -> Result<Response<QuarantineRepositoryResponse>, Status> {
-        Err(not_implemented())
+        let request = request.into_inner();
+        let repositories = self.repositories.clone();
+        let result =
+            tokio::task::spawn_blocking(move || repositories.quarantine(&request.repo_public_id))
+                .await
+                .map_err(|err| Status::internal(err.to_string()))??;
+        Ok(Response::new(QuarantineRepositoryResponse {
+            destination: result.to_string_lossy().into_owned(),
+        }))
     }
     async fn list_remote_refs(
         &self,

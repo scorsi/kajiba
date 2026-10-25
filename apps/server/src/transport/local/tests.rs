@@ -394,10 +394,11 @@ async fn import_never_returns_or_logs_source_credentials() {
         "[http]\npublic_url='{PUBLIC_URL}'\n[users.alice]\n[repos.demo]\nowner='alice'\ndescription=''\n"
     ))
     .unwrap();
+    let mut daemon = crate::transport::git_side::fake::Fake::start(&dir.0).await;
     crate::db::repos::reconcile_repos(
         &mut *admin.writer.lock().await,
         &dir.0,
-        &kajiba_gitstore::Gix,
+        &mut daemon.client,
         &config.repos,
     )
     .await
