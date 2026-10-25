@@ -1,9 +1,32 @@
 //! Object checks run by the writer with the hook's quarantine environment (0053).
 use crate::{Error, Result, git, run, run_output};
-use std::{path::Path, process::Command, time::Duration};
+use std::{fs, io, path::Path, process::Command, time::Duration};
 
 const ZERO: &str = "0000000000000000000000000000000000000000";
 const TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+/// Per-push limits, independent of repository configuration (ADR 0062).
+pub(crate) const MAX_INPUT_BYTES: u64 = 64 << 20;
+pub(crate) const MAX_QUARANTINE_BYTES: u64 = 128 << 20;
+
+pub(crate) fn limit_file_size() -> io::Result<()> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: both calls receive a valid rlimit pointer and affect only this process.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        limit.rlim_cur = limit.rlim_cur.min(MAX_QUARANTINE_BYTES as libc::rlim_t);
+        limit.rlim_max = limit.rlim_max.min(MAX_QUARANTINE_BYTES as libc::rlim_t);
+        if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
 
 pub struct Update<'a> {
     pub old_id: &'a str,
@@ -38,6 +61,9 @@ pub(crate) fn facts(
         }
     }
     quarantine.command(repo)?;
+    quarantine
+        .check_size()
+        .map_err(|err| Error::Git(err.to_string()))?;
     let tips: String = updates
         .iter()
         .filter(|u| u.new_id != ZERO)
@@ -82,6 +108,31 @@ fn ancestor(mut command: Command, old: &str, new: &str) -> Result<bool> {
 }
 
 impl Quarantine<'_> {
+    fn check_size(&self) -> io::Result<()> {
+        let mut remaining = MAX_QUARANTINE_BYTES;
+        let mut paths = Vec::new();
+        for path in [self.object_directory, self.quarantine_path] {
+            if !path.is_empty() && !paths.contains(&Path::new(path).to_path_buf()) {
+                paths.push(Path::new(path).to_path_buf());
+            }
+        }
+        while let Some(path) = paths.pop() {
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_dir() {
+                for entry in fs::read_dir(path)? {
+                    paths.push(entry?.path());
+                }
+            } else if metadata.is_file() {
+                remaining = remaining
+                    .checked_sub(metadata.len())
+                    .ok_or_else(|| io::Error::other("push quarantine exceeds 128 MiB limit"))?;
+            } else {
+                return Err(io::Error::other("invalid quarantine entry"));
+            }
+        }
+        Ok(())
+    }
+
     fn command(&self, repo: &Path) -> Result<Command> {
         for path in [self.object_directory, self.quarantine_path] {
             if !path.is_empty() && (!Path::new(path).is_absolute() || path.contains('\0')) {

@@ -11,6 +11,96 @@ fn updates<'a>(pairs: &[(&'a str, &'a str)]) -> Vec<Update<'a>> {
         .collect()
 }
 
+#[test]
+fn receive_limits_are_applied_only_to_receive_pack() {
+    let repo = Path::new("/repo.git");
+    let hooks = Path::new("/hooks");
+    let command = Gix.transport(Service::ReceivePack, repo, &[], Some(hooks));
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        [
+            "-c",
+            "core.hooksPath=/hooks",
+            "-c",
+            "receive.maxInputSize=67108864",
+            "-c",
+            "receive.unpackLimit=0",
+            "-c",
+            "receive.autogc=false",
+            "receive-pack",
+            "/repo.git",
+        ]
+    );
+    assert_eq!(crate::push::MAX_INPUT_BYTES, 64 << 20);
+    let command = Gix.transport(Service::UploadPack, repo, &[], None);
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        ["upload-pack", "/repo.git"]
+    );
+}
+
+#[test]
+fn receive_limits_reject_aggregate_quarantine_before_reading_objects() {
+    let root = scratch("receive-limits-quarantine");
+    let incoming = root.join("incoming");
+    fs::create_dir_all(incoming.join("pack")).unwrap();
+    let pack = fs::File::create(incoming.join("pack/data.pack")).unwrap();
+    let index = fs::File::create(incoming.join("pack/data.idx")).unwrap();
+    pack.set_len(crate::push::MAX_QUARANTINE_BYTES - 1).unwrap();
+    index.set_len(1).unwrap();
+    let quarantine = Quarantine {
+        object_directory: incoming.to_str().unwrap(),
+        quarantine_path: incoming.to_str().unwrap(),
+        ..Default::default()
+    };
+    // Sparse files exercise the exact boundary without allocating the disk budget.
+    assert!(Gix.push_facts(&root, &[], &quarantine).is_ok());
+    index.set_len(2).unwrap();
+    let missing = "1111111111111111111111111111111111111111";
+    assert_eq!(
+        Gix.push_facts(&root, &updates(&[(ZERO, missing)]), &quarantine)
+            .unwrap_err(),
+        Error::Git("push quarantine exceeds 128 MiB limit".into())
+    );
+    index.set_len(0).unwrap();
+    std::os::unix::fs::symlink(&root, incoming.join("link")).unwrap();
+    assert_eq!(
+        Gix.push_facts(&root, &[], &quarantine).unwrap_err(),
+        Error::Git("invalid quarantine entry".into())
+    );
+    fs::remove_file(incoming.join("link")).unwrap();
+    fs::remove_dir_all(&incoming).unwrap();
+    assert!(Gix.push_facts(&root, &[], &quarantine).is_err());
+    assert!(Gix.push_facts(&root, &[], &Quarantine::default()).is_ok());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn receive_limits_bound_child_file_growth() {
+    let root = scratch("receive-limits-file");
+    let file = root.join("pack");
+    for (offset, success) in [
+        (crate::push::MAX_QUARANTINE_BYTES - 1, true),
+        (crate::push::MAX_QUARANTINE_BYTES, false),
+    ] {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "ulimit -c 0; exec dd if=/dev/zero of=\"$1\" bs=1 count=1 seek=\"$2\"",
+                "file-limit-test",
+            ])
+            .arg(&file)
+            .arg(offset.to_string());
+        // SAFETY: the callback only changes resource limits in the child.
+        unsafe { command.pre_exec(crate::push::limit_file_size) };
+        let output = command.output().unwrap();
+        assert_eq!(output.status.success(), success, "{output:?}");
+        assert!(fs::metadata(&file).unwrap().len() <= crate::push::MAX_QUARANTINE_BYTES);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn clear_refs(repo: &Path) {
     for r in Gix.refs(repo).unwrap() {
         git(repo, &["update-ref", "-d", &r.name], DATE);

@@ -953,6 +953,15 @@ impl GitStore for Gix<'_> {
                 .arg("-c")
                 .arg(format!("core.hooksPath={}", hooks.display()));
         }
+        if service == Service::ReceivePack {
+            command
+                .arg("-c")
+                .arg(format!("receive.maxInputSize={}", push::MAX_INPUT_BYTES))
+                // Keep deltas packed; loose objects can amplify a small input.
+                .args(["-c", "receive.unpackLimit=0", "-c", "receive.autogc=false"]);
+            // SAFETY: the callback only calls getrlimit/setrlimit in the child.
+            unsafe { command.pre_exec(push::limit_file_size) };
+        }
         command
             .arg(match service {
                 Service::UploadPack => "upload-pack",
