@@ -449,6 +449,90 @@ async fn blob(repos: &Repos, repo: &str, revision: &str, path: &str) -> Result<V
         .map(|response| response.into_inner().content)
 }
 
+#[tokio::test]
+async fn blob_path_budget_includes_the_filename() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut fixture = Fixture::new("").await;
+    let public_id = "00000000000000000000000001";
+    sqlx::query(
+        "INSERT INTO repo (public_id, owner_id, name, visibility, ci_enabled,
+                           default_branch, description, created_at)
+         SELECT ?, id, 'demo', 'public', 0, 'main', '', 0 FROM user WHERE name = 'alice'",
+    )
+    .bind(public_id)
+    .execute(&mut fixture.writer)
+    .await
+    .unwrap();
+    let bare = fixture.bare("alice/demo").await;
+    std::fs::create_dir_all(bare.join("objects")).unwrap();
+    std::fs::create_dir(bare.join("refs")).unwrap();
+    std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    // Hash without -w or fsck so the fixtures can include over-budget filenames.
+    let object = |kind: &str, data: &[u8]| {
+        let mut child = Command::new("git")
+            .args(["hash-object", "-t", kind, "--stdin", "--literally"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(data).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let id = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+        let mut raw = format!("{kind} {}\0", data.len()).into_bytes();
+        raw.extend_from_slice(data);
+        let mut compressed = vec![0; zlib_rs::compress_bound(raw.len())];
+        let (compressed, code) = zlib_rs::compress_slice(&mut compressed, &raw, Default::default());
+        assert_eq!(code, zlib_rs::ReturnCode::Ok);
+        let dir = bare.join("objects").join(&id[..2]);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(&id[2..]), compressed).unwrap();
+        id
+    };
+    let content = b"blob path boundary\n";
+    let file = object("blob", content);
+    for (path, accepted) in [
+        (format!("{}f", "d/".repeat(127)), true),
+        (format!("{}f", "d/".repeat(128)), false),
+        ("x".repeat(4096), true),
+        ("x".repeat(4097), false),
+        (format!("d/{}", "é".repeat(2047)), true),
+        (format!("d/{}x", "é".repeat(2047)), false),
+    ] {
+        let mut tree = file.clone();
+        for (i, name) in path.rsplit('/').enumerate() {
+            let mode = if i == 0 { "100644" } else { "40000" };
+            let mut entry = format!("{mode} {name}\0").into_bytes();
+            entry.extend(
+                (0..40)
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&tree[i..i + 2], 16).unwrap()),
+            );
+            tree = object("tree", &entry);
+        }
+        let commit = object(
+            "commit",
+            format!(
+                "tree {tree}\nauthor a <a@example.org> 1 +0000\ncommitter a <a@example.org> 1 +0000\n\nboundary\n"
+            )
+            .as_bytes(),
+        );
+        let result = blob(&fixture.repos, "alice/demo", &commit, &path).await;
+        if accepted {
+            assert_eq!(result.unwrap(), content);
+        } else {
+            let status = result.unwrap_err();
+            assert_eq!(
+                (status.code(), reason(&status).as_str()),
+                (Code::ResourceExhausted, "TRAVERSAL_TOO_LARGE")
+            );
+        }
+    }
+}
+
 async fn commits(
     repos: &Repos,
     revision: &str,

@@ -832,8 +832,9 @@ impl GitStore for Gix<'_> {
 
     fn blob(&self, repo: &Path, commit: &str, path: &str, limit: u64) -> Result<Vec<u8>> {
         let repo = self.open(repo)?;
-        let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
         let mut work = Traversal::new(self.cancelled);
+        work.path(path.as_bytes())?;
+        let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
         let tree = tree_at(&repo, commit, dir, &mut work)?;
         let entry = tree.find_entry(name).ok_or(Error::NotFound)?;
         if entry.mode().is_tree() || entry.mode().is_commit() {
