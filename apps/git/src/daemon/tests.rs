@@ -357,6 +357,103 @@ async fn repository_rpcs_run_in_the_real_daemon() {
 }
 
 #[tokio::test]
+async fn verification_limits_survive_production_rpc_middleware() {
+    use kajiba_proto::{
+        git::v1::{Session, SessionKind},
+        hook::v1::{
+            PreReceiveRequest, Quarantine, RefUpdate, hook_service_client::HookServiceClient,
+        },
+    };
+    use tonic_types::StatusExt;
+
+    let temp = TempDir::new();
+    let _lock = crate::state::prepare(&temp.0).unwrap();
+    let id = "00000000000000000000000001";
+    let repo = temp.0.join(format!("repos/{id}.git"));
+    fs::create_dir(&repo).unwrap();
+    let repositories = std::sync::Arc::new(crate::repositories::Repositories::new(temp.0.clone()));
+    repositories
+        .register(
+            Session {
+                session_id: id.into(),
+                repo_public_id: id.into(),
+                user_public_id: id.into(),
+                kind: SessionKind::ReceivePack.into(),
+                ..Default::default()
+            },
+            String::new(),
+        )
+        .unwrap();
+    let app = routes(std::sync::Arc::new(crate::service::Git {
+        generation: "generation".into(),
+        server_socket: temp.0.join("absent.sock"),
+        repositories,
+    }))
+    .into_axum_router();
+    let mut client = HookServiceClient::new(app);
+    let mut request = PreReceiveRequest {
+        session_id: id.into(),
+        repo_public_id: id.into(),
+        user_public_id: id.into(),
+        updates: (0..257)
+            .map(|i| RefUpdate {
+                ref_name: format!("refs/heads/limit-{i}"),
+                old_id: "0".repeat(40),
+                new_id: "1".repeat(40),
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let limit = client.pre_receive(request.clone()).await.unwrap_err();
+    request.updates.truncate(1);
+    let incoming = temp.0.join("incoming");
+    fs::create_dir(&incoming).unwrap();
+    let pack = fs::File::create(incoming.join("data.pack")).unwrap();
+    pack.set_len((128 << 20) + 1).unwrap();
+    request.quarantine = Some(Quarantine {
+        object_directory: incoming.to_str().unwrap().into(),
+        ..Default::default()
+    });
+    let quarantine = client.pre_receive(request.clone()).await.unwrap_err();
+    // An unrelated verification error must still be sanitized by the same routes.
+    request.quarantine = None;
+    request.updates[0].new_id = "private-invalid-object-id".into();
+    let internal = client.pre_receive(request).await.unwrap_err();
+    for (error, code, reason, message) in [
+        (
+            limit,
+            tonic::Code::ResourceExhausted,
+            "VERIFICATION_LIMIT",
+            "push verification exceeds 256 updated refs",
+        ),
+        (
+            quarantine,
+            tonic::Code::ResourceExhausted,
+            "VERIFICATION_LIMIT",
+            "push quarantine exceeds 128 MiB limit",
+        ),
+        (
+            internal,
+            tonic::Code::Internal,
+            "INTERNAL",
+            "internal error",
+        ),
+    ] {
+        assert_eq!(error.code(), code);
+        assert_eq!(error.message(), message);
+        let details = error.get_error_details();
+        let info = details.error_info().unwrap();
+        assert_eq!(info.domain, "kajiba");
+        assert_eq!(info.reason, reason);
+        assert_eq!(info.metadata.len(), 1);
+        assert!(kajiba_core::names::is_public_id(
+            &info.metadata["request_id"]
+        ));
+    }
+    assert_eq!(fs::read_dir(repo).unwrap().count(), 0);
+}
+
+#[tokio::test]
 async fn repository_rpc_routes_correlate_errors_and_logs() {
     use tonic_types::StatusExt;
     const CHILD: &str = "KAJIBA_TEST_DAEMON_RPC_LOGS";

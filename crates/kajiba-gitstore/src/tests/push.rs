@@ -70,7 +70,7 @@ fn receive_limits_reject_aggregate_quarantine_before_reading_objects() {
             &Verification::default()
         )
         .unwrap_err(),
-        Error::Git("push quarantine exceeds 128 MiB limit".into())
+        Error::VerificationLimit("push quarantine exceeds 128 MiB limit")
     );
     index.set_len(0).unwrap();
     std::os::unix::fs::symlink(&root, incoming.join("link")).unwrap();

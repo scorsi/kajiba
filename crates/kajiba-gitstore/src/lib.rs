@@ -21,6 +21,8 @@ pub enum Error {
     NotFound,
     /// The object or listing exceeds the caller's limit or an object cap.
     TooLarge(Limit),
+    /// A known push verification limit, with a fixed, client-safe diagnostic.
+    VerificationLimit(&'static str),
     /// Any other failure, with gix's message.
     Git(String),
 }
@@ -52,6 +54,7 @@ impl fmt::Display for Error {
                     Limit::Traversal => "traversal",
                 }
             ),
+            Self::VerificationLimit(message) => f.write_str(message),
             Self::Git(err) => f.write_str(err),
         }
     }

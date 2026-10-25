@@ -176,7 +176,7 @@ impl Repositories {
         };
         let facts = Gix
             .push_facts(&path, &updates, &quarantine, &verification)
-            .map_err(internal)?;
+            .map_err(verification_error)?;
         let tags: Vec<_> = request
             .updates
             .iter()
@@ -210,7 +210,7 @@ impl Repositories {
                     &verification,
                     &signers_path,
                 )
-                .map_err(internal)?
+                .map_err(verification_error)?
                 .into_iter()
                 .map(|r| kajiba_proto::hook::v1::Refusal {
                     ref_name: request.updates[r.update_index].ref_name.clone(),
@@ -229,7 +229,7 @@ impl Repositories {
                         &verification,
                         &signers_path,
                     )
-                    .map_err(internal)?
+                    .map_err(verification_error)?
                 {
                     refusals.push(kajiba_proto::hook::v1::Refusal {
                         ref_name: tag.ref_name.clone(),
@@ -240,7 +240,7 @@ impl Repositories {
                     });
                 }
             }
-            verification.check_deadline().map_err(internal)?;
+            verification.check_deadline().map_err(verification_error)?;
             Ok::<_, Status>(refusals)
         })();
         let cleanup = fs::remove_file(&signers_path).map_err(internal);
@@ -489,6 +489,15 @@ fn branch_valid(branch: &str) -> Result<(), Status> {
 
 fn internal(err: impl std::fmt::Display) -> Status {
     rpc_error(Code::Internal, "INTERNAL", err.to_string())
+}
+
+fn verification_error(err: kajiba_gitstore::Error) -> Status {
+    match err {
+        kajiba_gitstore::Error::VerificationLimit(message) => {
+            rpc_error(Code::ResourceExhausted, "VERIFICATION_LIMIT", message)
+        }
+        err => internal(err),
+    }
 }
 
 fn sync_tree(path: &Path) -> io::Result<()> {

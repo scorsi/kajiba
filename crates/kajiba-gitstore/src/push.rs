@@ -36,7 +36,9 @@ impl Default for Verification {
 impl Verification {
     pub fn check_deadline(&self) -> Result<()> {
         if Instant::now() >= self.deadline {
-            return Err(Error::Git("push verification exceeds 30 s deadline".into()));
+            return Err(Error::VerificationLimit(
+                "push verification exceeds 30 s deadline",
+            ));
         }
         Ok(())
     }
@@ -47,7 +49,9 @@ impl Verification {
             self.commands
                 .get()
                 .checked_sub(1)
-                .ok_or_else(|| Error::Git("push verification exceeds 16384 Git commands".into()))?,
+                .ok_or(Error::VerificationLimit(
+                    "push verification exceeds 16384 Git commands",
+                ))?,
         );
         let result = run_output_limited(
             command,
@@ -57,9 +61,11 @@ impl Verification {
         );
         self.check_deadline()?;
         let output = result.map_err(|err| match err {
-            Error::Git(message) if message.contains("output limit exceeded") => Error::Git(
-                "push verification output exceeds 256 KiB per command or 8 MiB per push".into(),
-            ),
+            Error::Git(message) if message.contains("output limit exceeded") => {
+                Error::VerificationLimit(
+                    "push verification output exceeds 256 KiB per command or 8 MiB per push",
+                )
+            }
             err => err,
         })?;
         self.output
@@ -119,8 +125,8 @@ pub(crate) fn facts(
 ) -> Result<Facts> {
     verification.check_deadline()?;
     if updates.len() > MAX_UPDATES {
-        return Err(Error::Git(
-            "push verification exceeds 256 updated refs".into(),
+        return Err(Error::VerificationLimit(
+            "push verification exceeds 256 updated refs",
         ));
     }
     for update in updates {
@@ -131,9 +137,7 @@ pub(crate) fn facts(
         }
     }
     quarantine.command(repo)?;
-    quarantine
-        .check_size(verification)
-        .map_err(|err| Error::Git(err.to_string()))?;
+    quarantine.check_size(verification)?;
     let tips: String = updates
         .iter()
         .filter(|u| u.new_id != ZERO)
@@ -158,8 +162,8 @@ pub(crate) fn facts(
         let text = String::from_utf8(output.stdout).map_err(|err| Error::Git(err.to_string()))?;
         let commits: Vec<_> = text.lines().map(String::from).collect();
         if commits.len() > MAX_COMMITS {
-            return Err(Error::Git(
-                "push verification exceeds 4096 new commits".into(),
+            return Err(Error::VerificationLimit(
+                "push verification exceeds 4096 new commits",
             ));
         }
         commits
@@ -198,7 +202,7 @@ fn ancestor(
 }
 
 impl Quarantine<'_> {
-    fn check_size(&self, verification: &Verification) -> io::Result<()> {
+    fn check_size(&self, verification: &Verification) -> Result<()> {
         let mut remaining = MAX_QUARANTINE_BYTES;
         let mut paths = Vec::new();
         for path in [self.object_directory, self.quarantine_path] {
@@ -207,19 +211,23 @@ impl Quarantine<'_> {
             }
         }
         while let Some(path) = paths.pop() {
-            verification.check_deadline().map_err(io::Error::other)?;
-            let metadata = fs::symlink_metadata(&path)?;
+            verification.check_deadline()?;
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|err| Error::Git(err.to_string()))?;
             if metadata.is_dir() {
-                for entry in fs::read_dir(path)? {
-                    verification.check_deadline().map_err(io::Error::other)?;
-                    paths.push(entry?.path());
+                for entry in fs::read_dir(path).map_err(|err| Error::Git(err.to_string()))? {
+                    verification.check_deadline()?;
+                    paths.push(entry.map_err(|err| Error::Git(err.to_string()))?.path());
                 }
             } else if metadata.is_file() {
-                remaining = remaining
-                    .checked_sub(metadata.len())
-                    .ok_or_else(|| io::Error::other("push quarantine exceeds 128 MiB limit"))?;
+                remaining =
+                    remaining
+                        .checked_sub(metadata.len())
+                        .ok_or(Error::VerificationLimit(
+                            "push quarantine exceeds 128 MiB limit",
+                        ))?;
             } else {
-                return Err(io::Error::other("invalid quarantine entry"));
+                return Err(Error::Git("invalid quarantine entry".into()));
             }
         }
         Ok(())
@@ -338,6 +346,22 @@ mod tests {
     }
 
     #[test]
+    fn quarantine_inspection_preserves_verification_deadline_error() {
+        let verification = Verification {
+            deadline: Instant::now(),
+            ..Default::default()
+        };
+        let quarantine = Quarantine {
+            object_directory: "/unused",
+            ..Default::default()
+        };
+        assert_eq!(
+            quarantine.check_size(&verification).unwrap_err(),
+            Error::VerificationLimit("push verification exceeds 30 s deadline")
+        );
+    }
+
+    #[test]
     fn verification_shares_command_and_output_budgets() {
         let verification = Verification::default();
         verification.commands.set(2);
@@ -345,23 +369,19 @@ mod tests {
         verification.run(shell("printf ab"), "").unwrap();
         verification.run(shell("printf cd >&2"), "").unwrap();
         assert_eq!(verification.output.get(), 0);
-        assert!(
-            verification
-                .run(shell("exit 0"), "")
-                .unwrap_err()
-                .to_string()
-                .contains("16384 Git commands")
+        assert_eq!(
+            verification.run(shell("exit 0"), "").unwrap_err(),
+            Error::VerificationLimit("push verification exceeds 16384 Git commands")
         );
 
         let verification = Verification::default();
         verification.output.set(4);
         verification.run(shell("printf ab"), "").unwrap();
-        assert!(
-            verification
-                .run(shell("printf cde >&2"), "")
-                .unwrap_err()
-                .to_string()
-                .contains("output exceeds")
+        assert_eq!(
+            verification.run(shell("printf cde >&2"), "").unwrap_err(),
+            Error::VerificationLimit(
+                "push verification output exceeds 256 KiB per command or 8 MiB per push"
+            )
         );
     }
 
@@ -395,10 +415,9 @@ mod tests {
         let err = verification
             .run(shell("exec >&- 2>&-; exec sleep 30"), "")
             .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("verification exceeds 30 s deadline"),
-            "{err}"
+        assert_eq!(
+            err,
+            Error::VerificationLimit("push verification exceeds 30 s deadline")
         );
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(

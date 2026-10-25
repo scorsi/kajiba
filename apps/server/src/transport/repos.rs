@@ -211,6 +211,7 @@ fn git_error(reason: &'static str) -> impl Fn(kajiba_gitstore::Error) -> Status 
             refused(tonic::Code::ResourceExhausted, reason, message)
         }
         kajiba_gitstore::Error::Git(err) => Status::internal(format!("git: {err}")),
+        kajiba_gitstore::Error::VerificationLimit(message) => Status::internal(message),
     }
 }
 
