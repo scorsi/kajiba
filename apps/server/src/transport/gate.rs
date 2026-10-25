@@ -71,16 +71,45 @@ impl GateService for Gate {
         &self,
         request: Request<PreReceiveRequest>,
     ) -> Result<Response<PreReceiveResponse>, Status> {
-        let mut refusals = self.refusals(&request.into_inner()).await?;
+        let request = request.into_inner();
+        // Policy, admission and session exit share the writer lock.
+        let mut writer = self.writer.lock().await;
+        let mut refusals = self.refusals(&mut writer, &request).await?;
         if refusals.is_empty() {
-            // Fail closed until signatures and durable admission are wired (task 21).
-            refusals.push(Refusal {
-                ref_name: String::new(),
-                reason: "pushes are not accepted yet".into(),
-            });
+            let (repo, session) = self
+                .admission
+                .session(&request.session_id)
+                .ok_or_else(|| Status::failed_precondition("live receive-pack session required"))?;
+            let principal: i64 = sqlx::query_scalar("SELECT id FROM user WHERE public_id = ?")
+                .bind(&session.user_public_id)
+                .fetch_one(&mut *writer)
+                .await
+                .map_err(|err| Status::internal(err.to_string()))?;
+            let updates: Vec<_> = request
+                .updates
+                .into_iter()
+                .map(|update| crate::db::pushes::RefUpdate {
+                    name: update.ref_name,
+                    old: update.old_id,
+                    new: update.new_id,
+                })
+                .collect();
+            if let Err(err) = self
+                .admission
+                .admit_session(&mut writer, repo, principal, &session, &updates)
+                .await
+            {
+                if let crate::db::pushes::Refused::Database(err) = err {
+                    return Err(Status::internal(err.to_string()));
+                }
+                refusals.push(Refusal {
+                    ref_name: String::new(),
+                    reason: err.to_string(),
+                });
+            }
         }
         Ok(Response::new(PreReceiveResponse {
-            allowed: false,
+            allowed: refusals.is_empty(),
             refusals,
         }))
     }
@@ -89,7 +118,7 @@ impl GateService for Gate {
         &self,
         _: Request<PostReceiveRequest>,
     ) -> Result<Response<PostReceiveResponse>, Status> {
-        // No push is admitted yet; task 22 wires reconciliation.
+        // Task 22 wires the reconciliation wake-up.
         Ok(Response::new(PostReceiveResponse {}))
     }
 

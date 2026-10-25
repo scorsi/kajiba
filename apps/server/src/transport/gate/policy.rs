@@ -7,6 +7,7 @@ use tonic::Status;
 impl Gate {
     pub(super) async fn refusals(
         &self,
+        writer: &mut sqlx::SqliteConnection,
         request: &PreReceiveRequest,
     ) -> Result<Vec<Refusal>, Status> {
         if request.updates.is_empty() {
@@ -15,8 +16,6 @@ impl Gate {
                 reason: "no ref updates".into(),
             }]);
         }
-        // Session exit and reconciliation take this lock too.
-        let mut writer = self.writer.lock().await;
         let session = self
             .admission
             .session(&request.session_id)

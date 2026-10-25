@@ -140,6 +140,49 @@ impl Gate {
         if self.running(repo_id) {
             return Err(Refused::InProgress);
         }
+        self.insert_pending(writer, repo_id, principal_id, correlation_id, updates, None)
+            .await
+    }
+
+    /// Admit the already-open receive-pack, without mistaking it for another writer.
+    /// The caller holds the writer lock from policy evaluation through this commit.
+    pub async fn admit_session(
+        &self,
+        writer: &mut SqliteConnection,
+        repo_id: i64,
+        principal_id: i64,
+        session: &kajiba_proto::git::v1::Session,
+        updates: &[RefUpdate],
+    ) -> Result<(), Refused> {
+        if self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .any(|(repo, live)| *repo == repo_id && live.session_id != session.session_id)
+        {
+            return Err(Refused::InProgress);
+        }
+        self.insert_pending(
+            writer,
+            repo_id,
+            Some(principal_id),
+            &session.correlation_id,
+            updates,
+            Some(session),
+        )
+        .await
+    }
+
+    async fn insert_pending(
+        &self,
+        writer: &mut SqliteConnection,
+        repo_id: i64,
+        principal_id: Option<i64>,
+        correlation_id: &str,
+        updates: &[RefUpdate],
+        session: Option<&kajiba_proto::git::v1::Session>,
+    ) -> Result<(), Refused> {
         let json = serde_json::Value::Array(
             updates
                 .iter()
@@ -148,28 +191,35 @@ impl Gate {
         )
         .to_string();
         let mut tx = writer.begin().await.map_err(Refused::Database)?;
-        let pending: Option<i64> =
-            sqlx::query_scalar("SELECT id FROM pending_push WHERE repo_id = ?")
+        let pending: Option<Option<String>> =
+            sqlx::query_scalar("SELECT git_session_id FROM pending_push WHERE repo_id = ?")
                 .bind(repo_id)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(Refused::Database)?;
-        if pending.is_some() {
-            return Err(if self.running.lock().unwrap().contains(&repo_id) {
-                Refused::InProgress
-            } else {
-                Refused::Retained
-            });
+        if let Some(pending) = pending {
+            return Err(
+                if pending
+                    .as_deref()
+                    .is_some_and(|id| self.session(id).is_some())
+                {
+                    Refused::InProgress
+                } else {
+                    Refused::Retained
+                },
+            );
         }
         sqlx::query(
-            "INSERT INTO pending_push (repo_id, principal_id, correlation_id, updates, created_at)
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO pending_push (repo_id, principal_id, correlation_id, updates, created_at, git_session_id, git_generation)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(repo_id)
         .bind(principal_id)
         .bind(correlation_id)
         .bind(json)
         .bind(now())
+        .bind(session.map(|s| &s.session_id))
+        .bind(session.map(|s| &s.generation))
         .execute(&mut *tx)
         .await
         .map_err(Refused::Database)?;

@@ -231,16 +231,20 @@ async fn pre_receive_rechecks_local_roles_and_default_branch_for_owner_and_globa
         ("DELETE FROM repo_permission", false),
     ] {
         sql(&gate, statement).await;
-        let refusals = gate.refusals(&request).await.unwrap();
+        let refusals = gate
+            .refusals(&mut *gate.writer.lock().await, &request)
+            .await
+            .unwrap();
         assert_eq!(refusals.is_empty(), accepted, "{statement}: {refusals:?}");
         let response = gate
             .pre_receive(Request::new(request.clone()))
             .await
             .unwrap()
             .into_inner();
-        assert!(!response.allowed);
+        assert_eq!(response.allowed, accepted);
         if accepted {
-            assert_eq!(response.refusals[0].reason, "pushes are not accepted yet");
+            assert!(response.refusals.is_empty());
+            sql(&gate, "DELETE FROM pending_push").await;
         } else {
             assert_eq!(response.refusals[0].ref_name, "refs/heads/topic");
             assert!(response.refusals[0].reason.contains("local user"));
@@ -258,7 +262,13 @@ async fn pre_receive_rechecks_local_roles_and_default_branch_for_owner_and_globa
             update("refs/tags/v1", A, ZERO, false),
         ] {
             request.updates = vec![change];
-            assert!(gate.refusals(&request).await.unwrap().is_empty(), "{user}");
+            assert!(
+                gate.refusals(&mut *gate.writer.lock().await, &request)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{user}"
+            );
         }
         request.updates = vec![update("refs/heads/main", A, ZERO, false)];
         let response = gate
@@ -326,7 +336,7 @@ async fn policy_refusals_keep_ref_order_and_require_live_receive_pack_session() 
             },
         );
         assert!(
-            gate.refusals(&request)
+            gate.refusals(&mut *gate.writer.lock().await, &request)
                 .await
                 .unwrap()
                 .iter()
@@ -340,12 +350,21 @@ async fn policy_refusals_keep_ref_order_and_require_live_receive_pack_session() 
             ..session.clone()
         },
     );
-    assert_eq!(gate.refusals(&request).await.unwrap().len(), 3);
+    assert_eq!(
+        gate.refusals(&mut *gate.writer.lock().await, &request)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
     gate.admission
         .session_exited(&mut *gate.writer.lock().await, &session.session_id)
         .await
         .unwrap();
-    let refused = gate.refusals(&request).await.unwrap();
+    let refused = gate
+        .refusals(&mut *gate.writer.lock().await, &request)
+        .await
+        .unwrap();
     assert_eq!(refused.len(), 3);
     assert!(
         refused
@@ -353,7 +372,226 @@ async fn policy_refusals_keep_ref_order_and_require_live_receive_pack_session() 
             .all(|r| r.reason.contains("live receive-pack"))
     );
     assert_eq!(
-        gate.refusals(&PreReceiveRequest::default()).await.unwrap()[0].reason,
+        gate.refusals(
+            &mut *gate.writer.lock().await,
+            &PreReceiveRequest::default()
+        )
+        .await
+        .unwrap()[0]
+            .reason,
         "no ref updates"
+    );
+}
+
+async fn writable_fixture() -> (State, Gate, Session, PreReceiveRequest) {
+    let (state, gate, session) = fixture().await;
+    sql(
+        &gate,
+        "INSERT INTO repo_permission SELECT id, 1, 'admin' FROM user WHERE name = 'bob'",
+    )
+    .await;
+    let request = PreReceiveRequest {
+        session_id: session.session_id.clone(),
+        updates: vec![
+            update("refs/heads/z", ZERO, A, false),
+            update("refs/heads/a", A, B, true),
+            update("refs/tags/gone", B, ZERO, false),
+        ],
+    };
+    (state, gate, session, request)
+}
+
+#[tokio::test]
+async fn allowed_means_committed_identity_order_and_session_evidence() {
+    use sqlx::Connection;
+    let (state, gate, session, request) = writable_fixture().await;
+    let mut reader = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(state.health.state_dir.join("kajiba.sqlite"))
+            .read_only(true),
+    )
+    .await
+    .unwrap();
+    // Concurrent duplicate calls must not admit twice or overwrite the evidence.
+    let (first, second) = tokio::join!(
+        gate.pre_receive(Request::new(request.clone())),
+        gate.pre_receive(Request::new(request.clone())),
+    );
+    let responses = [first.unwrap().into_inner(), second.unwrap().into_inner()];
+    assert_eq!(responses.iter().filter(|r| r.allowed).count(), 1);
+    assert!(
+        responses.iter().find(|r| !r.allowed).unwrap().refusals[0]
+            .reason
+            .contains("retry")
+    );
+    let (repo, user, correlation, updates, stored_session, generation): (String, String, String, String, String, String) = sqlx::query_as(
+        "SELECT repo.public_id, user.public_id, correlation_id, updates, git_session_id, git_generation
+         FROM pending_push JOIN repo ON repo.id = repo_id JOIN user ON user.id = principal_id"
+    ).fetch_one(&mut reader).await.unwrap();
+    assert_eq!(repo, session.repo_public_id);
+    assert_eq!(user, session.user_public_id);
+    assert_eq!(correlation, session.correlation_id);
+    assert_eq!(stored_session, session.session_id);
+    assert_eq!(generation, session.generation);
+    let expected: Vec<_> = request
+        .updates
+        .iter()
+        .map(|u| {
+            serde_json::json!({
+                "ref": u.ref_name, "old": u.old_id, "new": u.new_id
+            })
+        })
+        .collect();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&updates).unwrap(),
+        serde_json::json!(expected)
+    );
+    let events: i64 = sqlx::query_scalar("SELECT count(*) FROM event")
+        .fetch_one(&mut reader)
+        .await
+        .unwrap();
+    assert_eq!(events, 0);
+    reader.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn one_bad_ref_or_signature_admits_nothing() {
+    let (_state, gate, _session, request) = writable_fixture().await;
+    for bad in [
+        update("refs/contrib/bob/topic", ZERO, A, false),
+        update("refs/heads/main", A, ZERO, false),
+        RefUpdate {
+            signature: SignatureVerdict::Refused.into(),
+            signature_reason: format!("commit {A}: wrong signer"),
+            ..request.updates[0].clone()
+        },
+        RefUpdate {
+            signature: SignatureVerdict::Unspecified.into(),
+            ..request.updates[0].clone()
+        },
+    ] {
+        let mut request = request.clone();
+        request.updates[1] = bad.clone();
+        let response = gate
+            .pre_receive(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.allowed);
+        assert_eq!(response.refusals.len(), 1);
+        assert_eq!(response.refusals[0].ref_name, bad.ref_name);
+        let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM pending_push")
+            .fetch_one(&mut *gate.writer.lock().await)
+            .await
+            .unwrap();
+        assert_eq!(pending, 0);
+    }
+}
+
+#[tokio::test]
+async fn competing_session_and_retained_unexpected_ref_block_admission() {
+    use kajiba_gitstore::GitStore;
+    let (_state, gate, session, request) = writable_fixture().await;
+    let other = Session {
+        session_id: kajiba_core::new_id().unwrap(),
+        ..session.clone()
+    };
+    gate.admission.opened(1, other.clone());
+    let response = gate
+        .pre_receive(Request::new(request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!response.allowed);
+    assert!(response.refusals[0].reason.contains("retry"));
+    let mut writer = gate.writer.lock().await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pending_push")
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap(),
+        0
+    );
+    gate.admission
+        .session_exited(&mut writer, &other.session_id)
+        .await
+        .unwrap();
+    drop(writer);
+    assert!(
+        gate.pre_receive(Request::new(request.clone()))
+            .await
+            .unwrap()
+            .into_inner()
+            .allowed
+    );
+    let path = gate
+        .state_dir
+        .join(format!("repos/{}.git", session.repo_public_id));
+    kajiba_gitstore::Gix.init_bare(&path, "main").unwrap();
+    let mut writer = gate.writer.lock().await;
+    gate.admission
+        .session_exited(&mut writer, &session.session_id)
+        .await
+        .unwrap();
+    // refs/heads/a is absent, neither its recorded old nor new value: retain the row.
+    gate.admission
+        .reconcile(
+            &mut writer,
+            &gate.bus,
+            &gate.state_dir,
+            &kajiba_gitstore::Gix,
+        )
+        .await
+        .unwrap();
+    let evidence: String = sqlx::query_scalar("SELECT updates FROM pending_push")
+        .fetch_one(&mut *writer)
+        .await
+        .unwrap();
+    gate.admission.opened(1, session);
+    drop(writer);
+    let response = gate
+        .pre_receive(Request::new(request))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!response.allowed);
+    assert!(response.refusals[0].reason.contains("unexpected ref value"));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT updates FROM pending_push")
+            .fetch_one(&mut *gate.writer.lock().await)
+            .await
+            .unwrap(),
+        evidence
+    );
+}
+
+#[tokio::test]
+async fn insert_and_commit_failures_never_allow_or_leave_a_pending_row() {
+    let (_state, gate, session, request) = writable_fixture().await;
+    for injection in [
+        "CREATE TEMP TRIGGER fail_admission BEFORE INSERT ON pending_push BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END",
+        "CREATE TABLE admission_failure (user_id INTEGER REFERENCES user(id) DEFERRABLE INITIALLY DEFERRED); CREATE TEMP TRIGGER fail_admission AFTER INSERT ON pending_push BEGIN INSERT INTO admission_failure VALUES (999999); END",
+    ] {
+        sql(&gate, injection).await;
+        let error = gate
+            .pre_receive(Request::new(request.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Internal);
+        // A new query also drains sqlx's queued rollback after a failed commit.
+        let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM pending_push")
+            .fetch_one(&mut *gate.writer.lock().await)
+            .await
+            .unwrap();
+        assert_eq!(pending, 0);
+        assert!(gate.admission.session(&session.session_id).is_some());
+        sql(&gate, "DROP TRIGGER fail_admission").await;
+    }
+    assert!(
+        gate.pre_receive(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner()
+            .allowed
     );
 }

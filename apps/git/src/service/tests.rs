@@ -65,6 +65,8 @@ struct Server {
     generation: String,
     exit_calls: Arc<AtomicUsize>,
     acknowledge: Arc<std::sync::atomic::AtomicBool>,
+    admissions: Arc<Mutex<Vec<gate::PreReceiveRequest>>>,
+    verdict: Arc<Mutex<gate::PreReceiveResponse>>,
 }
 
 #[tonic::async_trait]
@@ -107,9 +109,10 @@ impl gate::gate_service_server::GateService for Server {
     }
     async fn pre_receive(
         &self,
-        _: Request<gate::PreReceiveRequest>,
+        request: Request<gate::PreReceiveRequest>,
     ) -> Result<Response<gate::PreReceiveResponse>, Status> {
-        Err(Status::unimplemented("test"))
+        self.admissions.lock().unwrap().push(request.into_inner());
+        Ok(Response::new(self.verdict.lock().unwrap().clone()))
     }
     async fn post_receive(
         &self,
@@ -151,6 +154,8 @@ async fn server_handshake_retries_version_refusal_and_server_restart() {
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(local.serve(
             Routes::new(gate::gate_service_server::GateServiceServer::new(Server {
+                admissions: Arc::default(),
+                verdict: Arc::default(),
                 version: version.clone(),
                 calls: calls.clone(),
                 generation: generation.clone(),
@@ -247,6 +252,8 @@ async fn exit_facts_survive_disconnection_and_are_retried_until_acknowledged() {
     .unwrap();
     let server = tokio::spawn(local.serve(
         Routes::new(gate::gate_service_server::GateServiceServer::new(Server {
+            admissions: Arc::default(),
+            verdict: Arc::default(),
             version: Arc::new(Mutex::new(env!("CARGO_PKG_VERSION").into())),
             calls: Arc::default(),
             generation,
@@ -290,6 +297,8 @@ async fn hook_service_forwards_keys_and_session_and_fails_when_server_stops() {
     };
     let server = tokio::spawn(bind(&gate_path).serve(
         Routes::new(gate::gate_service_server::GateServiceServer::new(Server {
+            admissions: Arc::default(),
+            verdict: Arc::default(),
             version: version.clone(),
             calls: calls.clone(),
             generation: generation.clone(),
@@ -500,12 +509,13 @@ async fn pre_receive_reads_quarantined_objects_and_fails_closed_on_missing_objec
     assert!(refusals[0].reason.contains(&commit));
     assert_eq!(facts.commits, [commit]);
     assert_eq!(facts.fast_forward, [false]);
-    let response = HookService::pre_receive(&git, Request::new(request.clone()))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(!response.allowed);
-    assert_eq!(response.refusals, refusals);
+    assert_eq!(
+        HookService::pre_receive(&git, Request::new(request.clone()))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::Unavailable
+    );
     request.quarantine = None;
     assert!(
         HookService::pre_receive(&git, Request::new(request))
@@ -668,12 +678,13 @@ async fn signature_checks_use_session_signers_and_remove_the_temporary_file() {
     let (facts, refusals) = git.repositories.check_signatures(&request).unwrap();
     assert_eq!(facts.commits, std::slice::from_ref(&commit));
     assert!(refusals.is_empty());
-    let response = HookService::pre_receive(&git, Request::new(request.clone()))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(!response.allowed);
-    assert_eq!(response.refusals[0].reason, "pushes are not accepted yet");
+    assert_eq!(
+        HookService::pre_receive(&git, Request::new(request.clone()))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::Unavailable
+    );
     command(&["update-ref", "refs/heads/main", &commit]);
     command(&[
         "-c",
@@ -739,18 +750,18 @@ async fn signature_checks_use_session_signers_and_remove_the_temporary_file() {
             let (facts, refusals) = git.repositories.check_signatures(&tag_request).unwrap();
             assert!(facts.commits.is_empty());
             assert_eq!(refusals.is_empty(), accepted, "{refusals:?}");
-            let response = HookService::pre_receive(&git, Request::new(tag_request.clone()))
-                .await
-                .unwrap()
-                .into_inner();
-            assert!(!response.allowed); // Durable admission is task 21.
-            if accepted {
-                assert_eq!(response.refusals[0].reason, "pushes are not accepted yet");
-            } else {
-                assert_eq!(response.refusals.len(), 1);
-                assert_eq!(response.refusals[0].ref_name, "refs/tags/release");
-                assert!(response.refusals[0].reason.contains(&format!("tag {new}:")));
-                assert!(response.refusals[0].reason.contains("SSH signature"));
+            assert_eq!(
+                HookService::pre_receive(&git, Request::new(tag_request.clone()))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::Unavailable
+            );
+            if !accepted {
+                assert_eq!(refusals.len(), 1);
+                assert_eq!(refusals[0].ref_name, "refs/tags/release");
+                assert!(refusals[0].reason.contains(&format!("tag {new}:")));
+                assert!(refusals[0].reason.contains("SSH signature"));
             }
         }
     }
@@ -802,13 +813,18 @@ async fn signature_checks_use_session_signers_and_remove_the_temporary_file() {
             String::new(),
         )
         .unwrap();
-    let response = HookService::pre_receive(&git, Request::new(request))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(!response.allowed);
-    assert_eq!(response.refusals[0].ref_name, "refs/heads/main");
-    assert!(response.refusals[0].reason.contains(&commit));
-    assert!(response.refusals[0].reason.contains("SSH signature"));
+    let (_, refusals) = git.repositories.check_signatures(&request).unwrap();
+    assert_eq!(refusals[0].ref_name, "refs/heads/main");
+    assert!(refusals[0].reason.contains(&commit));
+    assert!(refusals[0].reason.contains("SSH signature"));
+    assert_eq!(
+        HookService::pre_receive(&git, Request::new(request))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::Unavailable
+    );
     assert_eq!(std::fs::read_dir(temp.0.join("tmp")).unwrap().count(), 1); // orphans/ only
 }
+
+mod admission;

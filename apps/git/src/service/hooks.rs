@@ -32,23 +32,59 @@ impl hook_service_server::HookService for Git {
             &request.session_id,
         )?;
         let repositories = self.repositories.clone();
-        let (_facts, refusals) =
-            tokio::task::spawn_blocking(move || repositories.check_signatures(&request))
-                .await
-                .map_err(|_| Status::internal("push checks worker failed"))??;
-        if !refusals.is_empty() {
-            return Ok(Response::new(PreReceiveResponse {
-                allowed: false,
-                refusals,
-            }));
+        let (request, facts, refusals) = tokio::task::spawn_blocking(move || {
+            let (facts, refusals) = repositories.check_signatures(&request)?;
+            Ok::<_, Status>((request, facts, refusals))
+        })
+        .await
+        .map_err(|_| Status::internal("push checks worker failed"))??;
+        let mut reasons = std::collections::BTreeMap::<_, Vec<_>>::new();
+        for refusal in &refusals {
+            reasons
+                .entry(refusal.ref_name.as_str())
+                .or_default()
+                .push(refusal.reason.as_str());
         }
-        // Fail closed until durable admission is wired (J3 task 21).
+        let response = server_client(&self.server_socket, &self.generation)
+            .await?
+            .pre_receive(gate::PreReceiveRequest {
+                session_id: request.session_id,
+                updates: request
+                    .updates
+                    .into_iter()
+                    .zip(facts.fast_forward)
+                    .map(|(update, fast_forward)| {
+                        let signature_reason = reasons
+                            .get(update.ref_name.as_str())
+                            .map_or_else(String::new, |reasons| reasons.join("; "));
+                        gate::RefUpdate {
+                            ref_name: update.ref_name,
+                            old_id: update.old_id,
+                            new_id: update.new_id,
+                            fast_forward: Some(fast_forward),
+                            signature: if signature_reason.is_empty() {
+                                gate::SignatureVerdict::Verified
+                            } else {
+                                gate::SignatureVerdict::Refused
+                            }
+                            .into(),
+                            signature_reason,
+                        }
+                    })
+                    .collect(),
+            })
+            .await?
+            .into_inner();
         Ok(Response::new(PreReceiveResponse {
-            allowed: false,
-            refusals: vec![Refusal {
-                ref_name: String::new(),
-                reason: "pushes are not accepted yet".into(),
-            }],
+            allowed: response.allowed,
+            refusals: response
+                .refusals
+                .into_iter()
+                .map(|refusal| Refusal {
+                    ref_name: refusal.ref_name,
+                    reason: refusal.reason,
+                })
+                .collect(),
         }))
     }
 
