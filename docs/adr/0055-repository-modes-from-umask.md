@@ -1,6 +1,6 @@
 # ADR 0055 — Repository modes from the git children's umask
 
-Status: proposed — 2026-10-25
+Status: Accepted — 2026-10-25
 
 ## Context
 
