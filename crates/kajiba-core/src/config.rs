@@ -194,7 +194,8 @@ pub enum Visibility {
     Public,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+/// Ordered from least to most privileged.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Read,
