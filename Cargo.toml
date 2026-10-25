@@ -39,3 +39,8 @@ tonic-reflection = { version = "0.12", default-features = false, features = ["se
 [profile.dev]
 # mold/lld in the devShell do the heavy lifting; LTO stays off for fast iteration (0002).
 lto = false
+
+# Dependencies keep only line tables in dev builds: target/ stays far smaller, backtraces
+# stay complete; kajiba's own crates keep full debug info for debuggers.
+[profile.dev.package."*"]
+debug = "line-tables-only"
