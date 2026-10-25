@@ -88,7 +88,7 @@ impl Link {
         })
     }
 
-    pub async fn run(&self, path: &Path) {
+    pub async fn run(&self, path: &Path, recovery: Option<&super::local::Admin>) {
         struct Clear<'a>(&'a Link);
         impl Drop for Clear<'_> {
             fn drop(&mut self) {
@@ -140,6 +140,35 @@ impl Link {
             match result {
                 Ok(hello) => {
                     if generation.as_ref() != Some(&hello.generation) || unavailable {
+                        if let Some(admin) = recovery {
+                            let mut writer = admin.writer.lock().await;
+                            let result = snapshot(
+                                client.as_mut().unwrap(),
+                                &admin.gate,
+                                &mut writer,
+                                &hello.generation,
+                            )
+                            .await;
+                            if let Err(err) = result {
+                                self.client.lock().unwrap().take();
+                                client = None;
+                                unavailable = true;
+                                tracing::warn!(event = "git-side-unavailable", err = %err);
+                                drop(writer);
+                                delay = (delay * 2).min(Duration::from_secs(5));
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
+                            admin
+                                .gate
+                                .recover_once(
+                                    &mut writer,
+                                    &admin.bus,
+                                    &admin.state_dir,
+                                    &kajiba_gitstore::Gix::shared(&admin.state_dir.join("repos")),
+                                )
+                                .await;
+                        }
                         tracing::info!(
                             event = "git-side-connected",
                             version = hello.version,
@@ -195,3 +224,22 @@ pub(super) mod tests;
 
 #[cfg(test)]
 pub(crate) mod fake;
+
+/// The writer lock excludes OpenSession and SessionExited while rebuilding the gate.
+pub async fn snapshot(
+    client: &mut GitServiceClient<Channel>,
+    gate: &crate::db::pushes::Gate,
+    writer: &mut sqlx::SqliteConnection,
+    generation: &str,
+) -> Result<(), Status> {
+    let mut request = tonic::Request::new(kajiba_proto::git::v1::ListSessionsRequest {});
+    request.set_timeout(Duration::from_secs(5));
+    let snapshot = client.list_sessions(request).await?.into_inner();
+    if !kajiba_core::names::is_public_id(&snapshot.generation) || snapshot.generation != generation
+    {
+        return Err(unavailable("invalid git-side generation"));
+    }
+    gate.rebuild(writer, &snapshot.generation, snapshot.sessions)
+        .await
+        .map_err(unavailable)
+}

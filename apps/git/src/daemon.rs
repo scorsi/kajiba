@@ -49,17 +49,18 @@ async fn run(
     let generation = kajiba_core::new_id().map_err(|err| err.to_string())?;
     notify_ready(notify).map_err(|err| format!("notify readiness: {err}"))?;
     tracing::info!(event = "ready");
+    let repositories =
+        std::sync::Arc::new(crate::repositories::Repositories::new(state_dir.to_owned()));
     let routes = Routes::new(
         kajiba_proto::git::v1::git_service_server::GitServiceServer::new(crate::service::Git {
             generation: generation.clone(),
-            repositories: std::sync::Arc::new(crate::repositories::Repositories::new(
-                state_dir.to_owned(),
-            )),
+            repositories: repositories.clone(),
+            server_socket: server_socket.into(),
         }),
     );
     tokio::select! {
         result = local.serve(routes, shutdown) => result.map_err(|err| err.to_string()),
-        () = crate::service::connect_server(server_socket, &generation) => unreachable!("connection loop runs until shutdown"),
+        () = crate::service::connect_server(server_socket, &generation, &repositories) => unreachable!("connection loop runs until shutdown"),
     }
 }
 

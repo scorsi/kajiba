@@ -473,10 +473,7 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
             fs::metadata(&state.health.state_dir).unwrap().gid(),
         )
         .unwrap();
-        let gate = gate::Gate {
-            writer: admin.writer.clone(),
-            generation: Default::default(),
-        };
+        let gate = gate::Gate::new(&admin);
         serve_listeners(
             listener,
             app,

@@ -36,6 +36,8 @@ message OpenSessionRequest {
     string repo_public_id = 4;
   }
   string correlation_id = 5;
+  // Import only: the server's durable reservation, echoed from Fetch.session.
+  string import_session_id = 6;
 }
 message OpenSessionResponse {
   kajiba.git.v1.Session session = 1;

@@ -128,7 +128,10 @@ impl git_service_server::GitService for Daemon {
         &self,
         _: Request<ListSessionsRequest>,
     ) -> Result<Response<ListSessionsResponse>, Status> {
-        Err(Status::unimplemented("test"))
+        Ok(Response::new(ListSessionsResponse {
+            generation: "00000000000000000000000001".into(),
+            sessions: vec![],
+        }))
     }
     async fn list_remote_refs(
         &self,

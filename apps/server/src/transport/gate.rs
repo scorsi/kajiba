@@ -18,6 +18,9 @@ pub const SOCKET_PATH: &str = "/run/kajiba/git.sock";
 pub struct Gate {
     pub writer: Writer,
     pub generation: Mutex<Option<String>>,
+    pub admission: Arc<crate::db::pushes::Gate>,
+    pub bus: Arc<crate::db::events::EventBus>,
+    pub state_dir: std::path::PathBuf,
 }
 
 #[tonic::async_trait]
@@ -57,13 +60,9 @@ impl GateService for Gate {
 
     async fn open_session(
         &self,
-        _: Request<OpenSessionRequest>,
+        request: Request<OpenSessionRequest>,
     ) -> Result<Response<OpenSessionResponse>, Status> {
-        Err(rpc_error(
-            tonic::Code::Unimplemented,
-            "NOT_IMPLEMENTED",
-            "sessions are not implemented yet",
-        ))
+        self.open(request.into_inner()).await.map(Response::new)
     }
 
     async fn pre_receive(
@@ -83,13 +82,246 @@ impl GateService for Gate {
 
     async fn session_exited(
         &self,
-        _: Request<SessionExitedRequest>,
+        request: Request<SessionExitedRequest>,
     ) -> Result<Response<SessionExitedResponse>, Status> {
-        Err(rpc_error(
-            tonic::Code::Unimplemented,
-            "NOT_IMPLEMENTED",
-            "sessions are not implemented yet",
-        ))
+        let request = request.into_inner();
+        if !kajiba_core::names::is_public_id(&request.session_id) {
+            return Err(rpc_error(
+                tonic::Code::InvalidArgument,
+                "INVALID_FIELD",
+                "invalid session_id",
+            ));
+        }
+        let mut writer = self.writer.lock().await;
+        if let Some(repo) = self
+            .admission
+            .session_exited(&mut writer, &request.session_id)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?
+        {
+            self.admission
+                .reconcile_repo(
+                    &mut writer,
+                    &self.bus,
+                    &self.state_dir,
+                    &kajiba_gitstore::Gix::shared(&self.state_dir.join("repos")),
+                    repo,
+                )
+                .await
+                .map_err(Status::internal)?;
+        }
+        Ok(Response::new(SessionExitedResponse {}))
+    }
+}
+
+impl Gate {
+    pub fn new(admin: &super::local::Admin) -> Self {
+        Self {
+            writer: admin.writer.clone(),
+            generation: Mutex::default(),
+            admission: admin.gate.clone(),
+            bus: admin.bus.clone(),
+            state_dir: admin.state_dir.clone(),
+        }
+    }
+
+    async fn open(&self, request: OpenSessionRequest) -> Result<OpenSessionResponse, Status> {
+        use kajiba_core::config::Role as Permission;
+        use kajiba_proto::git::v1::{Session, SessionKind};
+        let kind = SessionKind::try_from(request.kind)
+            .ok()
+            .filter(|kind| *kind != SessionKind::Unspecified)
+            .ok_or_else(|| {
+                rpc_error(
+                    tonic::Code::InvalidArgument,
+                    "INVALID_FIELD",
+                    "invalid session kind",
+                )
+            })?;
+        if (kind == SessionKind::Import
+            && !kajiba_core::names::is_public_id(&request.import_session_id))
+            || (kind != SessionKind::Import && !request.import_session_id.is_empty())
+        {
+            return Err(rpc_error(
+                tonic::Code::InvalidArgument,
+                "INVALID_FIELD",
+                "invalid import_session_id",
+            ));
+        }
+        let mut writer = self.writer.lock().await;
+        let generation = self
+            .generation
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| super::git_side::unavailable("Hello required"))?;
+        if self.admission.generation().as_ref() != Some(&generation) {
+            return Err(super::git_side::unavailable("session snapshot required"));
+        }
+        let public_id = match request.repository {
+            Some(open_session_request::Repository::RepoPublicId(id))
+                if kajiba_core::names::is_public_id(&id) =>
+            {
+                id
+            }
+            Some(open_session_request::Repository::RepoAddress(address)) => {
+                let parsed = crate::ssh::parse(&format!("git-upload-pack '{address}'"))
+                    .ok_or_else(|| {
+                        rpc_error(
+                            tonic::Code::InvalidArgument,
+                            "INVALID_FIELD",
+                            "invalid repository address",
+                        )
+                    })?;
+                sqlx::query_scalar::<_, String>(
+                    "SELECT repo.public_id FROM repo JOIN user ON user.id = repo.owner_id
+                     WHERE user.name = ?1 AND repo.name = ?2
+                     UNION ALL SELECT repo.public_id FROM repo_redirect JOIN repo ON repo.id = repo_redirect.repo_id
+                     WHERE repo_redirect.owner_name = ?1 AND repo_redirect.name = ?2 LIMIT 1")
+                    .bind(parsed.owner).bind(parsed.name).fetch_optional(&mut *writer).await
+                    .map_err(|err| Status::internal(err.to_string()))?
+                    .ok_or_else(|| rpc_error(tonic::Code::NotFound, "REPO_NOT_FOUND", "repository not found"))?
+            }
+            _ => {
+                return Err(rpc_error(
+                    tonic::Code::InvalidArgument,
+                    "INVALID_FIELD",
+                    "invalid repository",
+                ));
+            }
+        };
+        let (repo, branch, archived): (i64, String, bool) = sqlx::query_as(
+            "SELECT id, default_branch, archived_at IS NOT NULL FROM repo WHERE public_id = ?",
+        )
+        .bind(&public_id)
+        .fetch_optional(&mut *writer)
+        .await
+        .map_err(|err| Status::internal(err.to_string()))?
+        .ok_or_else(|| {
+            rpc_error(
+                tonic::Code::NotFound,
+                "REPO_NOT_FOUND",
+                "repository not found",
+            )
+        })?;
+        if archived {
+            return Err(rpc_error(
+                tonic::Code::FailedPrecondition,
+                "INVALID_STATE",
+                "repository is archived",
+            ));
+        }
+        let mut signers = String::new();
+        let (role, is_admin) = if matches!(kind, SessionKind::Import | SessionKind::Maintenance) {
+            if !request.user_public_id.is_empty() {
+                return Err(rpc_error(
+                    tonic::Code::PermissionDenied,
+                    "ROLE_MISSING",
+                    "system session required",
+                ));
+            }
+            (Role::Admin, false)
+        } else {
+            let (user, admin): (i64, bool) = sqlx::query_as(
+                "SELECT id, is_admin FROM user WHERE public_id = ? AND disabled_at IS NULL",
+            )
+            .bind(&request.user_public_id)
+            .fetch_optional(&mut *writer)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?
+            .ok_or_else(|| {
+                rpc_error(
+                    tonic::Code::PermissionDenied,
+                    "ROLE_MISSING",
+                    "active user required",
+                )
+            })?;
+            let permission = crate::db::permissions::role(&mut *writer, user, repo)
+                .await
+                .map_err(|err| Status::internal(err.to_string()))?;
+            let required = if kind == SessionKind::UploadPack {
+                Permission::Read
+            } else {
+                Permission::Write
+            };
+            let permission = permission.filter(|role| *role >= required).ok_or_else(|| {
+                rpc_error(
+                    tonic::Code::PermissionDenied,
+                    "ROLE_MISSING",
+                    "repository role required",
+                )
+            })?;
+            let keys: Vec<String> = sqlx::query_scalar("SELECT public_key FROM ssh_key WHERE user_id = ? AND usage = 'signing' ORDER BY id")
+                .bind(user).fetch_all(&mut *writer).await.map_err(|err| Status::internal(err.to_string()))?;
+            for key in keys {
+                signers.push_str(&format!("{} {key}\n", request.user_public_id));
+            }
+            (
+                match permission {
+                    Permission::Read => Role::Read,
+                    Permission::Write => Role::Write,
+                    Permission::Admin => Role::Admin,
+                },
+                admin,
+            )
+        };
+        let session_id = if kind == SessionKind::Import {
+            // The reservation must still exist: a delayed Fetch after recovery cannot write.
+            sqlx::query_scalar::<_, String>(
+                "UPDATE pending_push SET git_generation = ?
+                WHERE repo_id = ? AND correlation_id = ? AND principal_id IS NULL
+                  AND git_session_id = ? AND git_generation IS NULL RETURNING git_session_id",
+            )
+            .bind(&generation)
+            .bind(repo)
+            .bind(&request.correlation_id)
+            .bind(&request.import_session_id)
+            .fetch_optional(&mut *writer)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?
+            .ok_or_else(|| {
+                rpc_error(
+                    tonic::Code::FailedPrecondition,
+                    "INVALID_STATE",
+                    "import reservation is absent or already started",
+                )
+            })?
+        } else {
+            if kind != SessionKind::UploadPack {
+                let pending: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pending_push WHERE repo_id = ?)",
+                )
+                .bind(repo)
+                .fetch_one(&mut *writer)
+                .await
+                .map_err(|err| Status::internal(err.to_string()))?;
+                if pending || self.admission.running(repo) {
+                    return Err(rpc_error(
+                        tonic::Code::FailedPrecondition,
+                        "INVALID_STATE",
+                        "repository has an unfinished session; retry",
+                    ));
+                }
+            }
+            kajiba_core::new_id().map_err(|err| Status::internal(err.to_string()))?
+        };
+        let session = Session {
+            session_id,
+            kind: kind.into(),
+            repo_public_id: public_id.clone(),
+            user_public_id: request.user_public_id,
+            correlation_id: request.correlation_id,
+            generation,
+        };
+        self.admission.opened(repo, session.clone());
+        Ok(OpenSessionResponse {
+            session: Some(session),
+            repo_public_id: public_id,
+            default_branch: branch,
+            role: role.into(),
+            is_admin,
+            allowed_signers: signers,
+        })
     }
 }
 

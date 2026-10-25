@@ -45,15 +45,84 @@ impl std::fmt::Display for Refused {
     }
 }
 
-/// Repositories whose admitted process is still running. In-memory: after a
-/// restart no admitted process of the previous instance survives (the unit's
-/// processes are stopped with it), so every row is eligible for recovery.
+/// Live daemon sessions supplement durable pending-row session identities (0053).
 #[derive(Default)]
 pub struct Gate {
     running: std::sync::Mutex<HashSet<i64>>,
+    sessions: std::sync::Mutex<BTreeMap<String, (i64, kajiba_proto::git::v1::Session)>>,
+    generation: std::sync::Mutex<Option<String>>,
 }
 
 impl Gate {
+    pub fn running(&self, repo: i64) -> bool {
+        self.running.lock().unwrap().contains(&repo)
+    }
+
+    pub fn generation(&self) -> Option<String> {
+        self.generation.lock().unwrap().clone()
+    }
+
+    /// Called under the database writer lock, also held by admission and exit.
+    pub async fn rebuild(
+        &self,
+        writer: &mut SqliteConnection,
+        generation: &str,
+        sessions: Vec<kajiba_proto::git::v1::Session>,
+    ) -> Result<(), String> {
+        let mut rebuilt = BTreeMap::new();
+        for session in sessions {
+            if session.generation != generation
+                || !kajiba_core::names::is_public_id(&session.session_id)
+            {
+                return Err("invalid git-side session snapshot".into());
+            }
+            let repo: Option<i64> = sqlx::query_scalar("SELECT id FROM repo WHERE public_id = ?")
+                .bind(&session.repo_public_id)
+                .fetch_optional(&mut *writer)
+                .await
+                .map_err(|err| err.to_string())?;
+            if let Some(repo) = repo {
+                rebuilt.insert(session.session_id.clone(), (repo, session));
+            }
+        }
+        *self.running.lock().unwrap() = rebuilt.values().map(|(repo, _)| *repo).collect();
+        *self.sessions.lock().unwrap() = rebuilt;
+        *self.generation.lock().unwrap() = Some(generation.into());
+        Ok(())
+    }
+
+    pub fn opened(&self, repo: i64, session: kajiba_proto::git::v1::Session) {
+        self.running.lock().unwrap().insert(repo);
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session.session_id.clone(), (repo, session));
+    }
+
+    pub async fn session_exited(
+        &self,
+        writer: &mut SqliteConnection,
+        session_id: &str,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        let pending: Option<i64> = sqlx::query_scalar(
+            "UPDATE pending_push SET git_session_id = NULL WHERE git_session_id = ? RETURNING repo_id"
+        ).bind(session_id).fetch_optional(&mut *writer).await?;
+        let session = self.sessions.lock().unwrap().remove(session_id);
+        let repo = pending.or_else(|| session.map(|(repo, _)| repo));
+        if let Some(repo) = repo {
+            if !self
+                .sessions
+                .lock()
+                .unwrap()
+                .values()
+                .any(|(id, _)| *id == repo)
+            {
+                self.exited(repo);
+            }
+        }
+        Ok(repo)
+    }
+
     /// Commits the pending row; only then may the caller mutate refs. Call
     /// `exited` once the mutating process has exited, then `reconcile`.
     pub async fn admit(
@@ -64,6 +133,9 @@ impl Gate {
         correlation_id: &str,
         updates: &[RefUpdate],
     ) -> Result<(), Refused> {
+        if self.running(repo_id) {
+            return Err(Refused::InProgress);
+        }
         let json = serde_json::Value::Array(
             updates
                 .iter()
@@ -150,10 +222,12 @@ impl Gate {
             Option<String>,
             String,
             String,
+            Option<String>,
+            Option<String>,
         );
         let rows: Vec<Pending> = sqlx::query_as(
             "SELECT pending_push.id, repo.id, repo.public_id, owner.name || '/' || repo.name,
-                    principal_id, principal.name, correlation_id, updates
+                    principal_id, principal.name, correlation_id, updates, git_session_id, git_generation
              FROM pending_push JOIN repo ON repo.id = repo_id JOIN user owner ON owner.id = repo.owner_id
              LEFT JOIN user principal ON principal.id = principal_id
              WHERE repo.archived_at IS NULL AND (?1 IS NULL OR repo.id = ?1)
@@ -163,8 +237,29 @@ impl Gate {
         .fetch_all(&mut *writer)
         .await
         .map_err(|err| format!("push reconciliation: {err}"))?;
-        for (id, repo_id, public_id, repo, principal_id, user, correlation_id, updates) in rows {
+        for (
+            id,
+            repo_id,
+            public_id,
+            repo,
+            principal_id,
+            user,
+            correlation_id,
+            updates,
+            session,
+            generation,
+        ) in rows
+        {
             if self.running.lock().unwrap().contains(&repo_id) {
+                continue;
+            }
+            if session.is_some()
+                && generation.as_ref().is_some_and(|old| {
+                    self.generation()
+                        .as_ref()
+                        .is_none_or(|current| current == old)
+                })
+            {
                 continue;
             }
             let path = state_dir.join(format!("repos/{public_id}.git"));

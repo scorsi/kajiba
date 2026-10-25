@@ -42,7 +42,16 @@ impl git_service_server::GitService for Daemon {
         &self,
         _: Request<ListSessionsRequest>,
     ) -> Result<Response<ListSessionsResponse>, Status> {
-        Err(Status::unimplemented("test"))
+        Ok(Response::new(ListSessionsResponse {
+            generation: self.generation.clone(),
+            sessions: vec![Session {
+                session_id: "00000000000000000000000002".into(),
+                kind: SessionKind::Import.into(),
+                repo_public_id: "00000000000000000000000001".into(),
+                generation: self.generation.clone(),
+                ..Default::default()
+            }],
+        }))
     }
     async fn create_repository(
         &self,
@@ -95,10 +104,15 @@ async fn readiness_tracks_missing_mismatched_connected_and_restarted_daemon() {
         err.get_error_details().error_info().unwrap().reason,
         "GIT_SIDE_UNAVAILABLE"
     );
+    let admin =
+        crate::transport::local::tests::admin(&state.health.state_dir, "[users.alice]").await;
+    sqlx::query("INSERT INTO repo (public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at) VALUES ('00000000000000000000000001', 1, 'demo', 'public', 0, 'main', '', 0)")
+        .execute(&mut *admin.writer.lock().await).await.unwrap();
+    let admission = admin.gate.clone();
     let monitor = tokio::spawn({
         let path = path.clone();
         let link = link.clone();
-        async move { link.run(&path).await }
+        async move { link.run(&path, Some(&admin)).await }
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     let version = Arc::new(Mutex::new(format!("{}-other", env!("CARGO_PKG_VERSION"))));
@@ -133,10 +147,13 @@ async fn readiness_tracks_missing_mismatched_connected_and_restarted_daemon() {
     );
     *version.lock().unwrap() = env!("CARGO_PKG_VERSION").into();
     wait_for(|| link.ready()).await;
+    assert!(admission.running(1));
+    let first_generation = admission.generation();
     assert_eq!(get(&mut app, "/readyz").await, StatusCode::OK);
     stop.send(()).unwrap();
     server.await.unwrap().unwrap();
     wait_for(|| !link.ready()).await;
+    assert!(admission.running(1), "a lost connection is not an exit");
     assert_eq!(
         get(&mut app, "/readyz").await,
         StatusCode::SERVICE_UNAVAILABLE
@@ -144,6 +161,8 @@ async fn readiness_tracks_missing_mismatched_connected_and_restarted_daemon() {
     assert_eq!(get(&mut app, "/healthz").await, StatusCode::OK);
     let (stop, server) = start();
     wait_for(|| link.ready()).await;
+    assert!(admission.running(1));
+    assert_ne!(admission.generation(), first_generation);
     assert_eq!(get(&mut app, "/readyz").await, StatusCode::OK);
     monitor.abort();
     let _ = monitor.await;

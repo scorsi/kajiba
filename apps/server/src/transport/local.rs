@@ -26,6 +26,7 @@ use tonic::{Request, Response, Status, service::Routes};
 
 pub const SOCKET_PATH: &str = "/run/kajiba/local.sock";
 
+#[derive(Clone)]
 pub struct Admin {
     pub writer: crate::db::Writer,
     pub public_url: String,

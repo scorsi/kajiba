@@ -272,19 +272,17 @@ pub async fn serve(
         kajiba_core::local::user_id(c"kajiba-git")?,
         kajiba_core::local::group_id(c"kajiba-git")?,
     )?;
-    let gate = gate::Gate {
-        writer: admin.writer.clone(),
-        generation: Default::default(),
-    };
+    let gate = gate::Gate::new(&admin);
     let git_side = health.git_side.clone();
     let app = router(health, config.reflection, registry.clone()).map_err(std::io::Error::other)?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let metrics = metrics::bind(metrics_config.listen)
         .await?
         .map(|listener| (listener, metrics::router(registry.clone(), readers, bus)));
+    let recovery = admin.clone();
     tokio::select! {
         result = serve_listeners(listener, app, metrics, (local, admin), (gate_local, gate), registry) => result,
-        () = git_side.run(&git_config.socket) => unreachable!("connection loop runs until shutdown"),
+        () = git_side.run(&git_config.socket, Some(&recovery)) => unreachable!("connection loop runs until shutdown"),
     }
 }
 

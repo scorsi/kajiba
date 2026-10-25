@@ -7,6 +7,7 @@ use tonic::{Request, Response, Status};
 
 pub struct Git {
     pub generation: String,
+    pub server_socket: std::path::PathBuf,
     pub repositories: std::sync::Arc<crate::repositories::Repositories>,
 }
 
@@ -122,11 +123,46 @@ impl git_service_server::GitService for Git {
         }
         kajiba_gitstore::import::check_source(&request.source)
             .map_err(|err| rpc_error(tonic::Code::InvalidArgument, "INVALID_FIELD", err))?;
+        let session = request.session.clone().unwrap();
+        self.repositories.register(session.clone())?;
         let repositories = self.repositories.clone();
-        // Blocking work and its session survive a cancelled RPC.
-        tokio::task::spawn_blocking(move || repositories.fetch(request))
-            .await
-            .map_err(|_| Status::internal("import worker failed"))??;
+        let server_socket = self.server_socket.clone();
+        // Admission, child wait and exit recording all survive a cancelled Fetch RPC.
+        tokio::spawn(async move {
+            let result = async {
+                let mut client = server_client(&server_socket, &session.generation).await?;
+                let opened = client
+                    .open_session(gate::OpenSessionRequest {
+                        user_public_id: String::new(),
+                        kind: SessionKind::Import.into(),
+                        repository: Some(gate::open_session_request::Repository::RepoPublicId(
+                            session.repo_public_id.clone(),
+                        )),
+                        correlation_id: session.correlation_id.clone(),
+                        import_session_id: session.session_id.clone(),
+                    })
+                    .await?
+                    .into_inner();
+                if opened.session.as_ref() != Some(&session) {
+                    return Err(Status::failed_precondition("import session changed"));
+                }
+                tracing::info!(
+                    event = "session-started",
+                    session = session.session_id,
+                    kind = "import",
+                    repo = session.repo_public_id
+                );
+                let worker = repositories.clone();
+                tokio::task::spawn_blocking(move || worker.fetch(request))
+                    .await
+                    .map_err(|_| Status::internal("import worker failed"))?
+            }
+            .await;
+            repositories.finished(&session.session_id, if result.is_ok() { 0 } else { 1 });
+            result
+        })
+        .await
+        .map_err(|_| Status::internal("import supervisor failed"))??;
         Ok(Response::new(FetchResponse {}))
     }
     async fn spawn(&self, _: Request<SpawnRequest>) -> Result<Response<SpawnResponse>, Status> {
@@ -143,7 +179,11 @@ fn not_implemented() -> Status {
 }
 
 /// The daemon is ready independently of the server. Retry until the other unit is up.
-pub async fn connect_server(path: &Path, generation: &str) {
+pub async fn connect_server(
+    path: &Path,
+    generation: &str,
+    repositories: &crate::repositories::Repositories,
+) {
     let mut client = None;
     let mut delay = Duration::from_millis(100);
     let mut unavailable = false;
@@ -178,6 +218,23 @@ pub async fn connect_server(path: &Path, generation: &str) {
                     tracing::info!(event = "server-connected", version = hello.version);
                 }
                 unavailable = false;
+                for (session, exit_status) in repositories.exits() {
+                    let result = client
+                        .as_mut()
+                        .unwrap()
+                        .session_exited(gate::SessionExitedRequest {
+                            session_id: session.session_id.clone(),
+                            exit_status,
+                        })
+                        .await;
+                    if result.is_ok() {
+                        repositories.acknowledged(&session.session_id);
+                    } else {
+                        // Keep the exit fact until acknowledged, including after server restart.
+                        client = None;
+                        break;
+                    }
+                }
                 delay = Duration::from_secs(1);
             }
             Err(err) => {
@@ -198,3 +255,25 @@ mod tests;
 
 #[cfg(test)]
 mod import_tests;
+
+async fn server_client(
+    path: &Path,
+    generation: &str,
+) -> Result<gate::gate_service_client::GateServiceClient<tonic::transport::Channel>, Status> {
+    let mut client = gate::gate_service_client::GateServiceClient::new(
+        channel(path, Some(Duration::from_secs(5)))
+            .await
+            .map_err(|_| Status::unavailable("server unavailable"))?,
+    );
+    let hello = client
+        .hello(gate::HelloRequest {
+            version: env!("CARGO_PKG_VERSION").into(),
+            generation: generation.into(),
+        })
+        .await?
+        .into_inner();
+    if let Some(err) = version_error(env!("CARGO_PKG_VERSION"), &hello.version) {
+        return Err(err);
+    }
+    Ok(client)
+}

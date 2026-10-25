@@ -122,11 +122,17 @@ pub async fn import(
                     Refused::Database(err) => Error::Internal(err.to_string()),
                     err => Error::NotEmpty(err.to_string()),
                 })?;
+            sqlx::query("UPDATE pending_push SET git_session_id = ? WHERE repo_id = ?")
+                .bind(&session_id)
+                .bind(repo_id)
+                .execute(&mut *connection)
+                .await
+                .map_err(|err| Error::Internal(err.to_string()))?;
         }
         checkpoint("admitted");
         let request = FetchRequest {
             session: Some(Session {
-                session_id,
+                session_id: session_id.clone(),
                 kind: SessionKind::Import.into(),
                 repo_public_id: public_id.clone(),
                 user_public_id: String::new(),
@@ -138,9 +144,15 @@ pub async fn import(
             credentials,
             refs: wanted,
         };
-        supervise(writer, gate, bus, state_dir, repo_id, async move {
-            client.fetch(request).await.map(|_| ())
-        })
+        supervise(
+            writer,
+            gate,
+            bus,
+            state_dir,
+            repo_id,
+            Some(session_id),
+            async move { client.fetch(request).await.map(|_| ()) },
+        )
         .await
         .map_err(|err| Error::Internal(err.to_string()))?
         .map_err(Error::Internal)?
@@ -162,6 +174,7 @@ pub(crate) fn supervise(
     bus: Arc<EventBus>,
     state_dir: PathBuf,
     repo_id: i64,
+    session_id: Option<String>,
     mutate: impl std::future::Future<Output = Result<(), tonic::Status>> + Send + 'static,
 ) -> tokio::task::JoinHandle<Result<Result<(), tonic::Status>, String>> {
     tokio::spawn(async move {
@@ -178,9 +191,16 @@ pub(crate) fn supervise(
             return Ok(mutated);
         }
         checkpoint("fetched");
-        gate.exited(repo_id);
+        let mut writer = writer.lock().await;
+        if let Some(session) = session_id {
+            gate.session_exited(&mut writer, &session)
+                .await
+                .map_err(|err| err.to_string())?;
+        } else {
+            gate.exited(repo_id);
+        }
         gate.reconcile_repo(
-            &mut *writer.lock().await,
+            &mut writer,
             &bus,
             &state_dir,
             &Gix::shared(&state_dir.join("repos")),

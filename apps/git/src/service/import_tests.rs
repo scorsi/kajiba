@@ -9,11 +9,84 @@ use std::{
 const ID: &str = "00000000000000000000000001";
 
 fn service(root: &Path) -> Git {
-    Git {
+    let git = Git {
         generation: kajiba_core::new_id().unwrap(),
         repositories: Arc::new(crate::repositories::Repositories::new(root.into())),
+        server_socket: root.join("gate.sock"),
+    };
+    let local = kajiba_core::local::Local::bind(
+        &git.server_socket,
+        Arc::default(),
+        0o600,
+        vec![kajiba_core::local::effective_uid()],
+    )
+    .unwrap();
+    let server = ImportGate {
+        repositories: git.repositories.clone(),
+    };
+    tokio::spawn(local.serve(
+        tonic::service::Routes::new(gate::gate_service_server::GateServiceServer::new(server)),
+        std::future::pending(),
+    ));
+    git
+}
+
+struct ImportGate {
+    repositories: Arc<crate::repositories::Repositories>,
+}
+
+#[tonic::async_trait]
+impl gate::gate_service_server::GateService for ImportGate {
+    async fn hello(
+        &self,
+        _: Request<gate::HelloRequest>,
+    ) -> Result<Response<gate::HelloResponse>, Status> {
+        Ok(Response::new(gate::HelloResponse {
+            version: env!("CARGO_PKG_VERSION").into(),
+        }))
+    }
+    async fn open_session(
+        &self,
+        request: Request<gate::OpenSessionRequest>,
+    ) -> Result<Response<gate::OpenSessionResponse>, Status> {
+        let request = request.into_inner();
+        let session = self
+            .repositories
+            .sessions()
+            .into_iter()
+            .find(|s| s.correlation_id == request.correlation_id)
+            .unwrap();
+        Ok(Response::new(gate::OpenSessionResponse {
+            session: Some(session),
+            ..Default::default()
+        }))
+    }
+    async fn session_exited(
+        &self,
+        _: Request<gate::SessionExitedRequest>,
+    ) -> Result<Response<gate::SessionExitedResponse>, Status> {
+        Ok(Response::new(gate::SessionExitedResponse {}))
+    }
+    async fn get_auth_key(
+        &self,
+        _: Request<gate::GetAuthKeyRequest>,
+    ) -> Result<Response<gate::GetAuthKeyResponse>, Status> {
+        Err(Status::unimplemented("test"))
+    }
+    async fn pre_receive(
+        &self,
+        _: Request<gate::PreReceiveRequest>,
+    ) -> Result<Response<gate::PreReceiveResponse>, Status> {
+        Err(Status::unimplemented("test"))
+    }
+    async fn post_receive(
+        &self,
+        _: Request<gate::PostReceiveRequest>,
+    ) -> Result<Response<gate::PostReceiveResponse>, Status> {
+        Err(Status::unimplemented("test"))
     }
 }
+
 fn request(git: &Git, source: &str, refs: Vec<RemoteRef>) -> FetchRequest {
     FetchRequest {
         session: Some(Session {
@@ -129,6 +202,8 @@ async fn imports_paths_bundles_and_urls_preserving_refs_tags_and_head() {
         );
         assert!(git.repositories.sessions().is_empty());
         // A server asking twice cannot overwrite the repository.
+        let mut request = request;
+        request.session.as_mut().unwrap().session_id = kajiba_core::new_id().unwrap();
         let err = git.fetch(Request::new(request)).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
         assert_eq!(Gix.refs(&target).unwrap(), expected);
@@ -170,6 +245,7 @@ async fn fetch_refuses_bad_sessions_paths_refs_and_sources_without_writing() {
         "source",
     ] {
         let mut r = valid.clone();
+        r.session.as_mut().unwrap().session_id = kajiba_core::new_id().unwrap();
         match field {
             "missing session" => r.session = None,
             "kind" => r.session.as_mut().unwrap().kind = SessionKind::ReceivePack.into(),
@@ -290,6 +366,8 @@ async fn imports_exact_admitted_ids_and_refuses_a_target_with_only_a_note() {
         git(&target, &["update-ref", "-d", &r.name], "");
     }
     assert_eq!(Gix.refs(&target).unwrap().len(), 1);
+    let mut request = request;
+    request.session.as_mut().unwrap().session_id = kajiba_core::new_id().unwrap();
     assert_eq!(
         daemon
             .fetch(Request::new(request))
@@ -298,4 +376,131 @@ async fn imports_exact_admitted_ids_and_refuses_a_target_with_only_a_note() {
             .code(),
         tonic::Code::FailedPrecondition
     );
+}
+
+#[tokio::test]
+async fn a_cancelled_fetch_rpc_keeps_the_child_accounted_until_wait_finishes() {
+    let dir = TempDir::new();
+    let _lock = prepare(&dir.0).unwrap();
+    let git = Arc::new(service(&dir.0));
+    git.repositories.create(ID, "main").unwrap();
+    let remote = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let request = request(
+        &git,
+        &format!("git://{}/repo", remote.local_addr().unwrap()),
+        vec![RemoteRef {
+            ref_name: "refs/heads/main".into(),
+            object_id: "1".repeat(40),
+        }],
+    );
+    let session = request.session.clone().unwrap();
+    let fetch = tokio::spawn({
+        let git = git.clone();
+        async move { git.fetch(Request::new(request)).await }
+    });
+    let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), remote.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    use tokio::io::AsyncReadExt;
+    let mut command = [0; 1024];
+    assert!(stream.read(&mut command).await.unwrap() > 0);
+    assert_eq!(
+        git.list_sessions(Request::new(ListSessionsRequest {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .sessions,
+        std::slice::from_ref(&session)
+    );
+    fetch.abort();
+    assert!(fetch.await.unwrap_err().is_cancelled());
+    assert_eq!(git.repositories.sessions(), std::slice::from_ref(&session));
+    assert!(git.repositories.exits().is_empty());
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while git.repositories.exits().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(git.repositories.sessions().is_empty());
+    assert_eq!(git.repositories.exits(), [(session, 1)]);
+}
+
+// Run in a delegated cgroup v2 on Linux; ordinary Cargo sandboxes cannot create cgroups.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires KAJIBA_TEST_CGROUP pointing to a delegated cgroup v2"]
+async fn cgroup_kill_during_fetch_empties_the_group_before_a_new_generation() {
+    use tokio::io::AsyncReadExt;
+    if let Some(root) = std::env::var_os("KAJIBA_TEST_FETCH_DAEMON") {
+        let root = PathBuf::from(root);
+        while !root.join("start").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let _lock = prepare(&root).unwrap();
+        let git = service(&root);
+        if !root.join(format!("repos/{ID}.git")).exists() {
+            git.repositories.create(ID, "main").unwrap();
+        }
+        std::fs::write(root.join("generation"), &git.generation).unwrap();
+        let request = request(
+            &git,
+            &std::env::var("KAJIBA_TEST_FETCH_SOURCE").unwrap(),
+            vec![RemoteRef {
+                ref_name: "refs/heads/main".into(),
+                object_id: "1".repeat(40),
+            }],
+        );
+        git.fetch(Request::new(request)).await.unwrap();
+        panic!("fetch must remain blocked until its cgroup is killed");
+    }
+    let delegated =
+        PathBuf::from(std::env::var_os("KAJIBA_TEST_CGROUP").expect("delegated cgroup required"));
+    let cgroup = delegated.join(format!("kajiba-session-{}", std::process::id()));
+    std::fs::create_dir(&cgroup).unwrap();
+    let dir = TempDir::new();
+    let remote = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut generations = Vec::new();
+    for _ in 0..2 {
+        let _ = std::fs::remove_file(dir.0.join("start"));
+        let mut daemon = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "service::import_tests::cgroup_kill_during_fetch_empties_the_group_before_a_new_generation"])
+            .env("KAJIBA_TEST_FETCH_DAEMON", &dir.0)
+            .env("KAJIBA_TEST_FETCH_SOURCE", format!("git://{}/repo", remote.local_addr().unwrap()))
+            .stdout(std::process::Stdio::null()).spawn().unwrap();
+        std::fs::write(cgroup.join("cgroup.procs"), daemon.id().to_string()).unwrap();
+        std::fs::write(dir.0.join("start"), "").unwrap();
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(10), remote.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut command = [0; 1024];
+        assert!(
+            stream.read(&mut command).await.unwrap() > 0,
+            "a real fetch child is running"
+        );
+        generations.push(std::fs::read_to_string(dir.0.join("generation")).unwrap());
+        std::fs::write(cgroup.join("cgroup.kill"), "1").unwrap();
+        assert!(!daemon.wait().unwrap().success());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read_to_string(cgroup.join("cgroup.events"))
+                .unwrap()
+                .contains("populated 0")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            stream.read(&mut command).await.unwrap(),
+            0,
+            "fetch died with the daemon"
+        );
+    }
+    assert_ne!(generations[0], generations[1]);
+    std::fs::remove_dir(cgroup).unwrap();
 }

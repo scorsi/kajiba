@@ -212,3 +212,38 @@ fn init_fetch_and_ref_updates_keep_group_read_without_group_write() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
 }
+
+#[test]
+fn session_facts_remain_until_the_child_exits_and_the_server_acknowledges() {
+    use kajiba_proto::git::v1::SessionKind;
+    let temp = TempDir::new();
+    let repos = Repositories::new(temp.0.clone());
+    let session = Session {
+        session_id: kajiba_core::new_id().unwrap(),
+        generation: kajiba_core::new_id().unwrap(),
+        kind: SessionKind::Import.into(),
+        repo_public_id: ID.into(),
+        ..Default::default()
+    };
+    let mut child = std::process::Command::new("cat")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    repos.register(session.clone()).unwrap();
+    assert!(repos.register(session.clone()).is_err());
+    assert_eq!(repos.sessions(), std::slice::from_ref(&session));
+    assert!(repos.exits().is_empty());
+    assert!(child.try_wait().unwrap().is_none());
+    drop(child.stdin.take());
+    let status = child.wait().unwrap().code().unwrap();
+    repos.finished(&session.session_id, status);
+    assert!(repos.sessions().is_empty());
+    assert_eq!(repos.exits(), [(session.clone(), status)]);
+    assert!(repos.register(session.clone()).is_err());
+    repos.finished(&session.session_id, 1);
+    assert_eq!(repos.exits(), [(session.clone(), status)]);
+    repos.acknowledged(&session.session_id);
+    repos.acknowledged(&session.session_id);
+    assert!(repos.exits().is_empty());
+}

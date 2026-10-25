@@ -130,7 +130,7 @@ async fn events_schema_columns_nullability_keys_and_index() {
         ("handler_checkpoint", "handler last_event_id updated_at"),
         (
             "pending_push",
-            "id repo_id principal_id correlation_id updates created_at",
+            "id repo_id principal_id correlation_id updates created_at git_session_id git_generation",
         ),
     ] {
         let columns = sqlx::query(&format!("PRAGMA table_info({table})"))
@@ -148,7 +148,11 @@ async fn events_schema_columns_nullability_keys_and_index() {
             let name: String = column.get("name");
             let required = name != "id"
                 && !(table == "event" && matches!(name.as_str(), "principal_id" | "repo_id"))
-                && !(table == "pending_push" && name == "principal_id");
+                && !(table == "pending_push"
+                    && matches!(
+                        name.as_str(),
+                        "principal_id" | "git_session_id" | "git_generation"
+                    ));
             assert_eq!(
                 column.get::<i64, _>("notnull"),
                 i64::from(required),

@@ -229,7 +229,7 @@ fn serve_emits_start_migrations_and_refuses_an_unreachable_orphan_writer() {
     let (send, receive) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         let mut reader = std::io::BufReader::new(stderr);
-        for _ in 0..10 {
+        for _ in 0..11 {
             let mut text = String::new();
             reader.read_line(&mut text).unwrap();
             let _ = send.send(text);
@@ -237,7 +237,7 @@ fn serve_emits_start_migrations_and_refuses_an_unreachable_orphan_writer() {
     });
     let line = receive.recv_timeout(std::time::Duration::from_secs(5));
     let migration = receive.recv_timeout(std::time::Duration::from_secs(5));
-    let later: Vec<_> = (0..8)
+    let later: Vec<_> = (0..9)
         .map(|_| receive.recv_timeout(std::time::Duration::from_secs(5)))
         .collect();
     let _ = child.kill();
@@ -258,13 +258,13 @@ fn serve_emits_start_migrations_and_refuses_an_unreachable_orphan_writer() {
         .into_iter()
         .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
         .collect();
-    for (line, version) in later[..7].iter().zip([2, 3, 4, 5, 6, 7, 8]) {
+    for (line, version) in later[..8].iter().zip([2, 3, 4, 5, 6, 7, 8, 9]) {
         assert_eq!(line["event"], "migration-applied");
         assert_eq!(line["version"], version);
     }
-    assert_eq!(later[7]["event"], "fatal");
+    assert_eq!(later[8]["event"], "fatal");
     assert!(
-        later[7]["err"]
+        later[8]["err"]
             .as_str()
             .unwrap()
             .contains("GIT_SIDE_UNAVAILABLE")

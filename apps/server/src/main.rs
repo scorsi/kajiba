@@ -170,6 +170,14 @@ async fn main() -> ExitCode {
             let store = kajiba_gitstore::Gix::shared(&repos_root);
             let bus = std::sync::Arc::new(db::events::EventBus::default());
             let gate = std::sync::Arc::new(db::pushes::Gate::default());
+            if let Ok(mut client) = git.client().await.cloned() {
+                if let Err(err) =
+                    transport::git_side::snapshot(&mut client, &gate, &mut writer, &git.generation)
+                        .await
+                {
+                    tracing::warn!(event = "git-side-unavailable", err = %err);
+                }
+            }
             if let Err(err) = gate
                 .reconcile(&mut writer, &bus, &config.git.state_dir, &store)
                 .await

@@ -401,6 +401,7 @@ async fn a_dropped_import_future_still_releases_the_gate_and_reconciles() {
         import.bus.clone(),
         import.state_dir.clone(),
         1,
+        None,
         async move {
             tokio::task::spawn_blocking(fetch)
                 .await
@@ -637,6 +638,7 @@ async fn a_completed_deadline_reconciles_but_a_lost_response_keeps_the_gate_clos
             import.bus.clone(),
             import.state_dir.clone(),
             1,
+            None,
             async move {
                 Err(if completed {
                     tonic::Status::failed_precondition("timed out")

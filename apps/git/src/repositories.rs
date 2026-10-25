@@ -17,7 +17,13 @@ use tonic::{Code, Status};
 pub struct Repositories {
     root: PathBuf,
     mutation: Mutex<()>,
-    sessions: Mutex<std::collections::BTreeMap<String, Session>>,
+    sessions: Mutex<Sessions>,
+}
+
+#[derive(Default)]
+struct Sessions {
+    running: std::collections::BTreeMap<String, Session>,
+    exited: std::collections::BTreeMap<String, (Session, i32)>,
 }
 
 impl Repositories {
@@ -89,7 +95,56 @@ impl Repositories {
     }
 
     pub fn sessions(&self) -> Vec<Session> {
-        self.sessions.lock().unwrap().values().cloned().collect()
+        self.sessions
+            .lock()
+            .unwrap()
+            .running
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn register(&self, session: Session) -> Result<(), Status> {
+        let mut sessions = self.sessions.lock().unwrap();
+        if sessions.running.contains_key(&session.session_id)
+            || sessions.exited.contains_key(&session.session_id)
+        {
+            return Err(rpc_error(
+                Code::FailedPrecondition,
+                "INVALID_STATE",
+                "session already used",
+            ));
+        }
+        sessions.running.insert(session.session_id.clone(), session);
+        Ok(())
+    }
+
+    pub fn finished(&self, session_id: &str, status: i32) {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions.running.remove(session_id) {
+            tracing::info!(
+                event = "session-exited",
+                session = session.session_id,
+                kind = "import",
+                repo = session.repo_public_id,
+                status
+            );
+            sessions.exited.insert(session_id.into(), (session, status));
+        }
+    }
+
+    pub fn exits(&self) -> Vec<(Session, i32)> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .exited
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn acknowledged(&self, session: &str) {
+        self.sessions.lock().unwrap().exited.remove(session);
     }
 
     pub fn fetch(&self, request: FetchRequest) -> Result<(), Status> {
@@ -131,18 +186,6 @@ impl Repositories {
                 "import refs are empty",
             ));
         }
-        let session = request.session.expect("validated by the service");
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(session.session_id.clone(), session.clone());
-        struct Running<'a>(&'a Repositories, String);
-        impl Drop for Running<'_> {
-            fn drop(&mut self) {
-                self.0.sessions.lock().unwrap().remove(&self.1);
-            }
-        }
-        let _running = Running(self, session.session_id);
         Gix.fetch(&path, &request.source, &request.credentials, &refs)
             .map_err(source_error)
     }
