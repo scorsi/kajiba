@@ -222,7 +222,17 @@ fn sh(script: &str) -> Command {
 #[test]
 fn drain_reports_read_errors_instead_of_returning_incomplete_output() {
     let directory = fs::File::open(scratch("drain-error")).unwrap();
-    assert!(drain(directory).recv().unwrap().is_err());
+    let (stop, _) = std::sync::mpsc::channel();
+    assert!(
+        drain(
+            directory,
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(16)),
+            stop
+        )
+        .recv()
+        .unwrap()
+        .is_err()
+    );
 }
 
 #[test]

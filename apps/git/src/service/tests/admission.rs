@@ -195,6 +195,19 @@ async fn receive_pack_checks_then_forwards_once_and_never_changes_refs_on_refusa
                 .unwrap()
         }
     };
+    let excessive: Vec<_> = (0..257)
+        .map(|i| format!("{signed}:refs/heads/limit-{i}"))
+        .collect();
+    let output = push(&excessive).await;
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("push verification exceeds 256 updated refs"),
+        "{output:?}"
+    );
+    assert!(admissions.lock().unwrap().is_empty());
+    assert!(git(&target, &["for-each-ref"]).is_empty());
+
     let good = format!("{signed}:refs/heads/main");
     let output = push(&[good.clone(), format!("{unsigned}:refs/heads/bad")]).await;
     assert!(!output.status.success(), "{output:?}");

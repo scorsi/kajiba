@@ -696,6 +696,24 @@ async fn signature_checks_use_session_signers_and_remove_the_temporary_file() {
         std::fs::read_to_string(key.with_extension("pub")).unwrap()
     );
     git.repositories.register(session.clone(), signers).unwrap();
+    let mut excessive = request.clone();
+    excessive.updates = (0..257)
+        .map(|i| hook::RefUpdate {
+            ref_name: format!("refs/heads/limit-{i}"),
+            ..request.updates[0].clone()
+        })
+        .collect();
+    let err = HookService::pre_receive(&git, Request::new(excessive))
+        .await
+        .unwrap_err();
+    assert!(
+        err.message()
+            .contains("push verification exceeds 256 updated refs"),
+        "{err}"
+    );
+    assert!(command(&["for-each-ref"]).is_empty());
+    assert_eq!(std::fs::read_dir(temp.0.join("tmp")).unwrap().count(), 1); // orphans/ only
+
     let (facts, refusals) = git.repositories.check_signatures(&request).unwrap();
     assert_eq!(facts.commits, std::slice::from_ref(&commit));
     assert!(refusals.is_empty());

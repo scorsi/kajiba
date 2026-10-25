@@ -105,8 +105,9 @@ impl Repositories {
         ),
         Status,
     > {
-        use kajiba_gitstore::push::{Quarantine, Update};
+        use kajiba_gitstore::push::{Quarantine, Update, Verification};
         use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        let verification = Verification::default();
         let allowed_signers = {
             let sessions = self.sessions.lock().unwrap();
             let (_, signers) = sessions
@@ -142,7 +143,7 @@ impl Repositories {
             quarantine_path: &context.quarantine_path,
         };
         let facts = Gix
-            .push_facts(&path, &updates, &quarantine)
+            .push_facts(&path, &updates, &quarantine, &verification)
             .map_err(internal)?;
         let tags: Vec<_> = request
             .updates
@@ -169,7 +170,14 @@ impl Repositories {
             file.write_all(allowed_signers.as_bytes())
                 .map_err(internal)?;
             let mut refusals: Vec<_> = Gix
-                .verify_commits(&path, &updates, &facts, &quarantine, &signers_path)
+                .verify_commits(
+                    &path,
+                    &updates,
+                    &facts,
+                    &quarantine,
+                    &verification,
+                    &signers_path,
+                )
                 .map_err(internal)?
                 .into_iter()
                 .map(|r| kajiba_proto::hook::v1::Refusal {
@@ -178,8 +186,17 @@ impl Repositories {
                 })
                 .collect();
             for tag in tags {
+                if refusals.iter().any(|r| r.ref_name == tag.ref_name) {
+                    continue;
+                }
                 if !Gix
-                    .verify_tag(&path, &tag.new_id, &quarantine, &signers_path)
+                    .verify_tag(
+                        &path,
+                        &tag.new_id,
+                        &quarantine,
+                        &verification,
+                        &signers_path,
+                    )
                     .map_err(internal)?
                 {
                     refusals.push(kajiba_proto::hook::v1::Refusal {
@@ -191,6 +208,7 @@ impl Repositories {
                     });
                 }
             }
+            verification.check_deadline().map_err(internal)?;
             Ok::<_, Status>(refusals)
         })();
         let cleanup = fs::remove_file(&signers_path).map_err(internal);

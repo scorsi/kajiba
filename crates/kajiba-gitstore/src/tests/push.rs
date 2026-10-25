@@ -1,5 +1,5 @@
 use super::*;
-use crate::push::{Quarantine, Update};
+use crate::push::{Quarantine, Update, Verification};
 
 const ZERO: &str = "0000000000000000000000000000000000000000";
 const DATE: &str = "1700000000 +0000";
@@ -54,24 +54,39 @@ fn receive_limits_reject_aggregate_quarantine_before_reading_objects() {
         ..Default::default()
     };
     // Sparse files exercise the exact boundary without allocating the disk budget.
-    assert!(Gix.push_facts(&root, &[], &quarantine).is_ok());
+    assert!(
+        Gix.push_facts(&root, &[], &quarantine, &Verification::default())
+            .is_ok()
+    );
     index.set_len(2).unwrap();
     let missing = "1111111111111111111111111111111111111111";
     assert_eq!(
-        Gix.push_facts(&root, &updates(&[(ZERO, missing)]), &quarantine)
-            .unwrap_err(),
+        Gix.push_facts(
+            &root,
+            &updates(&[(ZERO, missing)]),
+            &quarantine,
+            &Verification::default()
+        )
+        .unwrap_err(),
         Error::Git("push quarantine exceeds 128 MiB limit".into())
     );
     index.set_len(0).unwrap();
     std::os::unix::fs::symlink(&root, incoming.join("link")).unwrap();
     assert_eq!(
-        Gix.push_facts(&root, &[], &quarantine).unwrap_err(),
+        Gix.push_facts(&root, &[], &quarantine, &Verification::default())
+            .unwrap_err(),
         Error::Git("invalid quarantine entry".into())
     );
     fs::remove_file(incoming.join("link")).unwrap();
     fs::remove_dir_all(&incoming).unwrap();
-    assert!(Gix.push_facts(&root, &[], &quarantine).is_err());
-    assert!(Gix.push_facts(&root, &[], &Quarantine::default()).is_ok());
+    assert!(
+        Gix.push_facts(&root, &[], &quarantine, &Verification::default())
+            .is_err()
+    );
+    assert!(
+        Gix.push_facts(&root, &[], &Quarantine::default(), &Verification::default())
+            .is_ok()
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -122,6 +137,7 @@ fn first_push_selects_whole_history_once_across_refs_and_annotated_tags() {
                 (ZERO, &tag),
             ]),
             &Quarantine::default(),
+            &Verification::default(),
         )
         .unwrap();
     assert_eq!(facts.commits, [f.third, f.second, f.first]);
@@ -148,6 +164,7 @@ fn any_pre_push_ref_excludes_commits_even_when_deleted_in_this_push() {
                 &f.bare,
                 &updates(&[(id, ZERO), (ZERO, &f.third)]),
                 &Quarantine::default(),
+                &Verification::default(),
             )
             .unwrap();
         assert_eq!(facts.commits, expected);
@@ -160,7 +177,12 @@ fn deletion_only_and_empty_pushes_select_nothing() {
     let f = fixture("push-deletions");
     for changes in [vec![], updates(&[(&f.third, ZERO), (&f.second, ZERO)])] {
         let facts = Gix
-            .push_facts(&f.bare, &changes, &Quarantine::default())
+            .push_facts(
+                &f.bare,
+                &changes,
+                &Quarantine::default(),
+                &Verification::default(),
+            )
             .unwrap();
         assert!(facts.commits.is_empty());
         assert_eq!(facts.fast_forward, vec![false; changes.len()]);
@@ -192,6 +214,7 @@ fn ancestry_distinguishes_forward_rewind_divergence_and_unrelated_history() {
                 (&f.second, &f.second),
             ]),
             &Quarantine::default(),
+            &Verification::default(),
         )
         .unwrap();
     assert_eq!(facts.fast_forward, [true, false, false, false, true]);
@@ -215,8 +238,13 @@ fn quarantine_and_alternates_are_used_for_both_selection_and_ancestry() {
     }
     let changes = updates(&[(&f.first, &f.third), (ZERO, &f.second)]);
     assert!(
-        Gix.push_facts(&f.bare, &changes, &Quarantine::default())
-            .is_err()
+        Gix.push_facts(
+            &f.bare,
+            &changes,
+            &Quarantine::default(),
+            &Verification::default()
+        )
+        .is_err()
     );
     let facts = Gix
         .push_facts(
@@ -227,6 +255,7 @@ fn quarantine_and_alternates_are_used_for_both_selection_and_ancestry() {
                 alternate_object_directories: f.bare.join("objects").to_str().unwrap(),
                 quarantine_path: quarantine.to_str().unwrap(),
             },
+            &Verification::default(),
         )
         .unwrap();
     assert_eq!(facts.commits, [f.third, f.second]);
@@ -243,8 +272,13 @@ fn invalid_or_missing_objects_and_bad_context_fail_checks() {
     for id in ["--all", "HEAD", "1111111111111111111111111111111111111111"] {
         for pair in [(id, f.third.as_str()), (f.first.as_str(), id)] {
             assert!(
-                Gix.push_facts(&f.bare, &updates(&[pair]), &Quarantine::default())
-                    .is_err()
+                Gix.push_facts(
+                    &f.bare,
+                    &updates(&[pair]),
+                    &Quarantine::default(),
+                    &Verification::default()
+                )
+                .is_err()
             );
         }
     }
@@ -259,8 +293,13 @@ fn invalid_or_missing_objects_and_bad_context_fail_checks() {
         },
     ] {
         assert!(
-            Gix.push_facts(&f.bare, &updates(&[(ZERO, &f.third)]), &context)
-                .is_err()
+            Gix.push_facts(
+                &f.bare,
+                &updates(&[(ZERO, &f.third)]),
+                &context,
+                &Verification::default()
+            )
+            .is_err()
         );
     }
 }
@@ -351,10 +390,22 @@ fn commit_signatures_require_the_pushers_ssh_signing_key() {
     ] {
         let updates = updates(&[(ZERO, tip)]);
         let facts = Gix
-            .push_facts(&repo, &updates, &Quarantine::default())
+            .push_facts(
+                &repo,
+                &updates,
+                &Quarantine::default(),
+                &Verification::default(),
+            )
             .unwrap();
         let refusals = Gix
-            .verify_commits(&repo, &updates, &facts, &Quarantine::default(), &signers)
+            .verify_commits(
+                &repo,
+                &updates,
+                &facts,
+                &Quarantine::default(),
+                &Verification::default(),
+                &signers,
+            )
             .unwrap();
         match bad {
             None => assert!(refusals.is_empty(), "{refusals:?}"),
@@ -370,12 +421,24 @@ fn commit_signatures_require_the_pushers_ssh_signing_key() {
     fs::write(&signers, "").unwrap();
     let updates = updates(&[(ZERO, &valid)]);
     let facts = Gix
-        .push_facts(&repo, &updates, &Quarantine::default())
+        .push_facts(
+            &repo,
+            &updates,
+            &Quarantine::default(),
+            &Verification::default(),
+        )
         .unwrap();
     assert_eq!(
-        Gix.verify_commits(&repo, &updates, &facts, &Quarantine::default(), &signers)
-            .unwrap()
-            .len(),
+        Gix.verify_commits(
+            &repo,
+            &updates,
+            &facts,
+            &Quarantine::default(),
+            &Verification::default(),
+            &signers
+        )
+        .unwrap()
+        .len(),
         1
     );
 }
@@ -418,19 +481,42 @@ fn shared_commits_are_verified_once_in_quarantine_and_refusals_name_each_ref() {
         quarantine_path: incoming.to_str().unwrap(),
     };
     let updates = updates(&[(ZERO, &commit), (ZERO, &commit)]);
-    let facts = Gix.push_facts(&repo, &updates, &quarantine).unwrap();
+    let facts = Gix
+        .push_facts(&repo, &updates, &quarantine, &Verification::default())
+        .unwrap();
     assert_eq!(facts.commits, std::slice::from_ref(&commit));
     let mut verified = Vec::new();
-    let refusals = crate::push::verify_commits(&repo, &updates, &facts, &quarantine, |id| {
-        verified.push(id.to_owned());
-        crate::push::verify_signature(&repo, id, &quarantine, &signers, "verify-commit")
-    })
+    let refusals = crate::push::verify_commits(
+        &repo,
+        &updates,
+        &facts,
+        &quarantine,
+        &Verification::default(),
+        |id| {
+            verified.push(id.to_owned());
+            crate::push::verify_signature(
+                &repo,
+                id,
+                &quarantine,
+                &Verification::default(),
+                &signers,
+                "verify-commit",
+            )
+        },
+    )
     .unwrap();
     assert!(refusals.is_empty());
     assert_eq!(verified, std::slice::from_ref(&commit));
     fs::write(&signers, "").unwrap();
     let refusals = Gix
-        .verify_commits(&repo, &updates, &facts, &quarantine, &signers)
+        .verify_commits(
+            &repo,
+            &updates,
+            &facts,
+            &quarantine,
+            &Verification::default(),
+            &signers,
+        )
         .unwrap();
     assert_eq!(
         refusals
@@ -440,8 +526,15 @@ fn shared_commits_are_verified_once_in_quarantine_and_refusals_name_each_ref() {
         [(0, commit.as_str()), (1, commit.as_str())]
     );
     assert!(
-        Gix.verify_commits(&repo, &updates, &facts, &Quarantine::default(), &signers)
-            .is_err()
+        Gix.verify_commits(
+            &repo,
+            &updates,
+            &facts,
+            &Quarantine::default(),
+            &Verification::default(),
+            &signers
+        )
+        .is_err()
     );
 }
 
@@ -538,18 +631,121 @@ fn tags_require_an_annotated_ssh_signature_by_the_pusher_in_quarantine() {
         (&wrong, false),
     ] {
         assert_eq!(
-            Gix.verify_tag(&repo, id, &quarantine, &signers).unwrap(),
+            Gix.verify_tag(&repo, id, &quarantine, &Verification::default(), &signers)
+                .unwrap(),
             accepted,
             "{id}"
         );
     }
     assert!(
-        !Gix.verify_tag(&repo, &valid, &Quarantine::default(), &signers)
-            .unwrap()
+        !Gix.verify_tag(
+            &repo,
+            &valid,
+            &Quarantine::default(),
+            &Verification::default(),
+            &signers
+        )
+        .unwrap()
     );
     fs::write(&signers, "").unwrap();
     assert!(
-        !Gix.verify_tag(&repo, &valid, &quarantine, &signers)
-            .unwrap()
+        !Gix.verify_tag(
+            &repo,
+            &valid,
+            &quarantine,
+            &Verification::default(),
+            &signers
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn verification_ref_and_commit_limits_reject_instead_of_truncating() {
+    let root = scratch("verification-limits");
+    Gix.init_bare(&root, "main").unwrap();
+    let quarantine = Quarantine::default();
+    assert!(
+        Gix.push_facts(
+            &root,
+            &updates(&[(ZERO, ZERO); 256]),
+            &quarantine,
+            &Verification::default()
+        )
+        .is_ok()
+    );
+    assert!(
+        Gix.push_facts(
+            &root,
+            &updates(&[(ZERO, ZERO); 257]),
+            &quarantine,
+            &Verification::default()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("256 updated refs")
+    );
+
+    let mut command = crate::git();
+    command
+        .arg("--git-dir")
+        .arg(&root)
+        .args(["fast-import", "--quiet"]);
+    let history = "commit refs/heads/main\ncommitter Alice <alice@example.org> 1700000000 +0000\ndata 1\nx\n\n".repeat(4097);
+    run(command, &history, Duration::from_secs(30)).unwrap();
+    let tip = git(&root, &["rev-parse", "HEAD"], DATE);
+    let parent = git(&root, &["rev-parse", "HEAD^"], DATE);
+    clear_refs(&root);
+    let facts = Gix
+        .push_facts(
+            &root,
+            &updates(&[(ZERO, &parent)]),
+            &quarantine,
+            &Verification::default(),
+        )
+        .unwrap();
+    assert_eq!(facts.commits.len(), 4096);
+    assert!(
+        Gix.push_facts(
+            &root,
+            &updates(&[(ZERO, &tip)]),
+            &quarantine,
+            &Verification::default()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("4096 new commits")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verification_keeps_only_the_first_commit_refusal_per_ref() {
+    let f = fixture("verification-refusals");
+    clear_refs(&f.bare);
+    let changes = updates(&[(ZERO, &f.third), (ZERO, &f.second)]);
+    let quarantine = Quarantine::default();
+    let verification = Verification::default();
+    let facts = Gix
+        .push_facts(&f.bare, &changes, &quarantine, &verification)
+        .unwrap();
+    let mut checked = 0;
+    let refusals = crate::push::verify_commits(
+        &f.bare,
+        &changes,
+        &facts,
+        &quarantine,
+        &verification,
+        |_| {
+            checked += 1;
+            Ok(false)
+        },
+    )
+    .unwrap();
+    assert_eq!(checked, facts.commits.len());
+    assert_eq!(refusals.len(), 2);
+    assert_eq!(
+        refusals.iter().map(|r| r.update_index).collect::<Vec<_>>(),
+        [0, 1]
     );
 }

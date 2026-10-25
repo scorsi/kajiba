@@ -207,6 +207,7 @@ pub trait GitStore {
         repo: &Path,
         updates: &[push::Update<'_>],
         quarantine: &push::Quarantine<'_>,
+        verification: &push::Verification,
     ) -> Result<push::Facts>;
     /// Verify each selected commit once against this session's signing keys.
     fn verify_commits(
@@ -215,6 +216,7 @@ pub trait GitStore {
         updates: &[push::Update<'_>],
         facts: &push::Facts,
         quarantine: &push::Quarantine<'_>,
+        verification: &push::Verification,
         allowed_signers: &Path,
     ) -> Result<Vec<push::CommitRefusal>>;
     /// Require an annotated tag signed by one of this session's SSH signing keys.
@@ -223,6 +225,7 @@ pub trait GitStore {
         repo: &Path,
         tag: &str,
         quarantine: &push::Quarantine<'_>,
+        verification: &push::Verification,
         allowed_signers: &Path,
     ) -> Result<bool>;
 }
@@ -339,11 +342,36 @@ fn fetch_command(repo: &Path, source: &str, credentials: &str) -> Command {
 /// blocks the deadline.
 fn drain(
     mut pipe: impl std::io::Read + Send + 'static,
+    remaining: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    stop: std::sync::mpsc::Sender<()>,
 ) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>> {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut buffer = Vec::new();
-        let result = pipe.read_to_end(&mut buffer).map(|_| buffer);
+        let result = (|| {
+            let mut chunk = [0; 8192];
+            loop {
+                let count = match pipe.read(&mut chunk) {
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    result => result?,
+                };
+                if count == 0 {
+                    return Ok(buffer);
+                }
+                if remaining
+                    .fetch_update(
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                        |left| left.checked_sub(count),
+                    )
+                    .is_err()
+                {
+                    let _ = stop.send(());
+                    return Err(std::io::Error::other("git output limit exceeded"));
+                }
+                buffer.extend_from_slice(&chunk[..count]);
+            }
+        })();
         let _ = sender.send(result);
     });
     receiver
@@ -382,14 +410,20 @@ fn run(command: Command, stdin: &str, deadline: Duration) -> Result<String> {
     String::from_utf8(output.stdout).map_err(|err| Error::Git(err.to_string()))
 }
 
-fn run_output(
+fn run_output(command: Command, stdin: &str, deadline: Duration) -> Result<std::process::Output> {
+    run_output_limited(command, stdin, deadline, usize::MAX)
+}
+
+fn run_output_limited(
     mut command: Command,
     stdin: &str,
     deadline: Duration,
+    output_limit: usize,
 ) -> Result<std::process::Output> {
     use std::io::Write;
     use std::os::unix::process::CommandExt;
     use std::sync::mpsc::channel;
+    let end = std::time::Instant::now() + deadline;
     let mut child = command
         .stdin(Stdio::piped())
         .process_group(0)
@@ -397,18 +431,29 @@ fn run_output(
         .map_err(|err| Error::Git(format!("git: {err}")))?;
     let pid = child.id() as libc::pid_t;
     let mut input = child.stdin.take().expect("piped");
-    let stdout = drain(child.stdout.take().expect("piped"));
-    let stderr = drain(child.stderr.take().expect("piped"));
+    let (exited, exit) = channel::<()>();
+    let remaining = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(output_limit));
+    let stdout = drain(
+        child.stdout.take().expect("piped"),
+        remaining.clone(),
+        exited.clone(),
+    );
+    let stderr = drain(
+        child.stderr.take().expect("piped"),
+        remaining,
+        exited.clone(),
+    );
     // Writing can fail if git exits early; its status reports why.
     let stdin = stdin.to_owned();
     std::thread::spawn(move || input.write_all(stdin.as_bytes()));
-    let (exited, exit) = channel::<()>();
     std::thread::spawn(move || {
         wait_without_reaping(pid);
         let _ = exited.send(());
     });
-    let timed_out = exit.recv_timeout(deadline).is_err();
-    // Exited or past the deadline: nothing of the import's process group outlives git.
+    let timed_out = exit
+        .recv_timeout(end.saturating_duration_since(std::time::Instant::now()))
+        .is_err();
+    // Exit, output overflow or deadline: no descendant in the group outlives git.
     // SAFETY: the child is not reaped yet, so `pid` is ours and still names the group.
     unsafe { libc::kill(-pid, libc::SIGKILL) };
     let status = child
@@ -422,9 +467,11 @@ fn run_output(
     }
     // A descendant that left the group (setsid) may still hold a pipe: bounded wait.
     let collect = |pipe: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| {
-        pipe.recv_timeout(Duration::from_secs(10))
-            .map_err(|err| Error::Git(format!("git output: {err}")))?
-            .map_err(|err| Error::Git(format!("git output: {err}")))
+        pipe.recv_timeout(
+            Duration::from_secs(10).min(end.saturating_duration_since(std::time::Instant::now())),
+        )
+        .map_err(|err| Error::Git(format!("git output: {err}")))?
+        .map_err(|err| Error::Git(format!("git output: {err}")))
     };
     Ok(std::process::Output {
         status,
@@ -600,10 +647,18 @@ impl GitStore for Gix<'_> {
         updates: &[push::Update<'_>],
         facts: &push::Facts,
         quarantine: &push::Quarantine<'_>,
+        verification: &push::Verification,
         allowed_signers: &Path,
     ) -> Result<Vec<push::CommitRefusal>> {
-        push::verify_commits(repo, updates, facts, quarantine, |commit| {
-            push::verify_signature(repo, commit, quarantine, allowed_signers, "verify-commit")
+        push::verify_commits(repo, updates, facts, quarantine, verification, |commit| {
+            push::verify_signature(
+                repo,
+                commit,
+                quarantine,
+                verification,
+                allowed_signers,
+                "verify-commit",
+            )
         })
     }
 
@@ -612,9 +667,17 @@ impl GitStore for Gix<'_> {
         repo: &Path,
         tag: &str,
         quarantine: &push::Quarantine<'_>,
+        verification: &push::Verification,
         allowed_signers: &Path,
     ) -> Result<bool> {
-        push::verify_signature(repo, tag, quarantine, allowed_signers, "verify-tag")
+        push::verify_signature(
+            repo,
+            tag,
+            quarantine,
+            verification,
+            allowed_signers,
+            "verify-tag",
+        )
     }
 
     fn push_facts(
@@ -622,8 +685,9 @@ impl GitStore for Gix<'_> {
         repo: &Path,
         updates: &[push::Update<'_>],
         quarantine: &push::Quarantine<'_>,
+        verification: &push::Verification,
     ) -> Result<push::Facts> {
-        push::facts(repo, updates, quarantine)
+        push::facts(repo, updates, quarantine, verification)
     }
 
     fn init_bare(&self, path: &Path, default_branch: &str) -> Result<()> {

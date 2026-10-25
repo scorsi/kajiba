@@ -24,7 +24,7 @@ pub async fn auth_key(
     }
 }
 
-/// One pre-receive check; no timeout: checking a large push takes as long as it takes.
+/// The daemon enforces the shared verification deadline and kills its Git children (0064).
 pub async fn pre_receive(
     path: &Path,
     request: PreReceiveRequest,
