@@ -191,6 +191,14 @@ pub trait GitStore {
         quarantine: &push::Quarantine<'_>,
         allowed_signers: &Path,
     ) -> Result<Vec<push::CommitRefusal>>;
+    /// Require an annotated tag signed by one of this session's SSH signing keys.
+    fn verify_tag(
+        &self,
+        repo: &Path,
+        tag: &str,
+        quarantine: &push::Quarantine<'_>,
+        allowed_signers: &Path,
+    ) -> Result<bool>;
 }
 
 /// Deadline of one git child of an import (`ls-remote`, then `fetch`): a hung
@@ -531,8 +539,18 @@ impl GitStore for Gix<'_> {
         allowed_signers: &Path,
     ) -> Result<Vec<push::CommitRefusal>> {
         push::verify_commits(repo, updates, facts, quarantine, |commit| {
-            push::verify_commit(repo, commit, quarantine, allowed_signers)
+            push::verify_signature(repo, commit, quarantine, allowed_signers, "verify-commit")
         })
+    }
+
+    fn verify_tag(
+        &self,
+        repo: &Path,
+        tag: &str,
+        quarantine: &push::Quarantine<'_>,
+        allowed_signers: &Path,
+    ) -> Result<bool> {
+        push::verify_signature(repo, tag, quarantine, allowed_signers, "verify-tag")
     }
 
     fn push_facts(

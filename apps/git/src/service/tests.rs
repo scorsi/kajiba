@@ -495,7 +495,7 @@ async fn pre_receive_reads_quarantined_objects_and_fails_closed_on_missing_objec
             String::new(),
         )
         .unwrap();
-    let (facts, refusals) = git.repositories.check_commits(&request).unwrap();
+    let (facts, refusals) = git.repositories.check_signatures(&request).unwrap();
     assert_eq!(refusals[0].ref_name, "refs/heads/main");
     assert!(refusals[0].reason.contains(&commit));
     assert_eq!(facts.commits, [commit]);
@@ -593,7 +593,7 @@ async fn hook_context_is_required_and_unreachable_server_fails_closed() {
 }
 
 #[tokio::test]
-async fn commit_checks_use_session_signers_and_remove_the_temporary_file() {
+async fn signature_checks_use_session_signers_and_remove_the_temporary_file() {
     use kajiba_proto::hook::v1::{self as hook, hook_service_server::HookService};
     let temp = TempDir::new();
     let _lock = crate::state::prepare(&temp.0).unwrap();
@@ -665,7 +665,7 @@ async fn commit_checks_use_session_signers_and_remove_the_temporary_file() {
         std::fs::read_to_string(key.with_extension("pub")).unwrap()
     );
     git.repositories.register(session.clone(), signers).unwrap();
-    let (facts, refusals) = git.repositories.check_commits(&request).unwrap();
+    let (facts, refusals) = git.repositories.check_signatures(&request).unwrap();
     assert_eq!(facts.commits, std::slice::from_ref(&commit));
     assert!(refusals.is_empty());
     let response = HookService::pre_receive(&git, Request::new(request.clone()))
@@ -674,21 +674,122 @@ async fn commit_checks_use_session_signers_and_remove_the_temporary_file() {
         .into_inner();
     assert!(!response.allowed);
     assert_eq!(response.refusals[0].reason, "pushes are not accepted yet");
+    command(&["update-ref", "refs/heads/main", &commit]);
+    command(&[
+        "-c",
+        "gpg.format=ssh",
+        "-c",
+        &format!("user.signingKey={}", key.display()),
+        "tag",
+        "-s",
+        "v1",
+        &commit,
+        "-m",
+        "release",
+    ]);
+    command(&["tag", "-a", "unsigned", &commit, "-m", "release"]);
+    let tag = command(&["rev-parse", "refs/tags/v1"]);
+    let unsigned = command(&["rev-parse", "refs/tags/unsigned"]);
+    let raw = command(&["cat-file", "tag", &tag]);
+    let tampered_file = temp.0.join("tampered-tag");
+    std::fs::write(
+        &tampered_file,
+        format!("{}\n", raw.replace("release", "tampered")),
+    )
+    .unwrap();
+    let tampered = command(&[
+        "hash-object",
+        "-t",
+        "tag",
+        "-w",
+        tampered_file.to_str().unwrap(),
+    ]);
+    let other_key = temp.0.join("other-key");
+    let output = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&other_key)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    command(&[
+        "-c",
+        "gpg.format=ssh",
+        "-c",
+        &format!("user.signingKey={}", other_key.display()),
+        "tag",
+        "-s",
+        "wrong",
+        &commit,
+        "-m",
+        "release",
+    ]);
+    let wrong_signer = command(&["rev-parse", "refs/tags/wrong"]);
+    let mut tag_request = request.clone();
+    tag_request.updates[0].ref_name = "refs/tags/release".into();
+    for old in ["0000000000000000000000000000000000000000", tag.as_str()] {
+        for (new, accepted) in [
+            (&tag, true),
+            (&commit, false),
+            (&unsigned, false),
+            (&tampered, false),
+            (&wrong_signer, false),
+        ] {
+            tag_request.updates[0].old_id = old.into();
+            tag_request.updates[0].new_id = new.clone();
+            let (facts, refusals) = git.repositories.check_signatures(&tag_request).unwrap();
+            assert!(facts.commits.is_empty());
+            assert_eq!(refusals.is_empty(), accepted, "{refusals:?}");
+            let response = HookService::pre_receive(&git, Request::new(tag_request.clone()))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(!response.allowed); // Durable admission is task 21.
+            if accepted {
+                assert_eq!(response.refusals[0].reason, "pushes are not accepted yet");
+            } else {
+                assert_eq!(response.refusals.len(), 1);
+                assert_eq!(response.refusals[0].ref_name, "refs/tags/release");
+                assert!(response.refusals[0].reason.contains(&format!("tag {new}:")));
+                assert!(response.refusals[0].reason.contains("SSH signature"));
+            }
+        }
+    }
+    // A deletion never needs an object or a signing file; task 17 owns its permission.
+    tag_request.updates[0].old_id = "1111111111111111111111111111111111111111".into();
+    tag_request.updates[0].new_id = "0000000000000000000000000000000000000000".into();
+    std::fs::rename(temp.0.join("tmp"), temp.0.join("tmp-held")).unwrap();
+    let (facts, refusals) = git.repositories.check_signatures(&tag_request).unwrap();
+    assert!(facts.commits.is_empty());
+    assert!(refusals.is_empty());
+    std::fs::rename(temp.0.join("tmp-held"), temp.0.join("tmp")).unwrap();
+    command(&["update-ref", "-d", "refs/heads/main"]);
+    command(&["update-ref", "-d", "refs/tags/v1"]);
+    command(&["update-ref", "-d", "refs/tags/unsigned"]);
+    command(&["update-ref", "-d", "refs/tags/wrong"]);
     let mut wrong = request.clone();
     wrong.user_public_id = kajiba_core::new_id().unwrap();
     assert_eq!(
-        git.repositories.check_commits(&wrong).unwrap_err().code(),
+        git.repositories
+            .check_signatures(&wrong)
+            .unwrap_err()
+            .code(),
         tonic::Code::FailedPrecondition
     );
     wrong = request.clone();
     wrong.repo_public_id = kajiba_core::new_id().unwrap();
     assert_eq!(
-        git.repositories.check_commits(&wrong).unwrap_err().code(),
+        git.repositories
+            .check_signatures(&wrong)
+            .unwrap_err()
+            .code(),
         tonic::Code::FailedPrecondition
     );
     git.repositories.finished(&id, 0);
     assert_eq!(
-        git.repositories.check_commits(&request).unwrap_err().code(),
+        git.repositories
+            .check_signatures(&request)
+            .unwrap_err()
+            .code(),
         tonic::Code::FailedPrecondition
     );
     request.session_id = kajiba_core::new_id().unwrap();

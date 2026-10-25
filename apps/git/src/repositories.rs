@@ -95,7 +95,7 @@ impl Repositories {
         Gix.set_head(&path, branch).map_err(internal)
     }
 
-    pub fn check_commits(
+    pub fn check_signatures(
         &self,
         request: &kajiba_proto::hook::v1::PreReceiveRequest,
     ) -> Result<
@@ -144,7 +144,15 @@ impl Repositories {
         let facts = Gix
             .push_facts(&path, &updates, &quarantine)
             .map_err(internal)?;
-        if facts.commits.is_empty() {
+        let tags: Vec<_> = request
+            .updates
+            .iter()
+            .filter(|u| {
+                u.ref_name.starts_with("refs/tags/")
+                    && u.new_id != "0000000000000000000000000000000000000000"
+            })
+            .collect();
+        if facts.commits.is_empty() && tags.is_empty() {
             return Ok((facts, Vec::new()));
         }
         let signers_path = self
@@ -160,22 +168,35 @@ impl Repositories {
         let result = (|| {
             file.write_all(allowed_signers.as_bytes())
                 .map_err(internal)?;
-            Gix.verify_commits(&path, &updates, &facts, &quarantine, &signers_path)
-                .map_err(internal)
-        })();
-        let cleanup = fs::remove_file(&signers_path).map_err(internal);
-        let refusals = result?;
-        cleanup?;
-        Ok((
-            facts,
-            refusals
+            let mut refusals: Vec<_> = Gix
+                .verify_commits(&path, &updates, &facts, &quarantine, &signers_path)
+                .map_err(internal)?
                 .into_iter()
                 .map(|r| kajiba_proto::hook::v1::Refusal {
                     ref_name: request.updates[r.update_index].ref_name.clone(),
                     reason: format!("commit {}: {}", r.commit, r.reason),
                 })
-                .collect(),
-        ))
+                .collect();
+            for tag in tags {
+                if !Gix
+                    .verify_tag(&path, &tag.new_id, &quarantine, &signers_path)
+                    .map_err(internal)?
+                {
+                    refusals.push(kajiba_proto::hook::v1::Refusal {
+                        ref_name: tag.ref_name.clone(),
+                        reason: format!(
+                            "tag {}: annotated tag with a valid SSH signature by a signing key of the pusher required",
+                            tag.new_id
+                        ),
+                    });
+                }
+            }
+            Ok::<_, Status>(refusals)
+        })();
+        let cleanup = fs::remove_file(&signers_path).map_err(internal);
+        let refusals = result?;
+        cleanup?;
+        Ok((facts, refusals))
     }
 
     pub fn sessions(&self) -> Vec<Session> {

@@ -139,11 +139,12 @@ pub(crate) fn verify_commits(
     Ok(refusals)
 }
 
-pub(crate) fn verify_commit(
+pub(crate) fn verify_signature(
     repo: &Path,
-    commit: &str,
+    object: &str,
     quarantine: &Quarantine<'_>,
     allowed_signers: &Path,
+    verifier: &str,
 ) -> Result<bool> {
     let mut command = quarantine.command(repo)?;
     command.args([
@@ -153,7 +154,7 @@ pub(crate) fn verify_commit(
         "gpg.ssh.program=ssh-keygen",
         "-c",
         "gpg.minTrustLevel=fully",
-        // verify-commit detects the signature format independently of gpg.format.
+        // Git detects the signature format independently of gpg.format.
         "-c",
         "gpg.openpgp.program=false",
         "-c",
@@ -165,6 +166,6 @@ pub(crate) fn verify_commit(
         "gpg.ssh.allowedSignersFile={}",
         allowed_signers.display()
     ));
-    command.args(["verify-commit", "--", commit]);
+    command.args([verifier, "--", object]);
     Ok(run_output(command, "", TIMEOUT)?.status.success())
 }

@@ -333,7 +333,7 @@ fn shared_commits_are_verified_once_in_quarantine_and_refusals_name_each_ref() {
     let mut verified = Vec::new();
     let refusals = crate::push::verify_commits(&repo, &updates, &facts, &quarantine, |id| {
         verified.push(id.to_owned());
-        crate::push::verify_commit(&repo, id, &quarantine, &signers)
+        crate::push::verify_signature(&repo, id, &quarantine, &signers, "verify-commit")
     })
     .unwrap();
     assert!(refusals.is_empty());
@@ -352,5 +352,114 @@ fn shared_commits_are_verified_once_in_quarantine_and_refusals_name_each_ref() {
     assert!(
         Gix.verify_commits(&repo, &updates, &facts, &Quarantine::default(), &signers)
             .is_err()
+    );
+}
+
+#[test]
+fn tags_require_an_annotated_ssh_signature_by_the_pusher_in_quarantine() {
+    let dir = scratch("tag-signatures");
+    let repo = dir.join("repo.git");
+    Gix.init_bare(&repo, "main").unwrap();
+    let (alice, public) = signing_key(&dir, "alice");
+    let (bob, bob_public) = signing_key(&dir, "bob");
+    let signers = dir.join("allowed_signers");
+    fs::write(&signers, format!("alice {public}")).unwrap();
+    let tree = git(&repo, &["mktree"], DATE);
+    let commit = git(&repo, &["commit-tree", &tree, "-m", "existing"], DATE);
+    for (name, key) in [("valid", &alice), ("wrong", &bob)] {
+        git(
+            &repo,
+            &[
+                "-c",
+                "gpg.format=ssh",
+                "-c",
+                &format!("user.signingKey={key}"),
+                "tag",
+                "-s",
+                name,
+                &commit,
+                "-m",
+                "release",
+            ],
+            DATE,
+        );
+    }
+    git(
+        &repo,
+        &["tag", "-a", "unsigned", &commit, "-m", "release"],
+        DATE,
+    );
+    let valid = git(&repo, &["rev-parse", "refs/tags/valid"], DATE);
+    let wrong = git(&repo, &["rev-parse", "refs/tags/wrong"], DATE);
+    let unsigned = git(&repo, &["rev-parse", "refs/tags/unsigned"], DATE);
+    let raw = git(&repo, &["cat-file", "tag", &valid], DATE);
+    let tampered_file = dir.join("tampered");
+    fs::write(
+        &tampered_file,
+        format!("{}\n", raw.replace("release", "tampered")),
+    )
+    .unwrap();
+    let tampered = git(
+        &repo,
+        &[
+            "hash-object",
+            "-t",
+            "tag",
+            "-w",
+            tampered_file.to_str().unwrap(),
+        ],
+        DATE,
+    );
+    // A configured verifier or signer list cannot bypass the session's authority.
+    let other_signers = dir.join("other_signers");
+    fs::write(&other_signers, format!("bob {bob_public}")).unwrap();
+    git(
+        &repo,
+        &[
+            "config",
+            "gpg.ssh.allowedSignersFile",
+            other_signers.to_str().unwrap(),
+        ],
+        DATE,
+    );
+    git(&repo, &["config", "gpg.ssh.program", "false"], DATE);
+    git(&repo, &["config", "gpg.minTrustLevel", "undefined"], DATE);
+    let incoming = repo.join("objects/incoming");
+    for id in [&valid, &wrong, &unsigned, &tampered] {
+        fs::create_dir_all(incoming.join(&id[..2])).unwrap();
+        fs::rename(
+            repo.join("objects").join(&id[..2]).join(&id[2..]),
+            incoming.join(&id[..2]).join(&id[2..]),
+        )
+        .unwrap();
+    }
+    let objects = repo.join("objects");
+    let quarantine = Quarantine {
+        object_directory: incoming.to_str().unwrap(),
+        alternate_object_directories: objects.to_str().unwrap(),
+        quarantine_path: incoming.to_str().unwrap(),
+    };
+    for (id, accepted) in [
+        (&valid, true),
+        (&commit, false), // A lightweight tag points directly at the commit.
+        (&tree, false),
+        (&unsigned, false),
+        (&tampered, false),
+        (&wrong, false),
+    ] {
+        assert_eq!(
+            Gix.verify_tag(&repo, id, &quarantine, &signers).unwrap(),
+            accepted,
+            "{id}"
+        );
+    }
+    assert!(
+        !Gix.verify_tag(&repo, &valid, &Quarantine::default(), &signers)
+            .unwrap()
+    );
+    fs::write(&signers, "").unwrap();
+    assert!(
+        !Gix.verify_tag(&repo, &valid, &quarantine, &signers)
+            .unwrap()
     );
 }

@@ -33,7 +33,7 @@ impl hook_service_server::HookService for Git {
         )?;
         let repositories = self.repositories.clone();
         let (_facts, refusals) =
-            tokio::task::spawn_blocking(move || repositories.check_commits(&request))
+            tokio::task::spawn_blocking(move || repositories.check_signatures(&request))
                 .await
                 .map_err(|_| Status::internal("push checks worker failed"))??;
         if !refusals.is_empty() {
@@ -42,7 +42,7 @@ impl hook_service_server::HookService for Git {
                 refusals,
             }));
         }
-        // Fail closed until tag signatures and durable admission are wired (J3 tasks 20–21).
+        // Fail closed until durable admission is wired (J3 task 21).
         Ok(Response::new(PreReceiveResponse {
             allowed: false,
             refusals: vec![Refusal {
