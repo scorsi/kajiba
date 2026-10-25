@@ -1,6 +1,5 @@
-# kajiba-server: typed options mirroring the server configuration one to one (0019), a TOML
-# file generated from them and checked at build time by `config check`, loopback metrics
-# (0022), fixed identity, hardened unit and persisted paths (0012, 0015, 0022).
+# The paired server and git-side units (0052, 0054): typed configuration, build-time
+# validation, fixed identities, separate state directories and common hardening.
 {
   config,
   lib,
@@ -10,6 +9,7 @@
 let
   inherit (lib) mkOption types;
   cfg = config.services.kajiba-server;
+  gitCfg = config.services.kajiba-git;
 
   # null means "use the code default" (0019: the module only writes what differs).
   optional =
@@ -38,7 +38,11 @@ let
     };
 
   settings = lib.filterAttrsRecursive (_: value: value != null) {
-    state_dir = if cfg.stateDir == "/var/lib/kajiba" then null else cfg.stateDir;
+    state_dir = if cfg.stateDir == "/var/lib/kajiba-server" then null else cfg.stateDir;
+    git = {
+      state_dir = if cfg.git.stateDir == "/var/lib/kajiba-git" then null else cfg.git.stateDir;
+      socket = if cfg.git.socket == "/run/kajiba-git/local.sock" then null else cfg.git.socket;
+    };
     http = {
       inherit (cfg.http) listen reflection;
       public_url = cfg.http.publicUrl;
@@ -101,6 +105,25 @@ let
       cp ${raw} "$out"
     '';
 
+  # shortcut: no receive-pack yet, install the hook wrappers in J3 task 24.
+  hooksPath = pkgs.runCommand "kajiba-hooks" { } ''
+    mkdir "$out"
+  '';
+  gitConfigFile =
+    let
+      raw = (pkgs.formats.toml { }).generate "kajiba-git.toml" (
+        lib.filterAttrsRecursive (_: value: value != null) {
+          state_dir = if gitCfg.stateDir == "/var/lib/kajiba-git" then null else gitCfg.stateDir;
+          hooks_path = toString hooksPath;
+          log = { inherit (gitCfg.log) level; };
+        }
+      );
+    in
+    pkgs.runCommand "kajiba-git.toml" { } ''
+      ${lib.getExe gitCfg.package} config check ${raw}
+      cp ${raw} "$out"
+    '';
+
   # ExecStartPost probes /readyz on a connectable address, even for a wildcard listener.
   listen = if cfg.http.listen == null then "127.0.0.1:8080" else cfg.http.listen;
   probe =
@@ -122,9 +145,56 @@ let
   '';
 
   # systemd creates and owns directories under /var/lib; any other path is a tmpfiles rule.
-  # Dump directory access is added with the backup implementation in J8.
-  writable = [ cfg.stateDir ];
+  writable = [
+    cfg.stateDir
+    cfg.dump.dir
+  ];
   inVarLib = lib.hasPrefix "/var/lib/";
+  hardening = {
+    # Hardening (0022, 0052). Both units spawn Git: no MemoryDenyWriteExecute (PCRE JIT), and no
+    # PrivateUsers, which would hide root's UID from the local socket's peer check.
+    ProtectSystem = "strict";
+    ProtectHome = true;
+    PrivateTmp = true;
+    PrivateDevices = true;
+    NoNewPrivileges = true;
+    CapabilityBoundingSet = "";
+    AmbientCapabilities = "";
+    RestrictAddressFamilies = [
+      "AF_UNIX"
+      "AF_INET"
+      "AF_INET6"
+    ];
+    RestrictNamespaces = true;
+    RestrictRealtime = true;
+    RestrictSUIDSGID = true;
+    LockPersonality = true;
+    ProtectClock = true;
+    ProtectControlGroups = true;
+    ProtectHostname = true;
+    ProtectKernelLogs = true;
+    ProtectKernelModules = true;
+    ProtectKernelTunables = true;
+    ProtectProc = "invisible";
+    RemoveIPC = true;
+    SystemCallArchitectures = "native";
+    SystemCallFilter = [
+      "@system-service"
+      "~@privileged"
+    ];
+    ProcSubset = "pid";
+    PrivateIPC = true;
+    # Resource limits: no core dump may keep an in-memory enrollment token; the server
+    # itself caps public connections at 1024.
+    LimitCORE = 0;
+    LimitNOFILE = lib.mkDefault 8192;
+    TasksMax = lib.mkDefault 1024;
+    MemoryMax = lib.mkDefault "2G";
+
+    # Per-request logging (nisshi 0009).
+    LogRateLimitIntervalSec = lib.mkDefault "30s";
+    LogRateLimitBurst = lib.mkDefault 30000;
+  };
 in
 {
   options.services.kajiba-server = {
@@ -133,8 +203,20 @@ in
 
     stateDir = mkOption {
       type = types.strMatching "/.+";
-      default = "/var/lib/kajiba";
+      default = "/var/lib/kajiba-server";
       description = "State directory (0012 layout).";
+    };
+    git = {
+      stateDir = mkOption {
+        type = types.strMatching "/.+";
+        default = gitCfg.stateDir;
+        description = "Git-side state directory, read-only to the server (0052).";
+      };
+      socket = mkOption {
+        type = types.strMatching "/.+";
+        default = "/run/kajiba-git/local.sock";
+        description = "Git-side local gRPC socket (0053).";
+      };
     };
     http = {
       listen = optional types.str "127.0.0.1:8080" "Plaintext listener behind the reverse proxy (0005).";
@@ -270,13 +352,13 @@ in
     persistedPaths = mkOption {
       type = types.listOf types.str;
       readOnly = true;
-      # One mount for stateDir: quarantine in tmp/orphans must survive a reboot, and moves between
-      # repos/ and tmp/ are renames, which fail across mounts. Startup empties tmp/ anyway.
+      # Persist each whole state directory: git-side quarantine uses same-filesystem renames.
       default = [
         cfg.stateDir
+        gitCfg.stateDir
         cfg.dump.dir
       ];
-      description = "Paths a host with an ephemeral root must persist (0012): the whole stateDir and dump.dir.";
+      description = "Paths a host with an ephemeral root must persist (0012): both whole state directories and dump.dir.";
     };
     dump = {
       dir = mkOption {
@@ -286,6 +368,16 @@ in
       };
       keep = optional types.ints.u32 "7" "Number of dumps kept (0016).";
     };
+  };
+
+  options.services.kajiba-git = {
+    package = lib.mkPackageOption pkgs "kajiba-git" { };
+    stateDir = mkOption {
+      type = types.strMatching "/.+";
+      default = "/var/lib/kajiba-git";
+      description = "Git-side state directory: repositories, staging and quarantine (0052).";
+    };
+    log.level = optional types.str "info" "tracing filter, overridden by RUST_LOG (0022).";
   };
 
   config = lib.mkIf cfg.enable {
@@ -303,93 +395,106 @@ in
     # Stable path for `kajiba-server config check --files /etc/kajiba/server.toml`.
     environment.etc."kajiba/server.toml".source = configFile;
     # Root runs `kajiba-server admin enroll` over the local socket (0003, 0014).
-    environment.systemPackages = [ cfg.package ];
+    environment.etc."kajiba/git.toml".source = gitConfigFile;
+    environment.systemPackages = [
+      cfg.package
+      gitCfg.package
+    ];
     # Fixed identity: sshd and file ownership need it (0022), so no DynamicUser.
-    users.users.kajiba = {
+    users.users.kajiba-server = {
       isSystemUser = true;
-      group = "kajiba";
+      group = "kajiba-server";
+      extraGroups = [ "kajiba-git" ];
     };
-    users.groups.kajiba = { };
+    users.groups.kajiba-server = { };
+    users.users.kajiba-git = {
+      isSystemUser = true;
+      group = "kajiba-git";
+    };
+    users.groups.kajiba-git = { };
     systemd.tmpfiles.settings."10-kajiba-server" =
       lib.genAttrs (lib.filter (dir: !inVarLib dir) writable)
         (_: {
           d = {
-            user = "kajiba";
-            group = "kajiba";
+            user = "kajiba-server";
+            group = "kajiba-server";
             mode = "0750";
           };
         });
     systemd.services.kajiba-server = {
       description = "kajiba forge server";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
-      restartTriggers = [ configFile ];
-      # admin import and smart HTTP spawn git (0003).
+      wants = [ "kajiba-git.service" ];
+      after = [
+        "network.target"
+        "kajiba-git.service"
+      ];
+      restartTriggers = [
+        configFile
+        cfg.package
+      ];
+      # Smart HTTP upload-pack and mirror pushes read repositories (0052).
       path = [ pkgs.git ];
-      serviceConfig = {
+      serviceConfig = hardening // {
         ExecStart = "${lib.getExe cfg.package} serve --config ${configFile}";
         # The unit is active only once /readyz answers 200 (0022); TimeoutStartSec bounds it.
         ExecStartPost = "${readyProbe} http://${probe}/readyz";
         Restart = "on-failure";
-        User = "kajiba";
-        Group = "kajiba";
+        User = "kajiba-server";
+        Group = "kajiba-server";
         StateDirectory = map (lib.removePrefix "/var/lib/") (lib.filter inVarLib writable);
         StateDirectoryMode = "0750";
         # /run/kajiba holds the local socket (0003).
         RuntimeDirectory = "kajiba";
-        RuntimeDirectoryMode = "0750";
+        RuntimeDirectoryMode = "0751";
         ReadWritePaths = writable;
+        ReadOnlyPaths = [ cfg.git.stateDir ];
+        SupplementaryGroups = [ "kajiba-git" ];
+        # Assign git.sock to the supplementary group; DAC still applies with no capabilities.
+        SystemCallFilter = hardening.SystemCallFilter ++ [ "@chown" ];
         UMask = "0027";
 
-        # Hardening (0022). Git is spawned later: no MemoryDenyWriteExecute (PCRE JIT), and no
-        # PrivateUsers, which would hide root's UID from the local socket's peer check.
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        PrivateTmp = true;
-        PrivateDevices = true;
-        NoNewPrivileges = true;
-        CapabilityBoundingSet = "";
-        AmbientCapabilities = "";
-        RestrictAddressFamilies = [
-          "AF_UNIX"
-          "AF_INET"
-          "AF_INET6"
-        ];
-        RestrictNamespaces = true;
-        RestrictRealtime = true;
-        RestrictSUIDSGID = true;
-        LockPersonality = true;
-        ProtectClock = true;
-        ProtectControlGroups = true;
-        ProtectHostname = true;
-        ProtectKernelLogs = true;
-        ProtectKernelModules = true;
-        ProtectKernelTunables = true;
-        ProtectProc = "invisible";
-        RemoveIPC = true;
-        SystemCallArchitectures = "native";
-        SystemCallFilter = [
-          "@system-service"
-          "~@privileged"
-        ];
-        ProcSubset = "pid";
-        PrivateIPC = true;
         # Only the configured listeners may bind (the local socket is AF_UNIX, not filtered).
         SocketBindDeny = "any";
         SocketBindAllow = map (addr: "tcp:${lib.last (lib.splitString ":" addr)}") (
           [ listen ] ++ lib.optional (cfg.metrics.listen != null) cfg.metrics.listen
         );
-
-        # Resource limits: no core dump may keep an in-memory enrollment token; the server
-        # itself caps public connections at 1024.
-        LimitCORE = 0;
-        LimitNOFILE = lib.mkDefault 8192;
-        TasksMax = lib.mkDefault 1024;
-        MemoryMax = lib.mkDefault "2G";
-
-        # Per-request logging (nisshi 0009).
-        LogRateLimitIntervalSec = lib.mkDefault "30s";
-        LogRateLimitBurst = lib.mkDefault 30000;
+      };
+    };
+    systemd.tmpfiles.settings."10-kajiba-git" = lib.optionalAttrs (!inVarLib gitCfg.stateDir) {
+      ${gitCfg.stateDir}.d = {
+        user = "kajiba-git";
+        group = "kajiba-git";
+        mode = "0750";
+      };
+    };
+    systemd.services.kajiba-git = {
+      description = "kajiba repository writer";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" ];
+      restartTriggers = [
+        gitConfigFile
+        gitCfg.package
+      ];
+      path = [ pkgs.git ];
+      serviceConfig = hardening // {
+        ExecStart = "${lib.getExe gitCfg.package} serve --config ${gitConfigFile}";
+        Type = "notify";
+        KillMode = "control-group";
+        Restart = "on-failure";
+        User = "kajiba-git";
+        Group = "kajiba-git";
+        StateDirectory = lib.optional (inVarLib gitCfg.stateDir) (
+          lib.removePrefix "/var/lib/" gitCfg.stateDir
+        );
+        StateDirectoryMode = "0750";
+        RuntimeDirectory = "kajiba-git";
+        RuntimeDirectoryMode = "0750";
+        ReadWritePaths = [ gitCfg.stateDir ];
+        # The server's directory may not exist yet on the first boot (git starts first).
+        InaccessiblePaths = [ "-${cfg.stateDir}" ];
+        UMask = "0027";
+        SocketBindDeny = "any";
       };
     };
   };

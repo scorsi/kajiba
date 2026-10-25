@@ -4,6 +4,7 @@
 {
   pkgs,
   kajibaServerPackage,
+  kajibaGitPackage,
   testLib,
 }:
 let
@@ -14,6 +15,7 @@ pkgs.testers.runNixOSTest {
 
   nodes.machine = {
     imports = [ ../nixosModules/server.nix ];
+    services.kajiba-git.package = kajibaGitPackage;
     services.kajiba-server = {
       enable = true;
       package = kajibaServerPackage;
@@ -24,8 +26,8 @@ pkgs.testers.runNixOSTest {
     systemd.tmpfiles.settings."10-kajiba-test" = {
       "/run/secrets".d.mode = "0755";
       ${tokenFile}.f = {
-        user = "kajiba";
-        group = "kajiba";
+        user = "kajiba-server";
+        group = "kajiba-server";
         mode = "0400";
         argument = "DO-NOT-PRINT";
       };
@@ -43,7 +45,7 @@ pkgs.testers.runNixOSTest {
     def check(path, files=False):
         # Returns the exit status and the parsed stderr lines; the output must pass nisshi too.
         flag = "--files " if files else ""
-        status, _ = machine.execute(f"runuser -u kajiba -- kajiba-server config check {flag}{path} >/tmp/check.out 2>/tmp/check.err")
+        status, _ = machine.execute(f"runuser -u kajiba-server -- kajiba-server config check {flag}{path} >/tmp/check.out 2>/tmp/check.err")
         out = machine.succeed("cat /tmp/check.out")
         err = machine.succeed("cat /tmp/check.err")
         assert out == "", f"config check {flag}{path} wrote stdout: {out!r}"
@@ -74,6 +76,7 @@ pkgs.testers.runNixOSTest {
     with subtest("the generated file passes config check --files as the service user"):
         generated = machine.succeed(f"cat {config}")
         assert f'token_file = "{token_file}"' in generated, f"runner token_file not in {config}: {generated!r}"
+        machine.fail(f"runuser -u kajiba-git -- cat {token_file}")
         status, lines = check(config, files=True)
         assert status == 0 and lines == [], f"config check --files {config}: exit {status}, output {lines}"
 
@@ -105,5 +108,6 @@ pkgs.testers.runNixOSTest {
         lines = [json.loads(line) for line in out.splitlines()]
         assert len(lines) == 1 and lines[0]["event"] == "config-invalid" and lines[0]["level"] == "error" and f"runners.build-1.token_file ({token_file})" in lines[0]["err"], f"failed invocation {invocation}: expected one config-invalid naming the file, got {lines}"
         validate_logs(machine, unit)
+        validate_logs(machine, "kajiba-git.service")
   '';
 }

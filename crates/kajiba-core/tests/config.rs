@@ -62,7 +62,7 @@ fn adr_examples_load_verbatim() {
 #[test]
 fn defaults_match_adr_tables() {
     let server = ServerConfig::parse(MINIMAL).unwrap();
-    assert_eq!(server.state_dir, Path::new("/var/lib/kajiba"));
+    assert_eq!(server.state_dir, Path::new("/var/lib/kajiba-server"));
     assert_eq!(server.git.state_dir, Path::new("/var/lib/kajiba-git"));
     assert_eq!(server.git.socket, Path::new("/run/kajiba-git/local.sock"));
     assert_eq!(server.http.listen.to_string(), "127.0.0.1:8080");

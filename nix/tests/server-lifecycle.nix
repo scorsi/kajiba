@@ -4,11 +4,12 @@
 {
   pkgs,
   kajibaServerPackage,
+  kajibaGitPackage,
   testLib,
 }:
 let
   inherit (pkgs) lib;
-  stateDir = "/var/lib/kajiba";
+  stateDir = "/var/lib/kajiba-server";
   keyBlob = "AAAAC3NzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea";
   # Every migration shipped with the binary: a fresh stateDir applies all of them.
   migrations = map (file: lib.toInt (lib.head (lib.splitString "_" file))) (
@@ -20,6 +21,7 @@ pkgs.testers.runNixOSTest {
 
   nodes.machine = {
     imports = [ ../nixosModules/server.nix ];
+    services.kajiba-git.package = kajibaGitPackage;
     services.kajiba-server = {
       enable = true;
       package = kajibaServerPackage;
@@ -45,7 +47,7 @@ pkgs.testers.runNixOSTest {
 
 
     def sql(query):
-        # Root reads while the service runs, so the WAL files already exist and stay kajiba's.
+        # Root reads while the service runs, so the WAL files already exist and stay owned by kajiba-server.
         return machine.succeed(f"sqlite3 {db} {shlex.quote(query)}").strip()
 
 
@@ -92,6 +94,28 @@ pkgs.testers.runNixOSTest {
         assert applied(events) == migrations, f"applied {applied(events)} != {migrations}: {events}"
         assert "ready" in {event["event"] for event in events}, f"no ready line: {events}"
 
+    with subtest("both units use the split identities, directories and socket ownership"):
+        machine.wait_for_unit("kajiba-git.service")
+        paths = {
+            "${stateDir}": "kajiba-server:kajiba-server 750",
+            "/var/lib/kajiba-git": "kajiba-git:kajiba-git 750",
+            "/run/kajiba": "kajiba-server:kajiba-server 751",
+            "/run/kajiba-git": "kajiba-git:kajiba-git 750",
+            "/run/kajiba/local.sock": "kajiba-server:kajiba-server 600",
+            "/run/kajiba/git.sock": "kajiba-server:kajiba-git 660",
+            "/run/kajiba-git/local.sock": "kajiba-git:kajiba-git 660",
+        }
+        for path, expected in paths.items():
+            assert machine.succeed(f"stat -c '%U:%G %a' {path}").strip() == expected, path
+        assert machine.succeed("id -Gn kajiba-server").split() == ["kajiba-server", "kajiba-git"]
+        assert machine.succeed("id -Gn kajiba-git").split() == ["kajiba-git"]
+        machine.fail("runuser -u kajiba-server -- touch /var/lib/kajiba-git/repos/forbidden")
+        machine.fail(f"runuser -u kajiba-git -- cat {db}")
+        # Exercise the server's mount namespace as root too: ReadOnlyPaths is independent of modes.
+        pid = machine.succeed(f"systemctl show -P MainPID {unit}").strip()
+        machine.fail(f"nsenter -t {pid} -m -- touch /var/lib/kajiba-git/repos/forbidden")
+        machine.succeed("runuser -u kajiba-git -- kajiba-git config check /etc/kajiba/git.toml")
+
     with subtest("resource limits apply to the running unit"):
         assert machine.succeed(f"systemctl show -P TasksMax {unit}").strip() == "1024"
         assert machine.succeed(f"systemctl show -P MemoryMax {unit}").strip() == str(2 * 1024**3)
@@ -108,7 +132,7 @@ pkgs.testers.runNixOSTest {
         assert without_ids(first) == ["alice", "1", "config", "1", "auth", "ssh-ed25519", "1", "config"], f"identity row: {first}"
 
     with subtest("a second serve on the same stateDir is refused by kajiba.lock"):
-        machine.fail("runuser -u kajiba -- kajiba-server serve --config /etc/kajiba/server.toml 2>/tmp/second.log")
+        machine.fail("runuser -u kajiba-server -- kajiba-server serve --config /etc/kajiba/server.toml 2>/tmp/second.log")
         lines = [json.loads(line) for line in machine.succeed("cat /tmp/second.log").splitlines()]
         fatal = [line for line in lines if line["event"] == "fatal"]
         assert len(fatal) == 1 and "another instance holds ${stateDir}/kajiba.lock" in fatal[0]["err"], f"second serve output: {lines}"
@@ -136,5 +160,6 @@ pkgs.testers.runNixOSTest {
 
     with subtest("every service log line validates against the nisshi schema"):
         validate_logs(machine, unit)
+        validate_logs(machine, "kajiba-git.service")
   '';
 }

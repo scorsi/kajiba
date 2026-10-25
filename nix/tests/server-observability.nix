@@ -4,6 +4,7 @@
 {
   pkgs,
   kajibaServerPackage,
+  kajibaGitPackage,
   testLib,
 }:
 pkgs.testers.runNixOSTest {
@@ -12,6 +13,7 @@ pkgs.testers.runNixOSTest {
   nodes = {
     server = {
       imports = [ ../nixosModules/server.nix ];
+      services.kajiba-git.package = kajibaGitPackage;
       services.kajiba-server = {
         enable = true;
         package = kajibaServerPackage;
@@ -79,6 +81,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the journal passes nisshi with start, ready and request lines"):
         validate_logs(server, unit)
+        validate_logs(server, "kajiba-git.service")
         out = server.succeed(f"journalctl _SYSTEMD_UNIT={unit} -o cat --no-pager")
         lines = [json.loads(line) for line in out.splitlines()]
         events = {line["event"] for line in lines}

@@ -3,16 +3,18 @@
 {
   pkgs,
   kajibaServerPackage,
+  kajibaGitPackage,
   testLib,
 }:
 let
-  stateDir = "/var/lib/kajiba";
+  stateDir = "/var/lib/kajiba-server";
 in
 pkgs.testers.runNixOSTest {
   name = "kajiba-server-enroll";
 
   nodes.machine = {
     imports = [ ../nixosModules/server.nix ];
+    services.kajiba-git.package = kajibaGitPackage;
     services.kajiba-server = {
       enable = true;
       package = kajibaServerPackage;
@@ -20,7 +22,7 @@ pkgs.testers.runNixOSTest {
       http.publicUrl = "https://forge.example.org";
       users.alice.isAdmin = true;
     };
-    # Neither root nor in the kajiba group.
+    # Neither root nor in either service group.
     users.users.bob.isNormalUser = true;
     environment.systemPackages = [ pkgs.sqlite ];
   };
@@ -36,8 +38,8 @@ pkgs.testers.runNixOSTest {
     link = re.compile(r"https://forge\.example\.org/auth/enroll#([0-9a-f]{64})")
 
 
-    def enroll_as_root():
-        out = machine.succeed("kajiba-server admin enroll alice")
+    def enroll(user="root"):
+        out = machine.succeed(f"runuser -u {user} -- kajiba-server admin enroll alice")
         lines = out.splitlines()
         assert len(lines) == 1, f"expected exactly one line, got {out!r}"
         match = link.fullmatch(lines[0])
@@ -71,25 +73,29 @@ pkgs.testers.runNixOSTest {
     assert state == "active", f"ActiveState: {state!r}"
 
     with subtest("root gets exactly one link with a 64-hex token"):
-        first = enroll_as_root()
+        first = enroll()
 
     with subtest("a second link replaces the first in the database"):
-        second = enroll_as_root()
+        second = enroll()
         assert second != first, f"same token twice: {first}"
         hashes = stored_hashes()
         assert hashes == [sha256(second)], f"stored {hashes}, want only sha256(second) {sha256(second)} (sha256(first) {sha256(first)})"
 
-    with subtest("an unprivileged user cannot reach the socket through the filesystem"):
-        machine.fail(f"runuser -u bob -- test -e {socket}")
+    with subtest("the runtime directory is traversable but the admin socket is private"):
+        machine.succeed(f"runuser -u bob -- test -e {socket}")
+        machine.fail(f"runuser -u bob -- test -w {socket}")
+        machine.fail(f"runuser -u kajiba-git -- test -w {socket}")
+        print(refused("runuser -u kajiba-git -- kajiba-server admin enroll alice"))
         print(refused("runuser -u bob -- kajiba-server admin enroll alice"))
 
-    with subtest("with the socket opened to everyone, the peer credential check still refuses bob"):
+    with subtest("with the socket opened to everyone, the peer credential check still refuses bob and the git user"):
         machine.succeed(f"chmod 0755 /run/kajiba && chmod 0666 {socket}")
         machine.succeed(f"runuser -u bob -- test -r {socket} -a -w {socket}")
         print(refused("runuser -u bob -- kajiba-server admin enroll alice"))
+        print(refused("runuser -u kajiba-git -- kajiba-server admin enroll alice"))
         assert stored_hashes() == [sha256(second)], f"bob's attempt changed the token: {stored_hashes()}"
-        # Root still passes the same check on the same socket.
-        third = enroll_as_root()
+        # The renamed server user is also an admitted peer.
+        third = enroll("kajiba-server")
         assert stored_hashes() == [sha256(third)], f"stored {stored_hashes()} after third link"
 
     with subtest("an unknown user is refused with a clear error"):
@@ -104,5 +110,6 @@ pkgs.testers.runNixOSTest {
         for token in [first, second, third]:
             assert token not in journal, f"token {token} found in the journal"
         validate_logs(machine, unit)
+        validate_logs(machine, "kajiba-git.service")
   '';
 }

@@ -6,6 +6,7 @@
   pkgs,
   system,
   kajibaServerPackage,
+  kajibaGitPackage,
 }:
 let
   inherit (pkgs) lib;
@@ -25,6 +26,7 @@ let
     inputs.nixpkgs.lib.nixosSystem {
       modules = [
         ../nixosModules/server.nix
+        ../nixosModules/runner.nix
         {
           nixpkgs.hostPlatform = if native then system else linux;
           boot.loader.grub.enable = false;
@@ -33,6 +35,12 @@ let
             fsType = "tmpfs";
           };
           system.stateVersion = "26.05";
+          services.kajiba-git.package =
+            if native then kajibaGitPackage else inputs.self.packages.${linux}.kajiba-git;
+          services.kajiba-runner = {
+            enable = true;
+            package = inputs.self.packages.${linux}.kajiba-runner;
+          };
           services.kajiba-server = {
             enable = true;
             package = if native then kajibaServerPackage else inputs.self.packages.${linux}.kajiba-server;
@@ -43,8 +51,13 @@ let
       ++ extras;
     };
   full = {
+    services.kajiba-git = {
+      stateDir = "/srv/kajiba-git";
+      log.level = "debug";
+    };
     services.kajiba-server = {
-      stateDir = "/srv/kajiba";
+      stateDir = "/srv/kajiba-server";
+      git.socket = "/run/custom-git/local.sock";
       http = {
         listen = "127.0.0.1:8081";
         publicUrl = "https://forge.example.org";
@@ -128,7 +141,11 @@ let
         touch "$out"
       '';
   expected = (pkgs.formats.toml { }).generate "expected-kajiba-server.toml" {
-    state_dir = "/srv/kajiba";
+    state_dir = "/srv/kajiba-server";
+    git = {
+      state_dir = "/srv/kajiba-git";
+      socket = "/run/custom-git/local.sock";
+    };
     http = {
       listen = "127.0.0.1:8081";
       public_url = "https://forge.example.org";
@@ -212,10 +229,18 @@ in
         unit = systemd.services.kajiba-server.serviceConfig;
       in
       !(unit ? DynamicUser)
-      && unit.User == "kajiba"
-      && unit.Group == "kajiba"
+      && unit.User == "kajiba-server"
+      && unit.Group == "kajiba-server"
       && unit.StateDirectory == [ ]
-      && unit.ReadWritePaths == [ "/srv/kajiba" ]
+      &&
+        unit.ReadWritePaths == [
+          "/srv/kajiba-server"
+          "/srv/kajiba-dumps"
+        ]
+      && unit.ReadOnlyPaths == [ "/srv/kajiba-git" ]
+      && unit.SupplementaryGroups == [ "kajiba-git" ]
+      && unit.RuntimeDirectoryMode == "0751"
+      && unit.StateDirectoryMode == "0750"
       && unit.RuntimeDirectory == "kajiba"
       && unit.UMask == "0027"
       && unit.ProtectSystem == "strict"
@@ -245,14 +270,29 @@ in
       && unit.LogRateLimitIntervalSec == "30s"
       && unit.LogRateLimitBurst == 30000
       && lib.hasSuffix " http://127.0.0.1:8081/readyz" unit.ExecStartPost
-      && users.users.kajiba.isSystemUser
-      && users.users.kajiba.group == "kajiba"
-      && users.groups ? kajiba
-      && systemd.tmpfiles.settings."10-kajiba-server" ? "/srv/kajiba"
-      && !(systemd.tmpfiles.settings."10-kajiba-server" ? "/srv/kajiba-dumps")
+      && users.users.kajiba-server.isSystemUser
+      && users.users.kajiba-server.group == "kajiba-server"
+      && users.users.kajiba-server.extraGroups == [ "kajiba-git" ]
+      && users.groups ? kajiba-server
+      && systemd.tmpfiles.settings."10-kajiba-server" ? "/srv/kajiba-server"
+      && systemd.tmpfiles.settings."10-kajiba-server" ? "/srv/kajiba-dumps"
+      &&
+        lib.all
+          (
+            path:
+            let
+              directory = systemd.tmpfiles.settings."10-kajiba-server".${path}.d;
+            in
+            directory.user == "kajiba-server" && directory.group == "kajiba-server" && directory.mode == "0750"
+          )
+          [
+            "/srv/kajiba-server"
+            "/srv/kajiba-dumps"
+          ]
       &&
         services.kajiba-server.persistedPaths == [
-          "/srv/kajiba"
+          "/srv/kajiba-server"
+          "/srv/kajiba-git"
           "/srv/kajiba-dumps"
         ];
     assert
@@ -260,13 +300,155 @@ in
         inherit ((evaluateWith false [ ]).config) systemd environment;
         unit = systemd.services.kajiba-server.serviceConfig;
       in
-      unit.StateDirectory == [ "kajiba" ]
-      && unit.ReadWritePaths == [ "/var/lib/kajiba" ]
+      unit.StateDirectory == [
+        "kajiba-server"
+        "kajiba-dumps"
+      ]
+      &&
+        unit.ReadWritePaths == [
+          "/var/lib/kajiba-server"
+          "/var/lib/kajiba-dumps"
+        ]
+      && unit.ReadOnlyPaths == [ "/var/lib/kajiba-git" ]
       && systemd.tmpfiles.settings."10-kajiba-server" == { }
       && unit.SocketBindAllow == [ "tcp:8080" ]
       && lib.hasSuffix " http://127.0.0.1:8080/readyz" unit.ExecStartPost
-      && systemd.services.kajiba-server.restartTriggers == [ environment.etc."kajiba/server.toml".source ]
+      &&
+        systemd.services.kajiba-server.restartTriggers == [
+          environment.etc."kajiba/server.toml".source
+          inputs.self.packages.${linux}.kajiba-server
+        ]
       && lib.elem inputs.self.packages.${linux}.kajiba-server environment.systemPackages;
+    assert lib.all
+      (
+        evaluation:
+        let
+          inherit (evaluation.config)
+            systemd
+            users
+            services
+            environment
+            ;
+          server = systemd.services.kajiba-server;
+          git = systemd.services.kajiba-git;
+          unit = git.serviceConfig;
+          stateDir = services.kajiba-git.stateDir;
+        in
+        users.users.kajiba-git.isSystemUser
+        && users.users.kajiba-git.group == "kajiba-git"
+        && users.users.kajiba-git.extraGroups == [ ]
+        && users.groups ? kajiba-git
+        && !(users.users ? kajiba)
+        && unit.User == "kajiba-git"
+        && unit.Group == "kajiba-git"
+        && !(unit ? DynamicUser)
+        && !(unit ? PrivateUsers)
+        && !(server.serviceConfig ? PrivateUsers)
+        && unit.Type == "notify"
+        && unit.KillMode == "control-group"
+        && unit.Restart == "on-failure"
+        &&
+          unit.SystemCallFilter == [
+            "@system-service"
+            "~@privileged"
+          ]
+        &&
+          server.serviceConfig.SystemCallFilter == [
+            "@system-service"
+            "~@privileged"
+            "@chown"
+          ]
+        && unit.StateDirectoryMode == "0750"
+        &&
+          unit.StateDirectory
+          == lib.optional (lib.hasPrefix "/var/lib/" stateDir) (lib.removePrefix "/var/lib/" stateDir)
+        && unit.RuntimeDirectory == "kajiba-git"
+        && unit.RuntimeDirectoryMode == "0750"
+        && unit.ReadWritePaths == [ stateDir ]
+        && unit.InaccessiblePaths == [ "-${services.kajiba-server.stateDir}" ]
+        && unit.UMask == "0027"
+        && unit.SocketBindDeny == "any"
+        && (unit.SocketBindAllow or [ ]) == [ ]
+        && !(unit ? ExecStartPost)
+        &&
+          unit.ExecStart == "${lib.getExe services.kajiba-git.package} serve --config ${
+            environment.etc."kajiba/git.toml".source
+          }"
+        &&
+          git.restartTriggers == [
+            environment.etc."kajiba/git.toml".source
+            services.kajiba-git.package
+          ]
+        && lib.elem "kajiba-git.service" server.wants
+        && lib.elem "kajiba-git.service" server.after
+        && !(lib.elem "kajiba-server.service" git.after)
+        && lib.elem evaluation.pkgs.git git.path
+        && lib.elem evaluation.pkgs.git server.path
+        && lib.all (key: unit.${key} == server.serviceConfig.${key}) [
+          "ProtectSystem"
+          "ProtectHome"
+          "PrivateTmp"
+          "PrivateDevices"
+          "NoNewPrivileges"
+          "CapabilityBoundingSet"
+          "AmbientCapabilities"
+          "RestrictAddressFamilies"
+          "RestrictNamespaces"
+          "RestrictRealtime"
+          "RestrictSUIDSGID"
+          "LockPersonality"
+          "ProtectClock"
+          "ProtectControlGroups"
+          "ProtectHostname"
+          "ProtectKernelLogs"
+          "ProtectKernelModules"
+          "ProtectKernelTunables"
+          "ProtectProc"
+          "RemoveIPC"
+          "SystemCallArchitectures"
+          "ProcSubset"
+          "PrivateIPC"
+          "LimitCORE"
+          "LimitNOFILE"
+          "TasksMax"
+          "MemoryMax"
+          "LogRateLimitIntervalSec"
+          "LogRateLimitBurst"
+        ]
+        # The runner's existing dynamic identity stays attached to its own unit.
+        && systemd.services.kajiba-runner.serviceConfig.DynamicUser
+        && (systemd.services.kajiba-runner.serviceConfig.User or "kajiba-runner") == "kajiba-runner"
+        && (systemd.services.kajiba-runner.serviceConfig.Group or "kajiba-runner") == "kajiba-runner"
+        &&
+          systemd.services.kajiba-runner.serviceConfig.ExecStart == lib.getExe services.kajiba-runner.package
+        && services.kajiba-server.git.stateDir == stateDir
+        &&
+          services.kajiba-server.persistedPaths == [
+            services.kajiba-server.stateDir
+            stateDir
+            services.kajiba-server.dump.dir
+          ]
+      )
+      [
+        (evaluate false { })
+        (evaluateWith false [ ])
+      ];
+    assert
+      let
+        settings = (evaluate false { }).config.systemd.tmpfiles.settings;
+      in
+      settings."10-kajiba-git"."/srv/kajiba-git".d.user == "kajiba-git"
+      && settings."10-kajiba-git"."/srv/kajiba-git".d.group == "kajiba-git"
+      && settings."10-kajiba-git"."/srv/kajiba-git".d.mode == "0750";
+    assert
+      (evaluate false { services.kajiba-git.stateDir = lib.mkForce "/var/lib/custom-git"; })
+      .config.systemd.services.kajiba-git.serviceConfig.StateDirectory == [ "custom-git" ];
+    assert
+      (evaluate false { services.kajiba-server.stateDir = lib.mkForce "/var/lib/custom-server"; })
+      .config.systemd.services.kajiba-server.serviceConfig.StateDirectory == [ "custom-server" ];
+    assert evaluationFails { services.kajiba-git.enable = true; };
+    assert evaluationFails { services.kajiba-git.unexpected = true; };
+    assert evaluationFails { services.kajiba-git.stateDir = lib.mkForce "relative"; };
     assert lib.all
       (
         pair:
@@ -287,7 +469,7 @@ in
       ];
     assert
       (evaluate false { services.kajiba-server.dump.dir = lib.mkForce "/var/lib/kajiba-dumps"; })
-      .config.systemd.services.kajiba-server.serviceConfig.StateDirectory == [ ];
+      .config.systemd.services.kajiba-server.serviceConfig.StateDirectory == [ "kajiba-dumps" ];
     assert
       (evaluate false { }).config.systemd.services.kajiba-server.serviceConfig.ExecStart
       == "${lib.getExe inputs.self.packages.${linux}.kajiba-server} serve --config ${
@@ -338,6 +520,18 @@ in
       };
     pkgs.runCommand "kajiba-module-eval" { } ''
       cmp ${configFile { }} ${expected}
+      ${lib.getExe kajibaGitPackage} config check ${
+        (evaluate true { }).config.environment.etc."kajiba/git.toml".source
+      }
+      grep -Fx 'state_dir = "/srv/kajiba-git"' ${
+        (evaluate true { }).config.environment.etc."kajiba/git.toml".source
+      }
+      grep -Fx 'level = "debug"' ${(evaluate true { }).config.environment.etc."kajiba/git.toml".source}
+      # The git-side default file only needs the store hook directory.
+      [ "$(grep -c = ${(evaluateWith true [ ]).config.environment.etc."kajiba/git.toml".source})" = 1 ]
+      grep -E '^hooks_path = "/nix/store/[^"]+-kajiba-hooks"$' ${
+        (evaluateWith true [ ]).config.environment.etc."kajiba/git.toml".source
+      }
       # Defaults stay in the code (0019): only the required public URL is written.
       [ "$(grep -c = ${configFileOf (evaluateWith true [ ])})" = 1 ]
       echo ${

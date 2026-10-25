@@ -5,11 +5,13 @@
 {
   pkgs,
   kajibaServerPackage,
+  kajibaGitPackage,
   testLib,
 }:
 let
   inherit (pkgs) lib;
-  stateDir = "/var/lib/kajiba";
+  stateDir = "/var/lib/kajiba-server";
+  gitStateDir = "/var/lib/kajiba-git";
   repo = {
     owner = "alice";
     description = "Demo repository";
@@ -21,6 +23,7 @@ pkgs.testers.runNixOSTest {
 
   nodes.forge = {
     imports = [ ../nixosModules/server.nix ];
+    services.kajiba-git.package = kajibaGitPackage;
     services.kajiba-server = {
       enable = true;
       package = kajibaServerPackage;
@@ -32,6 +35,10 @@ pkgs.testers.runNixOSTest {
       repos.demo = repo;
     };
     specialisation = {
+      added.configuration = repos {
+        demo = repo;
+        extra = repo;
+      };
       renamed.configuration = repos {
         demo = repo // {
           name = "demo2";
@@ -68,7 +75,7 @@ pkgs.testers.runNixOSTest {
       base = "http://forge:8080"
       bundle = "/var/lib/kajiba-fixtures/demo.bundle"
       toplevel = "${nodes.forge.system.build.toplevel}"
-      orphans = "${stateDir}/tmp/orphans"
+      orphans = "${gitStateDir}/tmp/orphans"
 
 
       def http(path):
@@ -119,7 +126,7 @@ pkgs.testers.runNixOSTest {
 
 
       def git_dir(public_id):
-          return f"${stateDir}/repos/{public_id}.git"
+          return f"${gitStateDir}/repos/{public_id}.git"
 
 
       def inode(path):
@@ -159,6 +166,19 @@ pkgs.testers.runNixOSTest {
           assert (name, archived) == ("alice/demo", False), f"GetRepo: {public_id} {name} {archived}"
           directory = inode(git_dir(public_id))
 
+      with subtest("startup needing a new repository fails explicitly while the git side is unavailable"):
+          # Mask prevents the server's Wants from restarting the daemon for this start.
+          forge.succeed("systemctl mask --runtime --now kajiba-git.service")
+          switch("added", check=False)
+          status, out = forge.execute(f"timeout 60 systemctl start {unit}")
+          assert status not in (0, 124), f"start without git: {status}, {out}"
+          fatal = [e for e in invocation_events() if e["event"] == "fatal"]
+          assert len(fatal) == 1 and "GIT_SIDE_UNAVAILABLE" in fatal[0]["err"], fatal
+          forge.succeed("systemctl unmask --runtime kajiba-git.service", "systemctl start kajiba-git.service")
+          start()
+          assert get_repo(name="alice/extra")[1:] == ("alice/extra", False)
+          assert clone("alice/demo", "/root/recovered.git") == original
+
       with subtest("rename: the old name clones and redirects, same row and directory"):
           switch("renamed")
           events = start()
@@ -188,7 +208,7 @@ pkgs.testers.runNixOSTest {
           for request in [{"publicId": public_id}, {"name": "alice/demo2"}, {"name": "alice/demo"}]:
               assert get_repo(**request) == (public_id, "alice/demo2", True), f"GetRepo {request}: {get_repo(**request)}"
           # The content is kept in place and browsable through the API, by both names.
-          assert refs(forge, git_dir(public_id), user="kajiba") == source
+          assert refs(forge, git_dir(public_id), user="kajiba-git") == source
           for name in ["alice/demo2", "alice/demo"]:
               request = json.dumps({"repo": name, "revision": "main", "path": "flake.nix"})
               out = forge.succeed(f"grpcurl -plaintext -d {shlex.quote(request)} forge:8080 kajiba.v1.RepoService/GetBlob")
@@ -217,17 +237,20 @@ pkgs.testers.runNixOSTest {
 
       with subtest("a stray directory under repos/ is quarantined in tmp/orphans/"):
           forge.succeed(
-              "install -d -o kajiba -g kajiba -m 0750 ${stateDir}/repos/stray.git",
-              "install -o kajiba -g kajiba -m 0640 /dev/null ${stateDir}/repos/stray.git/marker",
+              "install -d -o kajiba-git -g kajiba-git -m 0750 ${gitStateDir}/repos/01ARZ3NDEKTSV4RRFFQ69G5FAV.git",
+              "install -o kajiba-git -g kajiba-git -m 0640 /dev/null ${gitStateDir}/repos/01ARZ3NDEKTSV4RRFFQ69G5FAV.git/marker",
               f"systemctl stop {unit}",
           )
           events = start()
-          orphaned = [e for e in events if e["event"] == "repo-orphaned"]
-          assert len(orphaned) == 1 and orphaned[0]["destination"] == f"{orphans}/stray.git", f"repo-orphaned: {orphaned}"
-          forge.succeed(f"test -f {orphans}/stray.git/marker", "test ! -e ${stateDir}/repos/stray.git")
+          forge.succeed("journalctl --sync")
+          journal = forge.succeed("journalctl _SYSTEMD_UNIT=kajiba-git.service -o cat --no-pager")
+          orphaned = [json.loads(line) for line in journal.splitlines() if json.loads(line)["event"] == "repo-quarantined"]
+          assert len(orphaned) == 1 and orphaned[0]["destination"] == f"{orphans}/01ARZ3NDEKTSV4RRFFQ69G5FAV.git", f"repo-orphaned: {orphaned}"
+          forge.succeed(f"test -f {orphans}/01ARZ3NDEKTSV4RRFFQ69G5FAV.git/marker", "test ! -e ${gitStateDir}/repos/01ARZ3NDEKTSV4RRFFQ69G5FAV.git")
           assert clone("alice/demo2", "/root/after.git") == original
 
       with subtest("every service log line validates against the nisshi schema"):
           validate_logs(forge, unit)
+          validate_logs(forge, "kajiba-git.service")
     '';
 }

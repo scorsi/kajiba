@@ -26,8 +26,9 @@ relational schema.
 - Crate and module names are fixed by ADR 0002/0018/0054: `kajiba-core`,
   `kajiba-gitstore`, `kajiba-proto`, `kajiba-exec`, `kajiba-server`, `kajiba-git`,
   `kajiba-runner`, `kajiba-cli`, `kajiba-ui`. NixOS options
-  `services.kajiba-server` / `services.kajiba-runner`, system user `kajiba`
-  (0015). Don't introduce new top-level crates without an ADR.
+  `services.kajiba-server` / `services.kajiba-git` / `services.kajiba-runner`;
+  the two host daemons use system users `kajiba-server` and `kajiba-git`
+  (0015, 0054). Don't introduce new top-level crates without an ADR.
 - Logs are nisshi schema v1 lines on stderr, metrics follow masu's
   convention on a loopback listener (0022); never log a secret.
 - Format with `nix fmt` (treefmt: rustfmt, prettier, nixfmt). Generated

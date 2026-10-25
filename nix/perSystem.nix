@@ -177,6 +177,7 @@
       // import ./checks/module.nix {
         inherit inputs pkgs system;
         kajibaServerPackage = config.packages.kajiba-server;
+        kajibaGitPackage = config.packages.kajiba-git;
       }
       // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
         let
@@ -189,26 +190,32 @@
           nixos-server-lifecycle = import ./tests/server-lifecycle.nix {
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
+            kajibaGitPackage = config.packages.kajiba-git;
           };
           nixos-server-config = import ./tests/server-config.nix {
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
+            kajibaGitPackage = config.packages.kajiba-git;
           };
           nixos-server-observability = import ./tests/server-observability.nix {
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
+            kajibaGitPackage = config.packages.kajiba-git;
           };
           nixos-server-enroll = import ./tests/server-enroll.nix {
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
+            kajibaGitPackage = config.packages.kajiba-git;
           };
           nixos-git-http = import ./tests/git-http.nix {
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
+            kajibaGitPackage = config.packages.kajiba-git;
           };
           nixos-repo-lifecycle = import ./tests/repo-lifecycle.nix {
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
+            kajibaGitPackage = config.packages.kajiba-git;
           };
         }
       );

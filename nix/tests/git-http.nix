@@ -5,6 +5,7 @@
 {
   pkgs,
   kajibaServerPackage,
+  kajibaGitPackage,
   testLib,
 }:
 pkgs.testers.runNixOSTest {
@@ -12,13 +13,19 @@ pkgs.testers.runNixOSTest {
 
   nodes.forge = {
     imports = [ ../nixosModules/server.nix ];
+    services.kajiba-git.package = kajibaGitPackage;
     services.kajiba-server = {
       enable = true;
       package = kajibaServerPackage;
       # Clone URLs name the host: listen beyond loopback.
       http.listen = "0.0.0.0:8080";
       http.publicUrl = "https://forge.example.org";
+      http.reflection = true;
       users.alice = { };
+      repos.empty = {
+        owner = "alice";
+        description = "Import after recovery";
+      };
       repos.demo = {
         owner = "alice";
         description = "Demo repository";
@@ -36,10 +43,12 @@ pkgs.testers.runNixOSTest {
     environment.systemPackages = [
       pkgs.curl
       pkgs.git
+      pkgs.grpcurl
     ];
   };
 
   testScript = testLib + ''
+    import base64
     import json
 
     unit = "kajiba-server.service"
@@ -104,11 +113,39 @@ pkgs.testers.runNixOSTest {
         forge.succeed(f"git clone --mirror {base}/alice/demo.git /root/again.git")
         assert refs(forge, "/root/again.git") == source
 
+    with subtest("git-side outage preserves reads, refuses imports and makes readiness fail"):
+        forge.succeed("systemctl stop kajiba-git.service")
+        forge.wait_until_succeeds(f"test $(curl -s -o /dev/null -w '%{{http_code}}' {base}/readyz) = 503")
+        forge.succeed(f"systemctl is-active {unit}")
+        assert http("/healthz")[0] == 200
+        forge.succeed(f"git clone --mirror {base}/alice/demo.git /root/offline.git")
+        assert refs(forge, "/root/offline.git") == source
+        assert http("/raw/alice/demo/main/flake.nix") == (200, DEMO_FLAKE)
+        request = shlex.quote(json.dumps({"repo": "alice/demo", "revision": "main", "path": "flake.nix"}))
+        blob = json.loads(forge.succeed(f"grpcurl -plaintext -d {request} forge:8080 kajiba.v1.RepoService/GetBlob"))
+        assert base64.b64decode(blob["content"]).decode() == DEMO_FLAKE
+        request = shlex.quote(json.dumps({"name": "alice/demo"}))
+        repo = json.loads(forge.succeed(f"grpcurl -plaintext -d {request} forge:8080 kajiba.v1.RepoService/GetRepo"))["repo"]
+        assert repo["name"] == "demo"
+        forge.fail(f"kajiba-server admin import alice/empty {bundle} 2>/tmp/unavailable.err")
+        assert "GIT_SIDE_UNAVAILABLE" in forge.succeed("cat /tmp/unavailable.err")
+        validate_log_output(forge, "cat /tmp/unavailable.err")
+
+    with subtest("restarting the git side restores readiness and imports without restarting the server"):
+        pid = forge.succeed(f"systemctl show -P MainPID {unit}")
+        forge.succeed("systemctl start kajiba-git.service")
+        forge.wait_until_succeeds(f"curl -sf {base}/readyz")
+        assert forge.succeed(f"systemctl show -P MainPID {unit}") == pid
+        forge.succeed(f"kajiba-server admin import alice/empty {bundle}")
+        forge.succeed(f"git clone --mirror {base}/alice/empty.git /root/recovered.git")
+        assert refs(forge, "/root/recovered.git") == source
+
     with subtest("the import is logged once and every service line validates against nisshi"):
         forge.succeed("journalctl --sync")
         journal = forge.succeed(f"journalctl _SYSTEMD_UNIT={unit} -o cat --no-pager")
-        imported = [json.loads(line) for line in journal.splitlines() if '"repo-imported"' in line]
+        imported = [json.loads(line) for line in journal.splitlines() if '"repo-imported"' in line and json.loads(line)["repo"] == "alice/demo"]
         assert len(imported) == 1 and imported[0]["repo"] == "alice/demo" and imported[0]["refs"] == 3, f"repo-imported lines: {imported}"
         validate_logs(forge, unit)
+        validate_logs(forge, "kajiba-git.service")
   '';
 }

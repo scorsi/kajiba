@@ -308,7 +308,7 @@ pub enum Backend {
 }
 
 fn server_state_dir() -> PathBuf {
-    "/var/lib/kajiba".into()
+    "/var/lib/kajiba-server".into()
 }
 fn git_state_dir() -> PathBuf {
     "/var/lib/kajiba-git".into()
