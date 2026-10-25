@@ -48,7 +48,7 @@ let
       public_url = cfg.http.publicUrl;
     };
     ssh = {
-      inherit (cfg.ssh) host;
+      inherit (cfg.ssh) host probe;
       port = if cfg.ssh.port == 2222 then null else cfg.ssh.port;
     };
     log = { inherit (cfg.log) level; };
@@ -242,6 +242,12 @@ in
     };
     ssh = {
       host = optional types.str "host of http.publicUrl" "Host shown in SSH clone URLs (0004, 0021).";
+      probe = mkOption {
+        type = types.nullOr types.str;
+        default = "127.0.0.1:${toString gitCfg.ssh.port}";
+        defaultText = lib.literalExpression ''"127.0.0.1:''${toString config.services.kajiba-git.ssh.port}"'';
+        description = "Local loopback sshd address checked by /readyz with a one-second SSH banner probe. null disables the check; independent of the advertised host and port.";
+      };
       port = mkOption {
         type = types.nullOr types.port;
         default = gitCfg.ssh.port;
@@ -514,10 +520,15 @@ in
     systemd.services.kajiba-server = {
       description = "kajiba forge server";
       wantedBy = [ "multi-user.target" ];
-      wants = [ "kajiba-git.service" ];
+      wants = [
+        "kajiba-git.service"
+        "kajiba-sshd.service"
+      ];
+      # sshd must start before ExecStartPost waits for its readiness probe.
       after = [
         "network.target"
         "kajiba-git.service"
+        "kajiba-sshd.service"
       ];
       restartTriggers = [
         configFile

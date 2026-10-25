@@ -117,8 +117,11 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let health =
-                transport::Health::new(config.state_dir.clone(), config.git.state_dir.clone());
+            let health = transport::Health::new(
+                config.state_dir.clone(),
+                config.git.state_dir.clone(),
+                config.ssh.probe,
+            );
             let (mut writer, readers) =
                 match db::open(&config.state_dir.join("db/kajiba.sqlite")).await {
                     Ok(database) => database,

@@ -90,6 +90,8 @@ pub struct HttpConfig {
 pub struct SshConfig {
     pub host: Option<String>,
     pub port: u16,
+    /// Local sshd readiness endpoint; absent disables the integration check.
+    pub probe: Option<SocketAddr>,
 }
 
 impl Default for SshConfig {
@@ -97,6 +99,7 @@ impl Default for SshConfig {
         Self {
             host: None,
             port: 2222,
+            probe: None,
         }
     }
 }
@@ -675,6 +678,11 @@ impl ServerConfig {
         }
         if config.ssh.port == 0 {
             return Err("ssh.port: must be nonzero".into());
+        }
+        if let Some(probe) = config.ssh.probe {
+            if !probe.ip().is_loopback() || probe.port() == 0 {
+                return Err("ssh.probe: must be a loopback address with a nonzero port".into());
+            }
         }
         if config.http.listen.port() == 0 {
             return Err("http.listen: port must be nonzero".into());

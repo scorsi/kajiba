@@ -116,6 +116,20 @@ pkgs.testers.runNixOSTest {
         machine.fail(f"nsenter -t {pid} -m -- touch /var/lib/kajiba-git/repos/forbidden")
         machine.succeed("runuser -u kajiba-git -- kajiba-git config check /etc/kajiba/git.toml")
 
+    with subtest("SSH readiness fails and recovers without restarting either daemon"):
+        machine.wait_for_unit("kajiba-sshd.service")
+        invocations = {
+            service: machine.succeed(f"systemctl show -P InvocationID {service}").strip()
+            for service in [unit, "kajiba-git.service"]
+        }
+        machine.succeed("systemctl stop kajiba-sshd.service")
+        machine.wait_until_succeeds("test $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/readyz) = 503")
+        machine.succeed("curl -fsS http://127.0.0.1:8080/healthz")
+        machine.succeed("systemctl start kajiba-sshd.service")
+        machine.wait_until_succeeds("curl -fsS http://127.0.0.1:8080/readyz")
+        for service, invocation in invocations.items():
+            assert machine.succeed(f"systemctl show -P InvocationID {service}").strip() == invocation
+
     with subtest("resource limits apply to the running unit"):
         assert machine.succeed(f"systemctl show -P TasksMax {unit}").strip() == "1024"
         assert machine.succeed(f"systemctl show -P MemoryMax {unit}").strip() == str(2 * 1024**3)

@@ -30,7 +30,7 @@ impl State {
         let lock = crate::state::prepare(&dir).unwrap();
         fs::create_dir(dir.join("repos")).unwrap();
         Self {
-            health: Health::new(dir.clone(), dir),
+            health: Health::new(dir.clone(), dir, None),
             _lock: lock,
         }
     }
@@ -136,6 +136,97 @@ async fn readiness_waits_for_startup_and_checks_database_and_directories() {
     );
     assert_eq!(serving_status(&mut app).await, ServingStatus::NotServing);
     assert_eq!(get(&mut app, "/healthz").await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn readiness_tracks_sshd_and_git_link_and_skips_disabled_ssh() {
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
+
+    let mut state = State::new();
+    state.start().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    state.health.ssh_probe = Some(address);
+    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    let start = |listener: TcpListener| {
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = stream.write_all(b"SSH-2.0-OpenSSH_test\r\n").await;
+            }
+        })
+    };
+    let sshd = start(listener);
+    assert_eq!(get(&mut app, "/readyz").await, StatusCode::OK);
+    assert_eq!(serving_status(&mut app).await, ServingStatus::Serving);
+
+    let mut disconnected = state.health.clone();
+    disconnected.git_side = Arc::default();
+    let mut unavailable = router(disconnected, false, Arc::default()).unwrap();
+    assert_eq!(
+        get(&mut unavailable, "/readyz").await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(get(&mut app, "/readyz").await, StatusCode::OK);
+
+    sshd.abort();
+    let _ = sshd.await;
+    assert_eq!(
+        get(&mut app, "/readyz").await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(serving_status(&mut app).await, ServingStatus::NotServing);
+    assert_eq!(get(&mut app, "/healthz").await, StatusCode::OK);
+
+    let sshd = start(TcpListener::bind(address).await.unwrap());
+    assert_eq!(get(&mut app, "/readyz").await, StatusCode::OK);
+    sshd.abort();
+    let _ = sshd.await;
+
+    // A live listener records any unwanted connection when the subsystem is disabled.
+    let listener = TcpListener::bind(address).await.unwrap();
+    state.health.ssh_probe = None;
+    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    assert_eq!(get(&mut app, "/readyz").await, StatusCode::OK);
+    assert_eq!(serving_status(&mut app).await, ServingStatus::Serving);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn ssh_readiness_refuses_wrong_truncated_and_stalled_banners() {
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
+
+    let mut state = State::new();
+    state.start().await;
+    for banner in [
+        Some(b"HTTP/1.1".as_slice()),
+        Some(b"SSH-2".as_slice()),
+        None,
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        state.health.ssh_probe = Some(listener.local_addr().unwrap());
+        let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            if let Some(banner) = banner {
+                stream.write_all(banner).await.unwrap();
+            } else {
+                std::future::pending::<()>().await;
+            }
+        });
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), get(&mut app, "/readyz"))
+                .await
+                .unwrap(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        peer.abort();
+        let _ = peer.await;
+    }
 }
 
 #[tokio::test]

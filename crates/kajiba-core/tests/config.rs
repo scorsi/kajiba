@@ -60,6 +60,28 @@ fn adr_examples_load_verbatim() {
 }
 
 #[test]
+fn ssh_readiness_probe_is_optional_local_and_separate_from_clone_urls() {
+    for address in ["127.0.0.1:2022", "[::1]:2022"] {
+        let config = ServerConfig::parse(&format!(
+            "{MINIMAL}[ssh]\nhost='ssh.example.org'\nport=22\nprobe='{address}'"
+        ))
+        .unwrap();
+        assert_eq!(config.ssh.probe, Some(address.parse().unwrap()));
+        assert_eq!(config.ssh.host.as_deref(), Some("ssh.example.org"));
+        assert_eq!(config.ssh.port, 22);
+    }
+    for address in [
+        "0.0.0.0:2222",
+        "[::]:2222",
+        "192.0.2.1:2222",
+        "127.0.0.1:0",
+        "localhost:2222",
+    ] {
+        server_error(&format!("{MINIMAL}[ssh]\nprobe='{address}'"), "ssh");
+    }
+}
+
+#[test]
 fn defaults_match_adr_tables() {
     let server = ServerConfig::parse(MINIMAL).unwrap();
     assert_eq!(server.state_dir, Path::new("/var/lib/kajiba-server"));
@@ -69,6 +91,7 @@ fn defaults_match_adr_tables() {
     assert!(!server.http.reflection);
     assert_eq!(server.ssh.host.as_deref(), Some("forge.example.org"));
     assert_eq!(server.ssh.port, 2222);
+    assert_eq!(server.ssh.probe, None);
     assert_eq!(server.log.level, "info");
     assert!(server.metrics.listen.is_none());
     assert_eq!(server.auth.session_ttl, Duration::from_secs(7 * 86400));

@@ -20,6 +20,7 @@ use kajiba_proto::v1::{
 use sqlx::SqlitePool;
 use std::{
     io,
+    net::SocketAddr,
     path::PathBuf,
     sync::{Arc, OnceLock},
     time::Duration,
@@ -36,10 +37,11 @@ pub struct Health {
     public_reads: Arc<Semaphore>,
     gate_serving: Arc<local::Serving>,
     git_side: Arc<git_side::Link>,
+    ssh_probe: Option<SocketAddr>,
 }
 
 impl Health {
-    pub fn new(state_dir: PathBuf, git_state_dir: PathBuf) -> Self {
+    pub fn new(state_dir: PathBuf, git_state_dir: PathBuf, ssh_probe: Option<SocketAddr>) -> Self {
         Self {
             database: Arc::default(),
             git_state_dir,
@@ -48,6 +50,7 @@ impl Health {
             public_reads: Arc::new(Semaphore::new(PUBLIC_READS)),
             gate_serving: Arc::default(),
             git_side: Arc::default(),
+            ssh_probe,
         }
     }
 
@@ -74,6 +77,24 @@ impl Health {
                 .fetch_one(database)
                 .await
                 .is_ok()
+            && self.ssh_ready().await
+    }
+
+    async fn ssh_ready(&self) -> bool {
+        use tokio::io::AsyncReadExt;
+
+        let Some(address) = self.ssh_probe else {
+            return true;
+        };
+        // Bound both connect and banner read; a listening non-SSH service is not ready.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let mut stream = tokio::net::TcpStream::connect(address).await?;
+            let mut banner = [0; 8];
+            stream.read_exact(&mut banner).await?;
+            Ok::<_, io::Error>(&banner == b"SSH-2.0-")
+        })
+        .await
+        .is_ok_and(|result| result.unwrap_or(false))
     }
 }
 

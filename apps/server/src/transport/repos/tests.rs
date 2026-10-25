@@ -28,7 +28,7 @@ impl Fixture {
         let (writer, readers) = crate::db::open(&dir.join("server/db/kajiba.sqlite"))
             .await
             .unwrap();
-        let health = Health::new(dir.join("server"), dir.clone());
+        let health = Health::new(dir.join("server"), dir.clone(), None);
         health.started(readers);
         let daemon = crate::transport::git_side::fake::Fake::start(&dir).await;
         let mut fixture = Self {

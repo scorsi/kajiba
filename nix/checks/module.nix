@@ -155,6 +155,7 @@ let
     ssh = {
       host = "ssh.example.org";
       port = 22;
+      probe = "127.0.0.1:2222";
     };
     log.level = "debug";
     metrics.listen = "127.0.0.1:9431";
@@ -448,6 +449,8 @@ in
             networking
             ;
           sshd = systemd.services.kajiba-sshd;
+          server = systemd.services.kajiba-server;
+          git = systemd.services.kajiba-git;
           lines = lib.splitString "\n" environment.etc."kajiba/sshd_config".text;
         in
         services.kajiba-server.ssh.port == services.kajiba-git.ssh.port
@@ -481,6 +484,18 @@ in
         && lib.elem "multi-user.target" sshd.wantedBy
         && lib.elem "kajiba-git.service" sshd.wants
         && lib.elem "kajiba-git.service" sshd.after
+        # ExecStartPost checks sshd: neither prerequisite may wait for the server.
+        && lib.elem "kajiba-sshd.service" server.wants
+        && lib.elem "kajiba-sshd.service" server.after
+        && lib.elem "kajiba-git.service" server.after
+        && !(lib.elem "kajiba-server.service" sshd.after)
+        && !(lib.elem "kajiba-server.service" git.after)
+        && !(lib.elem "kajiba-sshd.service" git.after)
+        && !(lib.elem "kajiba-git.service" server.before)
+        && !(lib.elem "kajiba-sshd.service" server.before)
+        && !(lib.elem "kajiba-git.service" sshd.before)
+        && !(sshd.serviceConfig ? ExecStartPost)
+        && !(git.serviceConfig ? ExecStartPost)
         && !(lib.elem "sshd.service" sshd.after)
         &&
           sshd.serviceConfig.ExecStart == "${lib.getExe' evaluation.pkgs.openssh "sshd"} -D -e -f ${
@@ -522,10 +537,12 @@ in
         disabled = (evaluateWith false [ { services.kajiba-server.enable = lib.mkForce false; } ]).config;
       in
       defaults.services.kajiba-git.ssh.port == 2222
+      && defaults.services.kajiba-server.ssh.probe == "127.0.0.1:2222"
       && defaults.services.kajiba-server.ssh.port == 2222
       && !defaults.services.openssh.enable
       && !(defaults.systemd.services ? sshd)
       && custom.services.kajiba-git.ssh.port == 2022
+      && custom.services.kajiba-server.ssh.probe == "127.0.0.1:2022"
       && custom.services.kajiba-server.ssh.port == 2022
       && custom.services.openssh.ports == [ 2200 ]
       && custom.services.openssh.settings.PasswordAuthentication
@@ -533,6 +550,7 @@ in
       && custom.systemd.services ? sshd
       && !(lib.elem "kajiba-git.service" custom.systemd.services.sshd.after)
       && fullConfig.services.kajiba-server.ssh.port == 22
+      && fullConfig.services.kajiba-server.ssh.probe == "127.0.0.1:2222"
       && fullConfig.services.kajiba-git.ssh.port == 2222
       && !(disabled.systemd.services ? kajiba-sshd);
     assert
@@ -661,10 +679,17 @@ in
         test -x "$hooks/$hook"
         grep -Fx "exec ${lib.getExe kajibaGitPackage} hook $hook" "$hooks/$hook"
       done
-      # Defaults stay in the code (0019): only the required public URL is written.
-      [ "$(grep -c = ${configFileOf (evaluateWith true [ ])})" = 1 ]
+      # The module enables the local sshd probe beside the required public URL.
+      [ "$(grep -c = ${configFileOf (evaluateWith true [ ])})" = 2 ]
+      grep -Fx 'probe = "127.0.0.1:2222"' ${configFileOf (evaluateWith true [ ])}
       grep -Fx 'port = 2022' ${
         configFileOf (evaluateWith true [ { services.kajiba-git.ssh.port = 2022; } ])
+      }
+      grep -Fx 'probe = "127.0.0.1:2022"' ${
+        configFileOf (evaluateWith true [ { services.kajiba-git.ssh.port = 2022; } ])
+      }
+      ! grep -q '^probe =' ${
+        configFileOf (evaluateWith true [ { services.kajiba-server.ssh.probe = null; } ])
       }
       # Parse the actual dedicated config with OpenSSH, without runtime users or host keys.
       ${lib.getExe' pkgs.openssh "sshd"} -G -f ${
