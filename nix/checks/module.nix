@@ -435,6 +435,106 @@ in
         (evaluateWith false [ ])
       ];
     assert (evaluateWith false [ ]).config.services.kajiba-git.metrics.listen == null;
+    # Dedicated SSH configuration and identity, independent of the host's admin sshd.
+    assert lib.all
+      (
+        evaluation:
+        let
+          inherit (evaluation.config)
+            systemd
+            services
+            users
+            environment
+            networking
+            ;
+          sshd = systemd.services.kajiba-sshd;
+          lines = lib.splitString "\n" environment.etc."kajiba/sshd_config".text;
+        in
+        services.kajiba-server.ssh.port == services.kajiba-git.ssh.port
+        && lib.all (line: lib.elem line lines) [
+          "Port ${toString services.kajiba-git.ssh.port}"
+          "HostKey /etc/ssh/kajiba_host_ed25519_key"
+          "PidFile /run/kajiba-sshd/sshd.pid"
+          "AllowUsers kajiba-git"
+          "AuthenticationMethods publickey"
+          "PubkeyAuthentication yes"
+          "PasswordAuthentication no"
+          "KbdInteractiveAuthentication no"
+          "HostbasedAuthentication no"
+          "PermitEmptyPasswords no"
+          "PermitRootLogin no"
+          "UsePAM no"
+          "AuthorizedKeysFile none"
+          "AuthorizedKeysCommand ${lib.getExe services.kajiba-git.package} ssh-keys %f"
+          "AuthorizedKeysCommandUser kajiba-git"
+          "DisableForwarding yes"
+          "PermitTTY no"
+          "PermitTunnel no"
+          "PermitUserRC no"
+          "PermitUserEnvironment no"
+          "SetEnv PATH=${lib.makeBinPath [ services.kajiba-git.package ]}"
+        ]
+        && users.users.kajiba-git.shell == evaluation.pkgs.bash
+        && users.users.kajiba-git.hashedPassword == "*"
+        && users.users.sshd.isSystemUser
+        && users.users.sshd.group == "sshd"
+        && lib.elem "multi-user.target" sshd.wantedBy
+        && lib.elem "kajiba-git.service" sshd.wants
+        && lib.elem "kajiba-git.service" sshd.after
+        && !(lib.elem "sshd.service" sshd.after)
+        &&
+          sshd.serviceConfig.ExecStart == "${lib.getExe' evaluation.pkgs.openssh "sshd"} -D -e -f ${
+            environment.etc."kajiba/sshd_config".source
+          }"
+        && (sshd.serviceConfig.User or "root") == "root"
+        && sshd.serviceConfig.RuntimeDirectory == "kajiba-sshd"
+        && sshd.serviceConfig.UMask == "0077"
+        && lib.hasInfix "ssh-keygen" sshd.preStart
+        && lib.elem "${lib.getExe' evaluation.pkgs.openssh "sshd"} -t -f ${environment.etc."kajiba/sshd_config".source}" (
+          lib.splitString "\n" sshd.preStart
+        )
+        &&
+          sshd.restartTriggers == [
+            environment.etc."kajiba/sshd_config".source
+            services.kajiba-git.package
+          ]
+        && lib.elem services.kajiba-git.ssh.port networking.firewall.allowedTCPPorts
+      )
+      [
+        (evaluateWith false [ ])
+        (evaluateWith false [ { services.kajiba-git.ssh.port = 2022; } ])
+      ];
+    assert
+      let
+        defaults = (evaluateWith false [ ]).config;
+        custom =
+          (evaluateWith false [
+            {
+              services.kajiba-git.ssh.port = 2022;
+              services.openssh = {
+                enable = true;
+                ports = [ 2200 ];
+                settings.PasswordAuthentication = true;
+              };
+            }
+          ]).config;
+        fullConfig = (evaluate false { }).config;
+        disabled = (evaluateWith false [ { services.kajiba-server.enable = lib.mkForce false; } ]).config;
+      in
+      defaults.services.kajiba-git.ssh.port == 2222
+      && defaults.services.kajiba-server.ssh.port == 2222
+      && !defaults.services.openssh.enable
+      && !(defaults.systemd.services ? sshd)
+      && custom.services.kajiba-git.ssh.port == 2022
+      && custom.services.kajiba-server.ssh.port == 2022
+      && custom.services.openssh.ports == [ 2200 ]
+      && custom.services.openssh.settings.PasswordAuthentication
+      && custom.services.openssh.authorizedKeysCommand == "none"
+      && custom.systemd.services ? sshd
+      && !(lib.elem "kajiba-git.service" custom.systemd.services.sshd.after)
+      && fullConfig.services.kajiba-server.ssh.port == 22
+      && fullConfig.services.kajiba-git.ssh.port == 2222
+      && !(disabled.systemd.services ? kajiba-sshd);
     assert
       (evaluate false { services.kajiba-git.metrics.listen = lib.mkForce "[::1]:19433"; })
       .config.systemd.services.kajiba-git.serviceConfig.SocketBindAllow == [ "tcp:19433" ];
@@ -563,6 +663,16 @@ in
       done
       # Defaults stay in the code (0019): only the required public URL is written.
       [ "$(grep -c = ${configFileOf (evaluateWith true [ ])})" = 1 ]
+      grep -Fx 'port = 2022' ${
+        configFileOf (evaluateWith true [ { services.kajiba-git.ssh.port = 2022; } ])
+      }
+      # Parse the actual dedicated config with OpenSSH, without runtime users or host keys.
+      ${lib.getExe' pkgs.openssh "sshd"} -G -f ${
+        (evaluateWith true [ ]).config.environment.etc."kajiba/sshd_config".source
+      } > sshd-settings
+      grep -Fix 'port 2222' sshd-settings
+      grep -Fix 'authenticationmethods publickey' sshd-settings
+      grep -Fix 'authorizedkeyscommanduser kajiba-git' sshd-settings
       echo ${
         builtins.unsafeDiscardStringContext (evaluate false { }).config.system.build.toplevel.drvPath
       }

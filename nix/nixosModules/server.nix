@@ -47,7 +47,10 @@ let
       inherit (cfg.http) listen reflection;
       public_url = cfg.http.publicUrl;
     };
-    ssh = { inherit (cfg.ssh) host port; };
+    ssh = {
+      inherit (cfg.ssh) host;
+      port = if cfg.ssh.port == 2222 then null else cfg.ssh.port;
+    };
     log = { inherit (cfg.log) level; };
     metrics = { inherit (cfg.metrics) listen; };
     auth = {
@@ -130,6 +133,9 @@ let
       ${lib.getExe gitCfg.package} config check ${raw}
       cp ${raw} "$out"
     '';
+
+  sshdConfig = config.environment.etc."kajiba/sshd_config".source;
+  sshHostKey = "/etc/ssh/kajiba_host_ed25519_key";
 
   # ExecStartPost probes /readyz on a connectable address, even for a wildcard listener.
   listen = if cfg.http.listen == null then "127.0.0.1:8080" else cfg.http.listen;
@@ -236,7 +242,12 @@ in
     };
     ssh = {
       host = optional types.str "host of http.publicUrl" "Host shown in SSH clone URLs (0004, 0021).";
-      port = optional types.port "2222" "Port shown in SSH clone URLs.";
+      port = mkOption {
+        type = types.nullOr types.port;
+        default = gitCfg.ssh.port;
+        defaultText = lib.literalExpression "config.services.kajiba-git.ssh.port";
+        description = "Port shown in SSH clone URLs; defaults to the dedicated sshd port. null keeps the code default (2222).";
+      };
     };
     log.level = optional types.str "info" "tracing filter, overridden by RUST_LOG (0022).";
     metrics.listen = optional types.str "no listener" "Loopback socket address of /metrics (0022).";
@@ -386,6 +397,11 @@ in
     };
     log.level = optional types.str "info" "tracing filter, overridden by RUST_LOG (0022).";
     metrics.listen = optional types.str "no listener" "Loopback socket address of /metrics (0054).";
+    ssh.port = mkOption {
+      type = types.port;
+      default = 2222;
+      description = "Dedicated public-key-only Git SSH listener (0004, 0054).";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -408,6 +424,29 @@ in
     environment.etc."kajiba/server.toml".source = configFile;
     # Root runs `kajiba-server admin enroll` over the local socket (0003, 0014).
     environment.etc."kajiba/git.toml".source = gitConfigFile;
+    environment.etc."kajiba/sshd_config".text = ''
+      Port ${toString gitCfg.ssh.port}
+      HostKey ${sshHostKey}
+      PidFile /run/kajiba-sshd/sshd.pid
+      AllowUsers kajiba-git
+      AuthenticationMethods publickey
+      PubkeyAuthentication yes
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      HostbasedAuthentication no
+      PermitEmptyPasswords no
+      PermitRootLogin no
+      UsePAM no
+      AuthorizedKeysFile none
+      AuthorizedKeysCommand ${lib.getExe gitCfg.package} ssh-keys %f
+      AuthorizedKeysCommandUser kajiba-git
+      DisableForwarding yes
+      PermitTTY no
+      PermitTunnel no
+      PermitUserRC no
+      PermitUserEnvironment no
+      SetEnv PATH=${lib.makeBinPath [ gitCfg.package ]}
+    '';
     environment.systemPackages = [
       cfg.package
       gitCfg.package
@@ -422,8 +461,47 @@ in
     users.users.kajiba-git = {
       isSystemUser = true;
       group = "kajiba-git";
+      # OpenSSH needs a shell and an unlocked account for the key's forced command.
+      shell = pkgs.bash;
+      hashedPassword = "*";
     };
     users.groups.kajiba-git = { };
+    # Privilege separation also works when the administration sshd is disabled.
+    users.users.sshd = {
+      isSystemUser = true;
+      group = "sshd";
+      description = "SSH privilege separation user";
+    };
+    users.groups.sshd = { };
+    networking.firewall.allowedTCPPorts = [ gitCfg.ssh.port ];
+    systemd.services.kajiba-sshd = {
+      description = "kajiba Git SSH gateway";
+      wantedBy = [ "multi-user.target" ];
+      wants = [ "kajiba-git.service" ];
+      after = [
+        "network.target"
+        "kajiba-git.service"
+      ];
+      restartTriggers = [
+        sshdConfig
+        gitCfg.package
+      ];
+      environment.LD_LIBRARY_PATH = config.system.nssModules.path;
+      preStart = ''
+        if ! test -e ${sshHostKey}; then
+          install -d -m 0755 /etc/ssh
+          ${lib.getExe' pkgs.openssh "ssh-keygen"} -q -t ed25519 -N "" -f ${sshHostKey}
+        fi
+        ${lib.getExe' pkgs.openssh "sshd"} -t -f ${sshdConfig}
+      '';
+      serviceConfig = {
+        ExecStart = "${lib.getExe' pkgs.openssh "sshd"} -D -e -f ${sshdConfig}";
+        Restart = "on-failure";
+        RuntimeDirectory = "kajiba-sshd";
+        RuntimeDirectoryMode = "0755";
+        UMask = "0077";
+      };
+    };
     systemd.tmpfiles.settings."10-kajiba-server" =
       lib.genAttrs (lib.filter (dir: !inVarLib dir) writable)
         (_: {
