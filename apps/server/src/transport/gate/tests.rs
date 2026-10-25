@@ -373,12 +373,7 @@ async fn import_open_requires_the_exact_durable_reservation() {
     let session = kajiba_core::new_id().unwrap();
     let mut writer = admin.writer.lock().await;
     gate.admission
-        .admit(&mut writer, 1, None, "request", &[])
-        .await
-        .unwrap();
-    sqlx::query("UPDATE pending_push SET git_session_id = ?")
-        .bind(&session)
-        .execute(&mut *writer)
+        .admit(&mut writer, 1, None, "request", &[], Some(&session))
         .await
         .unwrap();
     drop(writer);
@@ -461,6 +456,7 @@ async fn controlled_process_crash_recovery() {
                         old: ZERO.into(),
                         new: std::env::var("KAJIBA_TEST_TIP").unwrap(),
                     }],
+                    None,
                 )
                 .await
                 .unwrap();
@@ -672,12 +668,14 @@ async fn an_unstarted_reservation_is_recovered_and_a_late_fetch_is_refused() {
     let session_id = kajiba_core::new_id().unwrap();
     admin
         .gate
-        .admit(&mut *admin.writer.lock().await, 1, None, "not-sent", &[])
-        .await
-        .unwrap();
-    sqlx::query("UPDATE pending_push SET git_session_id = ?")
-        .bind(&session_id)
-        .execute(&mut *admin.writer.lock().await)
+        .admit(
+            &mut *admin.writer.lock().await,
+            1,
+            None,
+            "not-sent",
+            &[],
+            Some(&session_id),
+        )
         .await
         .unwrap();
     admin.gate = Arc::default();
@@ -1190,7 +1188,7 @@ async fn post_receive_validates_session_and_wakes_recovery_without_a_timer_tick(
     // An eligible row proves that PostReceive wakes the production loop, even
     // when the notification arrives before the loop starts waiting.
     gate.admission
-        .admit(&mut *admin.writer.lock().await, 1, None, "wake", &[])
+        .admit(&mut *admin.writer.lock().await, 1, None, "wake", &[], None)
         .await
         .unwrap();
     gate.admission.exited(1);

@@ -233,6 +233,7 @@ async fn a_crash_during_import_is_reconciled_at_restart() {
             None,
             "request-1",
             &updates,
+            None,
         )
         .await
         .unwrap();
@@ -383,6 +384,7 @@ async fn a_dropped_import_future_still_releases_the_gate_and_reconciles() {
             None,
             "request-1",
             &updates,
+            None,
         )
         .await
         .unwrap();
@@ -411,7 +413,14 @@ async fn a_dropped_import_future_still_releases_the_gate_and_reconciles() {
     ));
     let refused = import
         .gate
-        .admit(&mut *import.writer.lock().await, 1, None, "request-2", &[])
+        .admit(
+            &mut *import.writer.lock().await,
+            1,
+            None,
+            "request-2",
+            &[],
+            None,
+        )
         .await;
     assert!(matches!(refused, Err(Refused::InProgress)), "{refused:?}");
     release.send(()).unwrap();
@@ -436,7 +445,14 @@ async fn a_dropped_import_future_still_releases_the_gate_and_reconciles() {
     // The gate is released: a new mutation is admitted.
     import
         .gate
-        .admit(&mut *import.writer.lock().await, 1, None, "request-3", &[])
+        .admit(
+            &mut *import.writer.lock().await,
+            1,
+            None,
+            "request-3",
+            &[],
+            None,
+        )
         .await
         .unwrap();
 }
@@ -605,7 +621,7 @@ async fn a_killed_import_converts_once_after_restart() {
             .collect();
         assert_eq!(events, wanted, "{checkpoint}: exactly once, in order");
         // The gate is released: the next ref update is admitted.
-        gate.admit(&mut *writer.lock().await, 1, None, "next", &[])
+        gate.admit(&mut *writer.lock().await, 1, None, "next", &[], None)
             .await
             .unwrap();
         state.writer = Arc::try_unwrap(writer).unwrap().into_inner();
@@ -629,6 +645,7 @@ async fn a_completed_deadline_reconciles_but_a_lost_response_keeps_the_gate_clos
                     old: crate::db::pushes::ZERO.into(),
                     new: "1".repeat(40),
                 }],
+                None,
             )
             .await
             .unwrap();
@@ -658,7 +675,7 @@ async fn a_completed_deadline_reconciles_but_a_lost_response_keeps_the_gate_clos
         assert!(import.strings("SELECT payload FROM event").await.is_empty());
         let next = import
             .gate
-            .admit(&mut *import.writer.lock().await, 1, None, "next", &[])
+            .admit(&mut *import.writer.lock().await, 1, None, "next", &[], None)
             .await;
         if completed {
             next.unwrap();

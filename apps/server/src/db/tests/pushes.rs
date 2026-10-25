@@ -56,9 +56,16 @@ async fn applied_refs_become_ordered_events_and_admission_waits_for_the_row() {
         update("skipped", ZERO, &c2),
         update("new", ZERO, &c1),
     ];
-    gate.admit(&mut state.writer, 1, Some(alice), "request-1", &updates)
-        .await
-        .unwrap();
+    gate.admit(
+        &mut state.writer,
+        1,
+        Some(alice),
+        "request-1",
+        &updates,
+        None,
+    )
+    .await
+    .unwrap();
     // Partial success: `skipped` is never written, `same` is ignored.
     git(&path, &["update-ref", "refs/heads/main", &c2], "");
     git(&path, &["update-ref", "-d", "refs/heads/gone"], "");
@@ -70,6 +77,7 @@ async fn applied_refs_become_ordered_events_and_admission_waits_for_the_row() {
             Some(alice),
             "request-2",
             &updates[..1],
+            None,
         )
         .await;
     assert!(matches!(refused, Err(Refused::InProgress)), "{refused:?}");
@@ -105,6 +113,7 @@ async fn applied_refs_become_ordered_events_and_admission_waits_for_the_row() {
         None,
         "request-3",
         &[update("main", &c2, &c1)],
+        None,
     )
     .await
     .unwrap();
@@ -113,7 +122,7 @@ async fn applied_refs_become_ordered_events_and_admission_waits_for_the_row() {
         .await
         .unwrap();
     assert_eq!(events(&mut state).await.len(), 3);
-    gate.admit(&mut state.writer, 1, None, "request-4", &[])
+    gate.admit(&mut state.writer, 1, None, "request-4", &[], None)
         .await
         .unwrap();
     state.close().await;
@@ -130,6 +139,7 @@ async fn crash_after_ref_update_yields_one_event_after_restart() {
             None,
             "import",
             &[update("main", &c1, &c2)],
+            None,
         )
         .await
         .unwrap();
@@ -161,6 +171,7 @@ async fn unexpected_value_retains_the_row_and_blocks_admission() {
         None,
         "request-1",
         &[update("gone", &c1, ZERO), update("main", &c1, &c2)],
+        None,
     )
     .await
     .unwrap();
@@ -181,7 +192,7 @@ async fn unexpected_value_retains_the_row_and_blocks_admission() {
         ["request-1"]
     );
     let refused = gate
-        .admit(&mut state.writer, 1, None, "request-2", &[])
+        .admit(&mut state.writer, 1, None, "request-2", &[], None)
         .await;
     assert!(matches!(refused, Err(Refused::Retained)), "{refused:?}");
     state.close().await;
@@ -199,7 +210,7 @@ async fn a_recovery_pass_converts_rows_and_the_next_one_retries_after_an_error()
         .await
         .unwrap();
     let dead = Gate::default();
-    dead.admit(&mut state.writer, other, None, "empty", &[])
+    dead.admit(&mut state.writer, other, None, "empty", &[], None)
         .await
         .unwrap();
     dead.admit(
@@ -208,6 +219,7 @@ async fn a_recovery_pass_converts_rows_and_the_next_one_retries_after_an_error()
         None,
         "import",
         &[update("main", &c1, &c2)],
+        None,
     )
     .await
     .unwrap();
@@ -268,6 +280,7 @@ async fn the_recovery_timer_waits_its_interval_then_retries_each_tick() {
         None,
         "import",
         &[update("main", &c1, &c2)],
+        None,
     )
     .await
     .unwrap();

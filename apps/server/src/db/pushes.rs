@@ -141,6 +141,7 @@ impl Gate {
 
     /// Commits the pending row; only then may the caller mutate refs. Call
     /// `exited` once the mutating process has exited, then `reconcile`.
+    /// An import reserves its session ID here; OpenSession sets its generation.
     pub async fn admit(
         &self,
         writer: &mut SqliteConnection,
@@ -148,12 +149,21 @@ impl Gate {
         principal_id: Option<i64>,
         correlation_id: &str,
         updates: &[RefUpdate],
+        session_id: Option<&str>,
     ) -> Result<(), Refused> {
         if self.running(repo_id) {
             return Err(Refused::InProgress);
         }
-        self.insert_pending(writer, repo_id, principal_id, correlation_id, updates, None)
-            .await
+        self.insert_pending(
+            writer,
+            repo_id,
+            principal_id,
+            correlation_id,
+            updates,
+            session_id,
+            None,
+        )
+        .await
     }
 
     /// Admit the already-open receive-pack, without mistaking it for another writer.
@@ -181,11 +191,13 @@ impl Gate {
             Some(principal_id),
             &session.correlation_id,
             updates,
-            Some(session),
+            Some(&session.session_id),
+            Some(&session.generation),
         )
         .await
     }
 
+    #[expect(clippy::too_many_arguments)]
     async fn insert_pending(
         &self,
         writer: &mut SqliteConnection,
@@ -193,7 +205,8 @@ impl Gate {
         principal_id: Option<i64>,
         correlation_id: &str,
         updates: &[RefUpdate],
-        session: Option<&kajiba_proto::git::v1::Session>,
+        session_id: Option<&str>,
+        generation: Option<&str>,
     ) -> Result<(), Refused> {
         let json = serde_json::Value::Array(
             updates
@@ -230,8 +243,8 @@ impl Gate {
         .bind(correlation_id)
         .bind(json)
         .bind(now())
-        .bind(session.map(|s| &s.session_id))
-        .bind(session.map(|s| &s.generation))
+        .bind(session_id)
+        .bind(generation)
         .execute(&mut *tx)
         .await
         .map_err(Refused::Database)?;

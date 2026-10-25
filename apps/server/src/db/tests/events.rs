@@ -73,6 +73,68 @@ async fn events_append_and_read_strictly_after_id_in_sequence_order() {
 }
 
 #[tokio::test]
+async fn import_session_admission_is_atomic_on_database_failure() {
+    use crate::db::pushes::{Gate, RefUpdate, Refused, ZERO};
+
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    populate(&mut writer).await;
+    let gate = Gate::default();
+    let session = kajiba_core::new_id().unwrap();
+    let updates = [RefUpdate {
+        name: "refs/heads/main".into(),
+        old: ZERO.into(),
+        new: "1".repeat(40),
+    }];
+    sqlx::raw_sql(
+        "CREATE TRIGGER require_import_session BEFORE INSERT ON pending_push
+         WHEN NEW.git_session_id IS NULL OR NEW.git_generation IS NOT NULL
+         BEGIN SELECT RAISE(ABORT, 'import session must be reserved on insertion'); END;
+         CREATE TRIGGER fail_import_session AFTER INSERT ON pending_push
+         BEGIN SELECT RAISE(ABORT, 'session persistence failed'); END;",
+    )
+    .execute(&mut writer)
+    .await
+    .unwrap();
+
+    let result = gate
+        .admit(&mut writer, 1, None, "import", &updates, Some(&session))
+        .await;
+    assert!(
+        matches!(result, Err(Refused::Database(ref err)) if err.to_string().contains("session persistence failed"))
+    );
+    assert!(!gate.running(1));
+    let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM pending_push")
+        .fetch_one(&mut writer)
+        .await
+        .unwrap();
+    assert_eq!(pending, 0);
+
+    sqlx::query("DROP TRIGGER fail_import_session")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    gate.admit(&mut writer, 1, None, "import", &updates, Some(&session))
+        .await
+        .unwrap();
+    assert!(gate.running(1));
+    let row: (Option<i64>, String, String, Option<String>) = sqlx::query_as(
+        "SELECT principal_id, correlation_id, git_session_id, git_generation FROM pending_push",
+    )
+    .fetch_one(&mut writer)
+    .await
+    .unwrap();
+    assert_eq!(row, (None, "import".into(), session.clone(), None));
+    assert_eq!(
+        gate.session_exited(&mut writer, &session).await.unwrap(),
+        Some(1)
+    );
+    assert!(!gate.running(1));
+    readers.close().await;
+    writer.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn pending_push_admission_is_unique_per_repository_and_preserves_ref_order() {
     let dir = TempDir::new();
     let (mut writer, readers) = open(&dir.database()).await.unwrap();

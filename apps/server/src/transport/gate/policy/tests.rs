@@ -603,7 +603,7 @@ async fn upload_pack_does_not_block_mutation_admission_or_recovery() {
             "recovery must finish while the remaining clone is live"
         );
         gate.admission
-            .admit(&mut writer, 1, None, "next-import", &[])
+            .admit(&mut writer, 1, None, "next-import", &[], None)
             .await
             .unwrap();
         gate.admission

@@ -116,18 +116,19 @@ pub async fn import(
             {
                 return Err(Error::NotEmpty(format!("{repo_name} already has refs")));
             }
-            gate.admit(&mut connection, repo_id, None, &correlation_id, &updates)
-                .await
-                .map_err(|err| match err {
-                    Refused::Database(err) => Error::Internal(err.to_string()),
-                    err => Error::NotEmpty(err.to_string()),
-                })?;
-            sqlx::query("UPDATE pending_push SET git_session_id = ? WHERE repo_id = ?")
-                .bind(&session_id)
-                .bind(repo_id)
-                .execute(&mut *connection)
-                .await
-                .map_err(|err| Error::Internal(err.to_string()))?;
+            gate.admit(
+                &mut connection,
+                repo_id,
+                None,
+                &correlation_id,
+                &updates,
+                Some(&session_id),
+            )
+            .await
+            .map_err(|err| match err {
+                Refused::Database(err) => Error::Internal(err.to_string()),
+                err => Error::NotEmpty(err.to_string()),
+            })?;
         }
         checkpoint("admitted");
         let request = FetchRequest {
