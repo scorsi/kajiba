@@ -1,4 +1,5 @@
 mod daemon;
+mod service;
 mod state;
 
 use clap::{Parser, Subcommand};

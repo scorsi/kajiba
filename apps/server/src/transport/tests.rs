@@ -4,6 +4,7 @@ use kajiba_proto::v1::health_service_client::HealthServiceClient;
 use prost::Message;
 use std::{
     fs,
+    os::unix::fs::MetadataExt,
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
@@ -47,6 +48,8 @@ impl State {
         let _bus = crate::db::events::EventBus::default();
         self.health.started(readers);
         self.health.local_serving.on.store(true, Ordering::Release);
+        self.health.gate_serving.on.store(true, Ordering::Release);
+        git_side::tests::connected(&self.health.git_side);
     }
 }
 
@@ -191,7 +194,9 @@ async fn reflection_lists_health_and_returns_its_descriptor_when_enabled() {
             list.service
                 .iter()
                 .all(|service| !service.name.starts_with("kajiba.admin.")
-                    && !service.name.starts_with("kajiba.hook."))
+                    && !service.name.starts_with("kajiba.hook.")
+                    && !service.name.starts_with("kajiba.gate.")
+                    && !service.name.starts_with("kajiba.git."))
         );
         let response = grpc(
             &mut app,
@@ -455,9 +460,27 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
         )
         .unwrap();
         let admin = local::tests::admin(&state.health.state_dir.join("db"), "").await;
-        serve_listeners(listener, app, metrics, (local, admin), Arc::default())
-            .await
-            .unwrap();
+        let gate_local = gate::bind(
+            &state.health.state_dir.join("git.sock"),
+            state.health.gate_serving.clone(),
+            kajiba_core::local::effective_uid(),
+            fs::metadata(&state.health.state_dir).unwrap().gid(),
+        )
+        .unwrap();
+        let gate = gate::Gate {
+            writer: admin.writer.clone(),
+            generation: Default::default(),
+        };
+        serve_listeners(
+            listener,
+            app,
+            metrics,
+            (local, admin),
+            (gate_local, gate),
+            Arc::default(),
+        )
+        .await
+        .unwrap();
         return;
     }
     tokio::task::spawn_blocking(|| {
@@ -605,6 +628,10 @@ async fn requests_update_metrics_after_body_completion_including_grpc_trailers()
         "/kajiba.hook.v1.HookService/PreReceive",
         "/kajiba.hook.v1.HookService/PostReceive",
         "/kajiba.hook.v1.HookService/GetAuthKey",
+        "/kajiba.gate.v1.GateService/Hello",
+        "/kajiba.gate.v1.GateService/GetAuthKey",
+        "/kajiba.git.v1.GitService/Hello",
+        "/kajiba.git.v1.GitService/CreateRepository",
         "/kajiba.admin.v1.AdminService/Enroll",
     ] {
         let response = grpc(&mut app, path, CheckRequest {}).await;

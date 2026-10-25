@@ -1,0 +1,89 @@
+syntax = "proto3";
+
+package kajiba.gate.v1;
+
+import "kajiba/git/v1/git.proto";
+
+// Repository writer → server, on /run/kajiba/git.sock only (0053).
+service GateService {
+  rpc Hello(HelloRequest) returns (HelloResponse);
+  rpc GetAuthKey(GetAuthKeyRequest) returns (GetAuthKeyResponse);
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+  rpc PreReceive(PreReceiveRequest) returns (PreReceiveResponse);
+  rpc PostReceive(PostReceiveRequest) returns (PostReceiveResponse);
+  rpc SessionExited(SessionExitedRequest) returns (SessionExitedResponse);
+}
+message HelloRequest {
+  string version = 1;
+  string generation = 2;
+}
+message HelloResponse {
+  string version = 1;
+}
+message GetAuthKeyRequest {
+  string fingerprint = 1;
+}
+message GetAuthKeyResponse {
+  string user_public_id = 1;
+  // Canonical OpenSSH key, without configured options or comments.
+  string public_key = 2;
+}
+message OpenSessionRequest {
+  string user_public_id = 1;
+  kajiba.git.v1.SessionKind kind = 2;
+  oneof repository {
+    string repo_address = 3;
+    string repo_public_id = 4;
+  }
+  string correlation_id = 5;
+}
+message OpenSessionResponse {
+  kajiba.git.v1.Session session = 1;
+  string repo_public_id = 2;
+  string default_branch = 3;
+  Role role = 4;
+  bool is_admin = 5;
+  string allowed_signers = 6;
+}
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_READ = 1;
+  ROLE_WRITE = 2;
+  ROLE_ADMIN = 3;
+}
+enum SignatureVerdict {
+  SIGNATURE_VERDICT_UNSPECIFIED = 0;
+  SIGNATURE_VERDICT_VERIFIED = 1;
+  SIGNATURE_VERDICT_REFUSED = 2;
+}
+message RefUpdate {
+  string ref_name = 1;
+  string old_id = 2;
+  string new_id = 3;
+  // Presence distinguishes a missing fact from a non-fast-forward update.
+  optional bool fast_forward = 4;
+  SignatureVerdict signature = 5;
+  // Ref/commit/tag and reason when verification failed.
+  string signature_reason = 6;
+}
+message PreReceiveRequest {
+  string session_id = 1;
+  repeated RefUpdate updates = 2;
+}
+message PreReceiveResponse {
+  bool allowed = 1;
+  repeated Refusal refusals = 2;
+}
+message Refusal {
+  string ref_name = 1;
+  string reason = 2;
+}
+message PostReceiveRequest {
+  string session_id = 1;
+}
+message PostReceiveResponse {}
+message SessionExitedRequest {
+  string session_id = 1;
+  int32 exit_status = 2;
+}
+message SessionExitedResponse {}

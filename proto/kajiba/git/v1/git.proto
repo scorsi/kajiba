@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package kajiba.git.v1;
+
+// Server → repository writer, on /run/kajiba-git/local.sock only (0053).
+service GitService {
+  rpc Hello(HelloRequest) returns (HelloResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc CreateRepository(CreateRepositoryRequest) returns (CreateRepositoryResponse);
+  rpc SetHead(SetHeadRequest) returns (SetHeadResponse);
+  rpc QuarantineRepository(QuarantineRepositoryRequest) returns (QuarantineRepositoryResponse);
+  rpc ListRemoteRefs(ListRemoteRefsRequest) returns (ListRemoteRefsResponse);
+  rpc Fetch(FetchRequest) returns (FetchResponse);
+  rpc Spawn(SpawnRequest) returns (SpawnResponse);
+}
+
+message HelloRequest {
+  string version = 1;
+}
+message HelloResponse {
+  string version = 1;
+  string generation = 2;
+  repeated Session sessions = 3;
+}
+
+enum SessionKind {
+  SESSION_KIND_UNSPECIFIED = 0;
+  SESSION_KIND_RECEIVE_PACK = 1;
+  SESSION_KIND_UPLOAD_PACK = 2;
+  SESSION_KIND_IMPORT = 3;
+  SESSION_KIND_MAINTENANCE = 4;
+}
+
+message Session {
+  string session_id = 1;
+  SessionKind kind = 2;
+  string repo_public_id = 3;
+  // Empty for the system principal (import and maintenance).
+  string user_public_id = 4;
+  string correlation_id = 5;
+  string generation = 6;
+}
+
+// An exact snapshot of live children, not a paginated database list (0053).
+message ListSessionsRequest {}
+message ListSessionsResponse {
+  string generation = 1;
+  repeated Session sessions = 2;
+}
+message CreateRepositoryRequest {
+  string repo_public_id = 1;
+  string default_branch = 2;
+}
+message CreateRepositoryResponse {}
+message SetHeadRequest {
+  string repo_public_id = 1;
+  string branch = 2;
+}
+message SetHeadResponse {}
+message QuarantineRepositoryRequest {
+  string repo_public_id = 1;
+}
+message QuarantineRepositoryResponse {
+  string destination = 1;
+}
+message RemoteRef {
+  string ref_name = 1;
+  string object_id = 2;
+}
+message ListRemoteRefsRequest {
+  string source = 1;
+  // Ephemeral secret, never logged or written to disk.
+  string credentials = 2;
+}
+message ListRemoteRefsResponse {
+  repeated RemoteRef refs = 1;
+}
+message FetchRequest {
+  Session session = 1;
+  string repo_public_id = 2;
+  string source = 3;
+  string credentials = 4;
+  repeated RemoteRef refs = 5;
+}
+message FetchResponse {}
+message SpawnRequest {
+  Session session = 1;
+  string repo_public_id = 2;
+  // The admitted service, never an arbitrary command.
+  SessionKind service = 3;
+}
+message SpawnResponse {
+  int32 exit_status = 1;
+}

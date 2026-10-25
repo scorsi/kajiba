@@ -28,6 +28,7 @@ async fn readiness_arrives_only_after_listening_and_shutdown_removes_socket() {
         Duration::from_secs(3),
         run(
             &state,
+            &temp.0.join("git.sock"),
             &socket,
             vec![kajiba_core::local::effective_uid()],
             Some(notify_path.as_os_str()),
@@ -55,6 +56,7 @@ async fn failed_startup_never_notifies_ready() {
     assert!(
         run(
             &state,
+            &temp.0.join("git.sock"),
             &socket,
             peers.clone(),
             Some(notify_path.as_os_str()),
@@ -68,6 +70,7 @@ async fn failed_startup_never_notifies_ready() {
     assert!(
         run(
             &state,
+            &temp.0.join("git.sock"),
             &socket,
             peers.clone(),
             Some(notify_path.as_os_str()),
@@ -82,6 +85,7 @@ async fn failed_startup_never_notifies_ready() {
     assert!(
         run(
             &state,
+            &temp.0.join("git.sock"),
             &socket,
             peers,
             Some(notify_path.as_os_str()),
@@ -109,6 +113,7 @@ async fn notification_failure_cleans_up_and_missing_notify_socket_is_optional() 
     assert!(
         run(
             &state,
+            &temp.0.join("git.sock"),
             &socket,
             peers.clone(),
             Some(missing.as_os_str()),
@@ -119,9 +124,16 @@ async fn notification_failure_cleans_up_and_missing_notify_socket_is_optional() 
         .contains("notify readiness")
     );
     assert!(!socket.exists());
-    run(&state, &socket, peers, None, std::future::ready(()))
-        .await
-        .unwrap();
+    run(
+        &state,
+        &temp.0.join("git.sock"),
+        &socket,
+        peers,
+        None,
+        std::future::ready(()),
+    )
+    .await
+    .unwrap();
     assert!(!socket.exists());
 }
 
@@ -150,6 +162,7 @@ async fn daemon_emits_shared_json_logs_on_stderr() {
         let temp = TempDir::new();
         run(
             &temp.0.join("state"),
+            &temp.0.join("git.sock"),
             &temp.0.join("local.sock"),
             vec![kajiba_core::local::effective_uid()],
             None,
@@ -170,7 +183,12 @@ async fn daemon_emits_shared_json_logs_on_stderr() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
-    let line: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    let line = String::from_utf8(output.stderr)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|line| line["event"] == "ready")
+        .unwrap();
     assert_eq!(line["event"], "ready");
     assert_eq!(line["level"], "info");
     assert!(line["ts"].is_string());

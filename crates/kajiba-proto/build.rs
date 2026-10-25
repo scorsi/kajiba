@@ -19,6 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[
             "../../proto/kajiba/admin/v1/admin.proto",
             "../../proto/kajiba/hook/v1/hook.proto",
+            "../../proto/kajiba/git/v1/git.proto",
+            "../../proto/kajiba/gate/v1/gate.proto",
         ],
         &["../../proto"],
     )?;

@@ -22,6 +22,8 @@ pub struct ServerConfig {
     pub state_dir: PathBuf,
     pub http: HttpConfig,
     #[serde(default)]
+    pub git: GitSideConfig,
+    #[serde(default)]
     pub ssh: SshConfig,
     #[serde(default)]
     pub log: LogConfig,
@@ -41,6 +43,22 @@ pub struct ServerConfig {
     pub ci: CiConfig,
     #[serde(default)]
     pub dump: DumpConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GitSideConfig {
+    pub state_dir: PathBuf,
+    pub socket: PathBuf,
+}
+
+impl Default for GitSideConfig {
+    fn default() -> Self {
+        Self {
+            state_dir: git_state_dir(),
+            socket: "/run/kajiba-git/local.sock".into(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -664,6 +682,14 @@ impl ServerConfig {
         validate_metrics(&config.metrics)?;
         validate_path(&config.state_dir, "state_dir")?;
         validate_path(&config.dump.dir, "dump.dir")?;
+        for (path, field) in [
+            (&config.git.state_dir, "git.state_dir"),
+            (&config.git.socket, "git.socket"),
+        ] {
+            if !path.is_absolute() {
+                return Err(format!("{field}: expected an absolute path"));
+            }
+        }
         normalize(&mut config.users, "users")?;
         normalize(&mut config.runners, "runners")?;
         normalize(&mut config.mirror.credentials, "mirror.credentials")?;

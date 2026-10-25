@@ -1987,6 +1987,7 @@ dependencies = [
  "tokio",
  "toml",
  "tonic",
+ "tonic-types",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2002,6 +2003,7 @@ dependencies = [
  "clap",
  "kajiba-core",
  "kajiba-gitstore",
+ "kajiba-proto",
  "serde_json",
  "tokio",
  "tonic",

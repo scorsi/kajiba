@@ -27,3 +27,15 @@ pub mod hook {
         tonic::include_proto!("kajiba.hook.v1");
     }
 }
+
+pub mod git {
+    pub mod v1 {
+        tonic::include_proto!("kajiba.git.v1");
+    }
+}
+
+pub mod gate {
+    pub mod v1 {
+        tonic::include_proto!("kajiba.gate.v1");
+    }
+}

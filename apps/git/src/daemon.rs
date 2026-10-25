@@ -20,6 +20,7 @@ pub async fn serve(config: GitConfig) -> Result<(), String> {
     let notify = std::env::var_os("NOTIFY_SOCKET");
     run(
         &config.state_dir,
+        &config.server_socket,
         Path::new(SOCKET_PATH),
         peers,
         notify.as_deref(),
@@ -36,6 +37,7 @@ pub async fn serve(config: GitConfig) -> Result<(), String> {
 
 async fn run(
     state_dir: &Path,
+    server_socket: &Path,
     socket: &Path,
     peers: Vec<u32>,
     notify: Option<&OsStr>,
@@ -44,13 +46,18 @@ async fn run(
     let _lock = crate::state::prepare(state_dir)?;
     let local = Local::bind(socket, Default::default(), 0o660, peers)
         .map_err(|err| format!("{}: {err}", socket.display()))?;
+    let generation = kajiba_core::new_id().map_err(|err| err.to_string())?;
     notify_ready(notify).map_err(|err| format!("notify readiness: {err}"))?;
     tracing::info!(event = "ready");
-    // GitService and HookService are wired in J3 tasks 10 and 16.
-    local
-        .serve(Routes::default(), shutdown)
-        .await
-        .map_err(|err| err.to_string())
+    let routes = Routes::new(
+        kajiba_proto::git::v1::git_service_server::GitServiceServer::new(crate::service::Git {
+            generation: generation.clone(),
+        }),
+    );
+    tokio::select! {
+        result = local.serve(routes, shutdown) => result.map_err(|err| err.to_string()),
+        () = crate::service::connect_server(server_socket, &generation) => unreachable!("connection loop runs until shutdown"),
+    }
 }
 
 fn notify_ready(path: Option<&OsStr>) -> io::Result<()> {

@@ -191,32 +191,17 @@ impl AdminService for Admin {
     }
 }
 
-/// The SSH integration and the hooks share the admin service's state (ADR 0003).
+/// Compatibility for the server helpers until their move in J3 task 16.
 #[tonic::async_trait]
 impl HookService for Admin {
     async fn get_auth_key(
         &self,
         request: Request<GetAuthKeyRequest>,
     ) -> Result<Response<GetAuthKeyResponse>, Status> {
-        let found: Option<(String, String)> = sqlx::query_as(
-            "SELECT user.public_id, ssh_key.public_key FROM ssh_key
-             JOIN user ON user.id = ssh_key.user_id
-             WHERE ssh_key.fingerprint = ? AND ssh_key.usage = 'auth' AND user.disabled_at IS NULL",
-        )
-        .bind(request.into_inner().fingerprint)
-        .fetch_optional(&mut *self.writer.lock().await)
-        .await
-        .map_err(|err| Status::internal(format!("auth key lookup: {err}")))?;
-        let (user_public_id, public_key) = found.ok_or_else(|| {
-            refused(
-                tonic::Code::NotFound,
-                "KEY_NOT_FOUND",
-                "no active auth key".into(),
-            )
-        })?;
+        let found = super::gate::auth_key(&self.writer, request.into_inner().fingerprint).await?;
         Ok(Response::new(GetAuthKeyResponse {
-            user_public_id,
-            public_key,
+            user_public_id: found.user_public_id,
+            public_key: found.public_key,
         }))
     }
 
@@ -224,13 +209,17 @@ impl HookService for Admin {
         &self,
         _: Request<PreReceiveRequest>,
     ) -> Result<Response<PreReceiveResponse>, Status> {
-        // Refused until the ref, signature and admission checks are wired (J3 task 12).
+        let response = super::gate::pre_receive();
         Ok(Response::new(PreReceiveResponse {
-            allowed: false,
-            refusals: vec![Refusal {
-                ref_name: String::new(),
-                reason: "pushes are not accepted yet".into(),
-            }],
+            allowed: response.allowed,
+            refusals: response
+                .refusals
+                .into_iter()
+                .map(|refusal| Refusal {
+                    ref_name: refusal.ref_name,
+                    reason: refusal.reason,
+                })
+                .collect(),
         }))
     }
 
@@ -238,7 +227,7 @@ impl HookService for Admin {
         &self,
         _: Request<PostReceiveRequest>,
     ) -> Result<Response<PostReceiveResponse>, Status> {
-        // No push is admitted yet, so nothing waits for reconciliation (J3 task 13).
+        // No push is admitted yet, so nothing waits for reconciliation (J3 task 22).
         Ok(Response::new(PostReceiveResponse {}))
     }
 }

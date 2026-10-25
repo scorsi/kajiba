@@ -33,6 +33,8 @@ pub struct Health {
     state_dir: PathBuf,
     local_serving: Arc<local::Serving>,
     public_reads: Arc<Semaphore>,
+    gate_serving: Arc<local::Serving>,
+    git_side: Arc<git_side::Link>,
 }
 
 impl Health {
@@ -42,6 +44,8 @@ impl Health {
             state_dir,
             local_serving: Arc::default(),
             public_reads: Arc::new(Semaphore::new(PUBLIC_READS)),
+            gate_serving: Arc::default(),
+            git_side: Arc::default(),
         }
     }
 
@@ -58,6 +62,8 @@ impl Health {
             return false;
         };
         self.local_serving.ready()
+            && self.gate_serving.ready()
+            && self.git_side.ready()
             && ["repos", "db", "ci/logs", "ci/artifacts", "tmp"]
                 .iter()
                 .all(|name| self.state_dir.join(name).is_dir())
@@ -246,6 +252,7 @@ async fn serve_tcp(
 pub async fn serve(
     config: &HttpConfig,
     metrics_config: &MetricsConfig,
+    git_config: &kajiba_core::config::GitSideConfig,
     health: Health,
     readers: SqlitePool,
     bus: Arc<EventBus>,
@@ -256,12 +263,26 @@ pub async fn serve(
         std::path::Path::new(local::SOCKET_PATH),
         health.local_serving.clone(),
     )?;
+    let gate_local = gate::bind(
+        std::path::Path::new(gate::SOCKET_PATH),
+        health.gate_serving.clone(),
+        kajiba_core::local::user_id(c"kajiba-git")?,
+        kajiba_core::local::group_id(c"kajiba-git")?,
+    )?;
+    let gate = gate::Gate {
+        writer: admin.writer.clone(),
+        generation: Default::default(),
+    };
+    let git_side = health.git_side.clone();
     let app = router(health, config.reflection, registry.clone()).map_err(std::io::Error::other)?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let metrics = metrics::bind(metrics_config.listen)
         .await?
         .map(|listener| (listener, metrics::router(registry.clone(), readers, bus)));
-    serve_listeners(listener, app, metrics, (local, admin), registry).await
+    tokio::select! {
+        result = serve_listeners(listener, app, metrics, (local, admin), (gate_local, gate), registry) => result,
+        () = git_side.run(&git_config.socket) => unreachable!("connection loop runs until shutdown"),
+    }
 }
 
 async fn serve_listeners(
@@ -269,6 +290,7 @@ async fn serve_listeners(
     app: Router,
     metrics: Option<(tokio::net::TcpListener, Router)>,
     (local, admin): (local::Local, local::Admin),
+    (gate_local, gate): (local::Local, gate::Gate),
     registry: Arc<Registry>,
 ) -> std::io::Result<()> {
     let shutdown = shutdown_signal()?;
@@ -280,9 +302,13 @@ async fn serve_listeners(
     tracing::info!(event = "ready");
     let http_stopped = stopped.clone();
     let metrics_stopped = stopped.clone();
+    let mut gate_stopped = stopped.clone();
     let mut local_stopped = stopped;
     let servers = async move {
         tokio::try_join!(
+            gate::serve(gate_local, gate, registry.clone(), async move {
+                let _ = gate_stopped.changed().await;
+            }),
             local::serve(local, admin, registry, async move {
                 let _ = local_stopped.changed().await;
             }),
@@ -321,7 +347,9 @@ fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
 
 pub mod correlation;
 pub mod cursor;
+mod gate;
 pub mod git_http;
+mod git_side;
 pub mod local;
 pub mod raw;
 pub mod repos;

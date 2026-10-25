@@ -245,6 +245,70 @@ pub fn user_id(name: &std::ffi::CStr) -> io::Result<u32> {
         return Ok(unsafe { entry.assume_init().pw_uid });
     }
 }
+/// Structured local RPC errors, including correlation outside the public middleware.
+pub fn rpc_error(code: tonic::Code, reason: &str, message: impl Into<String>) -> tonic::Status {
+    let metadata: std::collections::HashMap<String, String> = crate::new_id()
+        .map(|id| [("request_id".into(), id)].into_iter().collect())
+        .unwrap_or_default();
+    let mut details = tonic_types::ErrorDetails::new();
+    details.set_error_info(reason, "kajiba", metadata);
+    <tonic::Status as tonic_types::StatusExt>::with_error_details(code, message, details)
+}
+
+pub fn version_error(local: &str, remote: &str) -> Option<tonic::Status> {
+    (local != remote).then(|| {
+        use tonic_types::StatusExt;
+        let err = rpc_error(
+            tonic::Code::FailedPrecondition,
+            "VERSION_INCOMPATIBLE",
+            format!("incompatible versions: local {local}, remote {remote}"),
+        );
+        let mut details = err.get_error_details();
+        let mut metadata = details.error_info().unwrap().metadata.clone();
+        metadata.insert("local".into(), local.into());
+        metadata.insert("remote".into(), remote.into());
+        details.set_error_info("VERSION_INCOMPATIBLE", "kajiba", metadata);
+        tonic::Status::with_error_details(err.code(), err.message(), details)
+    })
+}
+
+pub fn group_id(name: &std::ffi::CStr) -> io::Result<u32> {
+    let mut buffer = vec![0_u8; 16 * 1024];
+    loop {
+        let mut entry = std::mem::MaybeUninit::<libc::group>::uninit();
+        let mut found = std::ptr::null_mut();
+        // SAFETY: name is NUL-terminated and all output storage is writable.
+        let code = unsafe {
+            libc::getgrnam_r(
+                name.as_ptr(),
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut found,
+            )
+        };
+        if code == libc::ERANGE {
+            let size = buffer
+                .len()
+                .checked_mul(2)
+                .ok_or_else(|| io::Error::other("group lookup buffer overflow"))?;
+            buffer.resize(size, 0);
+            continue;
+        }
+        if code != 0 {
+            return Err(io::Error::from_raw_os_error(code));
+        }
+        if found.is_null() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("system group {} is missing", name.to_string_lossy()),
+            ));
+        }
+        // SAFETY: getgrnam_r succeeded and populated entry.
+        return Ok(unsafe { entry.assume_init().gr_gid });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +362,11 @@ mod tests {
     #[test]
     fn resolves_system_uid_and_refuses_missing_identity() {
         assert_eq!(user_id(c"root").unwrap(), 0);
+        assert_eq!(
+            group_id(c"root").or_else(|_| group_id(c"wheel")).unwrap(),
+            0
+        );
+        assert!(group_id(c"kajiba-nonexistent-test-group").is_err());
         assert_eq!(
             user_id(c"kajiba-nonexistent-test-user").unwrap_err().kind(),
             io::ErrorKind::NotFound

@@ -9,29 +9,14 @@ use axum::{
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use prost::Message;
 use std::{
-    io::Read,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::Instant,
 };
 use tracing::{Instrument, Span};
 
-fn request_id() -> std::io::Result<String> {
-    let mut bytes = [0; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes[6..])?;
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(std::io::Error::other)?
-        .as_millis();
-    let value = (millis << 80) | u128::from_be_bytes(bytes);
-    Ok((0..26)
-        .rev()
-        .map(|shift| {
-            b"0123456789ABCDEFGHJKMNPQRSTVWXYZ"[((value >> (shift * 5)) & 31) as usize] as char
-        })
-        .collect())
-}
+use kajiba_core::new_id as request_id;
 
 /// The request id, for handlers that record it (a correlation id, 0022).
 #[derive(Clone)]

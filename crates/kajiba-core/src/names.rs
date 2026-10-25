@@ -158,6 +158,15 @@ pub fn validate_path(path: &str) -> Result<(), PathError> {
     Ok(())
 }
 
+/// Canonical uppercase ULID, shared by the SSH context and daemon generations.
+pub fn is_public_id(value: &str) -> bool {
+    value.len() == 26
+        && value.as_bytes()[0] <= b'7'
+        && value
+            .bytes()
+            .all(|byte| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&byte))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{NameError, PathError, RefError, validate_name, validate_path, validate_ref};

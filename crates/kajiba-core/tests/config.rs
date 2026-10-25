@@ -63,6 +63,8 @@ fn adr_examples_load_verbatim() {
 fn defaults_match_adr_tables() {
     let server = ServerConfig::parse(MINIMAL).unwrap();
     assert_eq!(server.state_dir, Path::new("/var/lib/kajiba"));
+    assert_eq!(server.git.state_dir, Path::new("/var/lib/kajiba-git"));
+    assert_eq!(server.git.socket, Path::new("/run/kajiba-git/local.sock"));
     assert_eq!(server.http.listen.to_string(), "127.0.0.1:8080");
     assert!(!server.http.reflection);
     assert_eq!(server.ssh.host.as_deref(), Some("forge.example.org"));
@@ -103,6 +105,7 @@ fn unknown_fields_are_rejected_at_every_table() {
         "",
         "http",
         "ssh",
+        "git",
         "log",
         "metrics",
         "auth",
@@ -645,7 +648,10 @@ fn log_levels_validate_target_directives_for_both_components() {
             ))
             .is_ok()
         );
-        assert!(RunnerConfig::parse(&format!("name='build-1'\nurl='https://example.org'\ntoken_file='/run/secrets/token'\n{section}")).is_ok());
+        assert!(RunnerConfig::parse(&format!(
+            "name='build-1'\nurl='https://example.org'\ntoken_file='/run/secrets/token'\n{section}"
+        ))
+        .is_ok());
     }
     for input in [
         "[http]\npublic_url='https://example.org'\n[log]\nlevel='kajiba=verbose'",
@@ -905,5 +911,20 @@ fn each_repository_refusal_names_its_field() {
     ] {
         assert!(full.contains(from), "{from}");
         server_error(&full.replacen(from, to, 1), field);
+    }
+}
+
+#[test]
+fn git_side_paths_are_absolute_and_configurable() {
+    let config = ServerConfig::parse(&format!(
+        "{MINIMAL}\n[git]\nstate_dir='/srv/git'\nsocket='/run/test/local.sock'\n"
+    ))
+    .unwrap();
+    assert_eq!(config.git.state_dir, Path::new("/srv/git"));
+    assert_eq!(config.git.socket, Path::new("/run/test/local.sock"));
+    for field in ["state_dir", "socket"] {
+        let error =
+            ServerConfig::parse(&format!("{MINIMAL}\n[git]\n{field}='relative'\n")).unwrap_err();
+        assert!(error.contains(&format!("git.{field}")), "{error}");
     }
 }

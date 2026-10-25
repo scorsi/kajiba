@@ -114,12 +114,7 @@ async fn call(
 /// A canonical public id (ULID) set by serve-ssh.
 fn public_id(env: &dyn Fn(&str) -> Option<String>, var: &str) -> Result<String, String> {
     let value = env(var).ok_or_else(|| format!("{var} is not set (hooks run under serve-ssh)"))?;
-    let canonical = value.len() == 26
-        && value.as_bytes()[0] <= b'7'
-        && value
-            .bytes()
-            .all(|byte| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&byte));
-    if canonical {
+    if kajiba_core::names::is_public_id(&value) {
         Ok(value)
     } else {
         Err(format!("{var} is not a public id"))

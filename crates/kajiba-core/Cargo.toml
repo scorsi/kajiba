@@ -18,3 +18,4 @@ tracing-subscriber.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 hyper-util.workspace = true
+tonic-types.workspace = true
