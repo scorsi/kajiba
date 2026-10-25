@@ -169,7 +169,8 @@ pkgs.testers.runNixOSTest {
         for stage in stages:
             forge.succeed(f"touch {control}/hold-{stage}")
         before = events()
-        forge.succeed(f"({push_command(specs)}; echo $? > /root/push.status) > /root/push.out 2>&1 < /dev/null &")
+        # The test driver's errexit must not skip recording an expected push failure.
+        forge.succeed(f"(status=0; {push_command(specs)} || status=$?; echo $status > /root/push.status) > /root/push.out 2>&1 < /dev/null &")
         forge.wait_for_file(f"{control}/entered-{stages[0]}")
         row, = pending()
         assert row["git_generation"] == generation()
@@ -189,7 +190,7 @@ pkgs.testers.runNixOSTest {
         forge.succeed(f"touch {control}/release-{stage}")
 
     def finished(success=True):
-        forge.wait_until_succeeds("test -s /root/push.status")
+        forge.wait_until_succeeds("test -s /root/push.status", timeout=30)
         status = int(forge.succeed("cat /root/push.status"))
         out = forge.succeed("cat /root/push.out")
         assert status != 124 and (status == 0) == success, (status, out)

@@ -278,6 +278,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn helper_fails_promptly_when_daemon_disconnects_before_session_exit() {
+        let dir = crate::state::tests::TempDir::new();
+        let path = dir.0.join("ssh.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let user = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let daemon = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (fds, received_user, command) = receive(&mut stream).await.unwrap();
+            assert_eq!(received_user, user);
+            assert_eq!(command.service, Service::ReceivePack);
+            drop(stream);
+            // Keep the SSH descriptors open: the helper must detect hand-off EOF itself.
+            fds
+        };
+        let (status, _fds) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(run(&path, user, "git-receive-pack 'alice/demo'"), daemon)
+        })
+        .await
+        .expect("serve-ssh hung after the daemon disconnected");
+        assert_eq!(status, ExitCode::FAILURE);
+    }
+
+    #[tokio::test]
     async fn handoff_revalidates_user_service_and_address_before_admission() {
         use std::{fs::File, os::fd::AsRawFd};
         let user = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
