@@ -6,8 +6,10 @@ mirroring to GitHub, a web UI, and a CLI. One owner to start, built to grow
 into a small team without a rewrite; deployed through Nix only. See [`docs/adr/`](docs/adr/) for the
 design decisions and [`docs/milestones.md`](docs/milestones.md) for the plan.
 
-Status: **J1 in progress** — skeleton only, no forge feature works yet.
-The CLI is a Rust crate (ADR 0007).
+Status: **J3 in progress** — repository browsing, HTTP clones, admin import
+and SSH push paths are implemented; the server/git-side split is under review.
+Web authentication, the UI, CI and mirroring are planned. The CLI is a Rust
+crate (ADR 0007).
 
 ## Layout
 
@@ -15,8 +17,9 @@ The CLI is a Rust crate (ADR 0007).
   forge↔runner protocol.
 - `crates/` — shared Rust libraries (no binary): `kajiba-core`, `kajiba-gitstore`,
   `kajiba-proto`, `kajiba-exec`.
-- `apps/` — the four deliverables, one subfolder each:
+- `apps/` — the five deliverables, one subfolder each:
   - `server/` — `kajiba-server`, the Rust binary.
+  - `git/` — `kajiba-git`, the repository writer, daemon and SSH helpers.
   - `runner/` — `kajiba-runner`, the Rust binary.
   - `cli/` — `kajiba-cli`, the Rust CLI (binary `kajiba`).
   - `ui/` — SvelteKit SPA, `kajiba-ui`, embedded into `kajiba-server` at
@@ -32,7 +35,7 @@ The CLI is a Rust crate (ADR 0007).
 ```sh
 nix develop            # devShell: Rust, pnpm, buf, protoc, sqlx-cli, mold
 nix flake check        # unit + integration checks
-nix build .#kajiba-server .#kajiba-runner .#kajiba-cli .#kajiba-ui
+nix build .#kajiba-server .#kajiba-git .#kajiba-runner .#kajiba-cli .#kajiba-ui
 ```
 
 `nix flake check` is only complete on Linux (`aarch64-linux`); the NixOS

@@ -5,8 +5,7 @@ use kajiba_core::log;
 use kajiba_proto::hook::v1::{PostReceiveRequest, PreReceiveRequest, Quarantine, RefUpdate};
 use std::{io::Read, path::Path, process::ExitCode};
 
-// shortcut: 1 MiB of stdin is about 10k ref updates and stays under the hook service's
-// 4 MiB message limit; raise both together if a deployment pushes more refs at once.
+// ADR 0071: bound raw stdin before parsing or sending the hook RPC.
 const MAX_INPUT: u64 = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,7 +15,7 @@ pub enum Kind {
 }
 
 /// Runs one hook: exit 0 when the git daemon allows (or acknowledges) the push, 1 otherwise.
-/// Refusal reasons go to stderr as plain lines, which Git shows the pusher.
+/// Refusal reasons go to stderr as plain lines, which Git shows the pusher (ADR 0071).
 pub async fn run(
     socket: &Path,
     kind: Kind,
@@ -211,6 +210,42 @@ mod tests {
                 update("refs/heads/feature/x", A, B),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn input_limit_accepts_one_mib_and_refuses_one_byte_more_before_connecting() {
+        let limit = MAX_INPUT as usize;
+        assert_eq!(limit, 1_048_576);
+        let line = format!("{ZERO} {A} refs/heads/main\n");
+        let mut input = line.repeat(limit / line.len());
+        input.insert_str(input.len() - 1, &"x".repeat(limit - input.len()));
+        assert_eq!(input.len(), limit);
+        let mut oversized = input.clone();
+        oversized.insert(oversized.len() - 1, 'x');
+        assert_eq!(oversized.len(), limit + 1);
+        let env = |var: &str| match var {
+            "KAJIBA_USER" | "KAJIBA_REPO" | "KAJIBA_SESSION" => {
+                Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".into())
+            }
+            _ => None,
+        };
+        let temp = crate::state::tests::TempDir::new();
+        let missing = temp.0.join("missing.sock");
+        for kind in [Kind::PreReceive, Kind::PostReceive] {
+            // Valid input reaches the connection attempt; oversized input does not.
+            assert!(
+                call(&missing, kind, input.as_bytes(), &env)
+                    .await
+                    .unwrap_err()
+                    .contains("the git daemon is unavailable")
+            );
+            assert_eq!(
+                call(&missing, kind, oversized.as_bytes(), &env)
+                    .await
+                    .unwrap_err(),
+                "too many ref updates"
+            );
+        }
     }
 
     #[test]

@@ -90,7 +90,7 @@ pub struct HttpConfig {
 pub struct SshConfig {
     pub host: Option<String>,
     pub port: u16,
-    /// Local sshd readiness endpoint; absent disables the integration check.
+    /// Local loopback SSH banner probe; absent disables it (ADR 0072).
     pub probe: Option<SocketAddr>,
 }
 

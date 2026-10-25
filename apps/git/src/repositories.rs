@@ -432,11 +432,9 @@ impl Repositories {
                 "quarantine requires an idle repository without refs or objects",
             )
         };
-        if sessions
-            .running
-            .values()
-            .any(|(session, _)| session.repo_public_id.as_bytes() == bytes.strip_suffix(b".git").unwrap_or(&[]))
-            || !Gix.refs(&path).map_err(internal)?.is_empty()
+        if sessions.running.values().any(|(session, _)| {
+            session.repo_public_id.as_bytes() == bytes.strip_suffix(b".git").unwrap_or(&[])
+        }) || !Gix.refs(&path).map_err(internal)?.is_empty()
         {
             return Err(ineligible());
         }

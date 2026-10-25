@@ -190,6 +190,7 @@ impl git_service_server::GitService for Git {
         .map_err(|_| Status::internal("import supervisor failed"))??;
         Ok(Response::new(FetchResponse {}))
     }
+    // Reserved RPC; SSH children start through the raw descriptor handoff (ADR 0070).
     async fn spawn(&self, _: Request<SpawnRequest>) -> Result<Response<SpawnResponse>, Status> {
         Err(not_implemented())
     }

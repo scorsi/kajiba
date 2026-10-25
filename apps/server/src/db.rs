@@ -7,8 +7,6 @@ use std::{path::Path, time::Duration};
 
 pub mod credentials;
 pub mod enrollment;
-// Callers are the hook and SSH paths of later J3 tasks.
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod permissions;
 // Production handlers follow in later milestones.
 #[cfg_attr(not(test), allow(dead_code))]

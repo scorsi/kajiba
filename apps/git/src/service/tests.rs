@@ -6,6 +6,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use tonic::service::Routes;
+use tracing::instrument::WithSubscriber;
 
 #[tokio::test]
 async fn hello_requires_exact_version_and_returns_this_process_generation() {
@@ -50,6 +51,11 @@ async fn hello_requires_exact_version_and_returns_this_process_generation() {
         .into_inner();
     assert_eq!(sessions.generation, hello.generation);
     assert!(sessions.sessions.is_empty());
+    let error = git
+        .spawn(Request::new(SpawnRequest::default()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
     assert_eq!(
         git.fetch(Request::new(FetchRequest::default()))
             .await
@@ -136,13 +142,59 @@ impl gate::gate_service_server::GateService for Server {
     }
 }
 
+struct ConnectionEvents(Arc<std::sync::atomic::AtomicBool>);
+
+impl tracing::Subscriber for ConnectionEvents {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.is_event() && metadata.target() == module_path!().trim_end_matches("::tests")
+    }
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                if field.name() == "event" {
+                    match format!("{value:?}").as_str() {
+                        "\"server-connected\"" => self.0.store(true, Ordering::SeqCst),
+                        "\"server-unavailable\"" => self.0.store(false, Ordering::SeqCst),
+                        _ => {}
+                    }
+                }
+            },
+        );
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        unreachable!("only events are enabled")
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 #[tokio::test]
 async fn server_handshake_retries_version_refusal_and_server_restart() {
+    // Isolate tracing's callsite cache from monitors in tests without a subscriber.
+    const CHILD: &str = "KAJIBA_TEST_SERVER_HANDSHAKE";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "service::tests::server_handshake_retries_version_refusal_and_server_restart",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        return;
+    }
     let temp = TempDir::new();
     let path = temp.0.join("git.sock");
     let generation = kajiba_core::new_id().unwrap();
     let version = Arc::new(Mutex::new(format!("{}-other", env!("CARGO_PKG_VERSION"))));
     let calls = Arc::new(AtomicUsize::new(0));
+    let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let start = || {
         let local = kajiba_core::local::Local::bind(
             &path,
@@ -180,18 +232,16 @@ async fn server_handshake_retries_version_refusal_and_server_restart() {
             )
             .await
         }
+        .with_subscriber(ConnectionEvents(connected.clone()))
     });
     wait_for(|| calls.load(Ordering::SeqCst) >= 2).await;
     *version.lock().unwrap() = env!("CARGO_PKG_VERSION").into();
-    let before = calls.load(Ordering::SeqCst);
-    wait_for(|| calls.load(Ordering::SeqCst) > before).await;
+    wait_for(|| connected.load(Ordering::SeqCst)).await;
     stop.send(()).unwrap();
     server.await.unwrap().unwrap();
-    // Let the connected client observe a missing socket before restarting the server.
-    tokio::time::sleep(Duration::from_millis(1200)).await;
-    let before = calls.load(Ordering::SeqCst);
+    wait_for(|| !connected.load(Ordering::SeqCst)).await;
     let (stop, server) = start();
-    wait_for(|| calls.load(Ordering::SeqCst) > before).await;
+    wait_for(|| connected.load(Ordering::SeqCst)).await;
     monitor.abort();
     let _ = monitor.await;
     stop.send(()).unwrap();
