@@ -50,6 +50,7 @@ pub struct ServerConfig {
 pub struct GitSideConfig {
     pub state_dir: PathBuf,
     pub socket: PathBuf,
+    pub group_ids: Vec<u32>,
 }
 
 impl Default for GitSideConfig {
@@ -57,6 +58,7 @@ impl Default for GitSideConfig {
         Self {
             state_dir: git_state_dir(),
             socket: "/run/kajiba-git/local.sock".into(),
+            group_ids: Vec::new(),
         }
     }
 }
@@ -558,12 +560,18 @@ fn open_file(path: &Path, field: &str) -> Result<File, String> {
     Ok(file)
 }
 
-fn open_server_secret(path: &Path, field: &str) -> Result<File, String> {
+fn open_server_secret(path: &Path, field: &str, git_group_ids: &[u32]) -> Result<File, String> {
     let file = open_file(path, field)?;
     let metadata = file
         .metadata()
         .map_err(|err| format!("{field} ({}): {err}", path.display()))?;
     if metadata.permissions().mode() & 0o040 != 0 {
+        if git_group_ids.contains(&metadata.gid()) {
+            return Err(format!(
+                "{field} ({}): must not be readable by a git-side group",
+                path.display()
+            ));
+        }
         match crate::local::group_id(c"kajiba-git") {
             Ok(gid) if metadata.gid() == gid => {
                 return Err(format!(
@@ -583,10 +591,9 @@ fn open_server_secret(path: &Path, field: &str) -> Result<File, String> {
 /// Largest secret file read (a credential is a few hundred bytes).
 pub const MAX_SECRET_BYTES: u64 = 4096;
 
-/// Reads a secret file under the same rules as the configuration's secret files
-/// (`open_server_secret`), without its trailing newline.
+/// Reads an ad-hoc secret file with the fixed-group isolation check, without its trailing newline.
 pub fn read_secret(path: &Path, field: &str) -> Result<String, String> {
-    let file = open_server_secret(path, field)?;
+    let file = open_server_secret(path, field, &[])?;
     let mut secret = String::new();
     file.take(MAX_SECRET_BYTES + 1)
         .read_to_string(&mut secret)
@@ -826,12 +833,14 @@ impl ServerConfig {
             open_server_secret(
                 &credential.token_file,
                 &format!("runners.{name}.token_file"),
+                &self.git.group_ids,
             )?;
         }
         for (name, credential) in &self.mirror.credentials {
             open_server_secret(
                 &credential.token_file,
                 &format!("mirror.credentials.{name}.token_file"),
+                &self.git.group_ids,
             )?;
         }
         Ok(())

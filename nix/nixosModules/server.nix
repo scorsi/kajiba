@@ -54,7 +54,8 @@ let
   );
   gitGroupIds = lib.concatMap (
     name:
-    lib.optional ((config.users.groups.${name}.gid or null) != null) (
+    lib.optional (builtins.match "[0-9]+" name != null) name
+    ++ lib.optional ((config.users.groups.${name}.gid or null) != null) (
       toString config.users.groups.${name}.gid
     )
   ) gitGroups;
@@ -115,6 +116,7 @@ let
     git = {
       state_dir = if cfg.git.stateDir == "/var/lib/kajiba-git" then null else cfg.git.stateDir;
       socket = if cfg.git.socket == "/run/kajiba-git/local.sock" then null else cfg.git.socket;
+      group_ids = if cfg.git.groupIds == [ ] then null else cfg.git.groupIds;
     };
     http = {
       inherit (cfg.http) listen reflection;
@@ -294,6 +296,12 @@ in
       description = "State directory (0012 layout).";
     };
     git = {
+      groupIds = mkOption {
+        type = types.listOf types.ints.u32;
+        readOnly = true;
+        default = lib.unique (map lib.toInt gitGroupIds);
+        description = "Known git-side GIDs, derived from user and unit groups for runtime secret isolation (0074).";
+      };
       stateDir = mkOption {
         type = types.strMatching "/.+";
         default = gitCfg.stateDir;

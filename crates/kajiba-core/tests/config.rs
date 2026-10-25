@@ -553,6 +553,36 @@ fn secret_files_must_not_be_accessible_to_others_and_symlinks_are_followed() {
 }
 
 #[test]
+fn server_secrets_reject_known_git_side_gids_for_every_credential() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let dir = TempDir::new("server-secret-gids");
+    let secret = dir.private_file("secret");
+    std::fs::write(&secret, "DO-NOT-PRINT").unwrap();
+    let gid = std::fs::metadata(&secret).unwrap().gid();
+    for table in ["runners.build-1", "mirror.credentials.github"] {
+        for git_gid in [gid, gid.wrapping_add(1)] {
+            let config = ServerConfig::parse(&format!(
+                "{MINIMAL}\n[git]\ngroup_ids=[{git_gid}]\n[{table}]\ntoken_file='{}'",
+                secret.display()
+            ))
+            .unwrap();
+            for mode in [0o600, 0o640] {
+                std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
+                if git_gid == gid && mode == 0o640 {
+                    let error = config.check_files().unwrap_err();
+                    assert!(error.contains(table), "{error}");
+                    assert!(error.contains("readable by a git-side group"), "{error}");
+                    assert!(!error.contains("DO-NOT-PRINT"), "{error}");
+                } else {
+                    config.check_files().unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn server_secret_modes_are_checked_for_every_credential() {
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new("server-secret-modes");

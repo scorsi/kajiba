@@ -22,6 +22,8 @@ pkgs.testers.runNixOSTest {
       http.publicUrl = "https://forge.example.org";
       runners.build-1 = { inherit tokenFile; };
     };
+    users.groups.shared-secret.gid = 4242;
+    systemd.services.kajiba-git.serviceConfig.SupplementaryGroups = [ "4242" ];
     # The runner secret exists only at runtime, readable by the service user alone (0019).
     systemd.tmpfiles.settings."10-kajiba-test" = {
       "/run/secrets".d.mode = "0755";
@@ -80,19 +82,25 @@ pkgs.testers.runNixOSTest {
         status, lines = check(config, files=True)
         assert status == 0 and lines == [], f"config check --files {config}: exit {status}, output {lines}"
 
-    with subtest("server secrets reject git-group reads, group writes and world access"):
+    with subtest("server secrets reject fixed and numeric supplementary git-group reads"):
+        git_pid = machine.succeed("systemctl show -P MainPID kajiba-git.service").strip()
+        groups = machine.succeed(f"grep '^Groups:' /proc/{git_pid}/status").split()[1:]
+        assert "4242" in groups, groups
         machine.succeed(f"chgrp kajiba-server {token_file}", f"chmod 0640 {token_file}")
         machine.fail(f"runuser -u kajiba-git -- cat {token_file}")
         status, lines = check(config, files=True)
         assert status == 0 and lines == [], (status, lines)
         for group, mode, reason in [
             ("kajiba-git", "0640", "readable by group kajiba-git"),
+            ("shared-secret", "0640", "readable by a git-side group"),
             ("kajiba-server", "0660", "group-writable"),
             ("kajiba-server", "0601", "accessible by others"),
         ]:
             machine.succeed(f"chgrp {group} {token_file}", f"chmod {mode} {token_file}")
             if group == "kajiba-git":
                 machine.succeed(f"runuser -u kajiba-git -- cat {token_file} >/dev/null")
+            if group == "shared-secret":
+                machine.succeed(f"systemd-run --wait --pipe --uid=kajiba-git --property=SupplementaryGroups=4242 cat {token_file} >/dev/null")
             status, lines = check(config, files=True)
             assert status == 1 and len(lines) == 1, (status, lines)
             assert lines[0]["event"] == "config-invalid" and reason in lines[0]["err"], lines

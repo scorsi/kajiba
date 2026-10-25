@@ -276,6 +276,27 @@ in
           group = "shared-secret";
         };
       });
+    assert lib.all
+      (
+        group:
+        !(assertionsPass {
+          users.groups.shared-secret.gid = 4242;
+          systemd.services.kajiba-git.serviceConfig.SupplementaryGroups = [ group ];
+          systemd.tmpfiles.settings."10-kajiba-secret"."/run/secrets/kajiba-runner-build-1".f = {
+            mode = "0640";
+            group = "shared-secret";
+          };
+        })
+      )
+      [
+        "shared-secret"
+        "4242"
+      ];
+    assert
+      (evaluate false {
+        users.groups.shared-secret.gid = 4242;
+        systemd.services.kajiba-git.serviceConfig.SupplementaryGroups = [ "4242" ];
+      }).config.services.kajiba-server.git.groupIds == [ 4242 ];
     assert
       !(assertionsPass {
         services.kajiba-server.runners.build-1.tokenFile = lib.mkForce "/etc/kajiba-secret";
