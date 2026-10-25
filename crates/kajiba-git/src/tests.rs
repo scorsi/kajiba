@@ -699,10 +699,8 @@ fn listing_limits_stop_trees_diffs_and_pages() {
     assert_eq!(Gix.diff(&f.bare, None, &f.first, 4, 29).unwrap().len(), 4);
     assert_eq!(Gix.diff(&f.bare, None, &f.first, 3, 29).unwrap_err(), diff);
     assert_eq!(Gix.diff(&f.bare, None, &f.first, 4, 28).unwrap_err(), diff);
-    // A page ends after the commit that takes its messages past the budget.
-    let newest = Gix.log(&f.bare, &f.third, 0, 1, usize::MAX).unwrap()[0]
-        .message
-        .len();
+    // A page ends after the commit that takes its page bytes past the budget.
+    let newest = Gix.log(&f.bare, &f.third, 0, 1, usize::MAX).unwrap()[0].page_bytes();
     assert_eq!(Gix.log(&f.bare, &f.third, 0, 10, 0).unwrap().len(), 1);
     assert_eq!(
         Gix.log(&f.bare, &f.third, 0, 10, newest - 1).unwrap().len(),
@@ -797,4 +795,60 @@ fn log_follows_merges_in_commit_time_order_and_pages_without_gaps() {
         .map(|c| c.id)
         .collect();
     assert_eq!(paged, expected);
+}
+
+/// Writes a commit object directly, so its author name has no command-line bound.
+fn raw_commit(bare: &Path, tree: &str, parents: &[&str], author: &str, time: u64) -> String {
+    let mut content = format!("tree {tree}\n");
+    for parent in parents {
+        content += &format!("parent {parent}\n");
+    }
+    content += &format!(
+        "author {author} <alice@example.org> {time} +0000\ncommitter Alice <alice@example.org> {time} +0000\n\nm\n"
+    );
+    let path = bare.join("raw-commit");
+    std::fs::write(&path, content).unwrap();
+    git(
+        bare,
+        &["hash-object", "-t", "commit", "-w", path.to_str().unwrap()],
+        "0 +0000",
+    )
+}
+
+#[test]
+fn page_budget_counts_author_fields_and_parents() {
+    let f = fixture("budget");
+    let tree = git(
+        &f.bare,
+        &["rev-parse", &format!("{}^{{tree}}", f.first)],
+        "0 +0000",
+    );
+    let octopus = raw_commit(
+        &f.bare,
+        &tree,
+        &[&f.third, &f.second, &f.first],
+        "Alice",
+        1_700_000_300,
+    );
+    let wide = raw_commit(
+        &f.bare,
+        &tree,
+        &[&f.first],
+        &"A".repeat(5000),
+        1_700_000_400,
+    );
+    let one = |tip: &str| Gix.log(&f.bare, tip, 0, 1, usize::MAX).unwrap().remove(0);
+    let (octopus_bytes, wide_bytes) = (one(&octopus).page_bytes(), one(&wide).page_bytes());
+    // Three parents and the 5000-byte name count, with messages of two bytes.
+    assert_eq!(
+        octopus_bytes,
+        2 + "Alice".len() + "alice@example.org".len() + 3 * 40
+    );
+    assert_eq!(wide_bytes, 2 + 5000 + "alice@example.org".len() + 40);
+    for (tip, bytes) in [(&octopus, octopus_bytes), (&wide, wide_bytes)] {
+        // Exact boundary: the page ends after the commit that goes past the budget.
+        assert_eq!(Gix.log(&f.bare, tip, 0, 10, bytes - 1).unwrap().len(), 1);
+        assert_eq!(Gix.log(&f.bare, tip, 0, 10, bytes).unwrap().len(), 2);
+    }
+    assert_eq!(Gix.log(&f.bare, &wide, 0, 10, 4000).unwrap().len(), 1);
 }

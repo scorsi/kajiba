@@ -90,6 +90,17 @@ pub struct Commit {
     pub message: String,
 }
 
+impl Commit {
+    /// What a history page keeps of this commit, counted toward its byte budget
+    /// (ADR 0051): message, author name, author email and parent ids.
+    pub fn page_bytes(&self) -> usize {
+        self.message.len()
+            + self.author_name.len()
+            + self.author_email.len()
+            + self.parents.iter().map(String::len).sum::<usize>()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeKind {
     Added,
@@ -127,7 +138,7 @@ pub trait GitStore {
     fn blob(&self, repo: &Path, commit: &str, path: &str, limit: u64) -> Result<Vec<u8>>;
     /// Up to `limit` commits reachable from `commit`, newest first, after passing over
     /// the first `skip` without building them; ends early after the commit whose
-    /// message takes the page's message bytes past `max_bytes`.
+    /// `page_bytes` take the page past `max_bytes`.
     fn log(
         &self,
         repo: &Path,
@@ -560,16 +571,16 @@ impl GitStore for Gix {
                 skipped += 1;
             } else {
                 let author = object.author()?;
-                let message = object.message_raw_sloppy().to_string();
-                bytes += message.len();
-                commits.push(Commit {
+                let commit = Commit {
                     id: id.to_string(),
                     parents: parents.iter().map(|id| id.to_string()).collect(),
                     author_name: author.name.to_string(),
                     author_email: author.email.to_string(),
                     time: object.time()?.seconds,
-                    message,
-                });
+                    message: object.message_raw_sloppy().to_string(),
+                };
+                bytes += commit.page_bytes();
+                commits.push(commit);
             }
             if commits.len() >= limit || bytes > max_bytes {
                 break;

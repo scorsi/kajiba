@@ -848,3 +848,41 @@ async fn commit_pages_end_at_their_byte_budget_and_oversized_commits_are_refused
         );
     }
 }
+
+#[tokio::test]
+async fn commit_pages_count_author_fields_and_end_with_an_empty_page() {
+    let fixture = Fixture::new(DEMO).await;
+    fixture
+        .fill("alice/demo", &[("flake.nix", "{ }\n")], &[])
+        .await;
+    let bare = fixture.bare("alice/demo").await;
+    let tree_id = git(&bare, &["rev-parse", "main^{tree}"]).trim().to_owned();
+    // Two commits with tiny messages and a 600 KiB author name, written directly
+    // (no command-line bound): the second takes the page past its budget.
+    let raw_commit = |parent: Option<&str>| {
+        let parent = parent.map(|p| format!("parent {p}\n")).unwrap_or_default();
+        let author = "A".repeat(600 << 10);
+        let content = format!(
+            "tree {tree_id}\n{parent}author {author} <a@example.org> 1 +0000\ncommitter a <a@example.org> 1 +0000\n\nm\n"
+        );
+        let path = bare.join("raw-commit");
+        std::fs::write(&path, content).unwrap();
+        git(
+            &bare,
+            &["hash-object", "-t", "commit", "-w", path.to_str().unwrap()],
+        )
+        .trim()
+        .to_owned()
+    };
+    let root = raw_commit(None);
+    let child = raw_commit(Some(&root));
+    git(&bare, &["update-ref", "refs/heads/authors", &child]);
+    let repos = &fixture.repos;
+    let page = commits(repos, "authors", 3, String::new()).await.unwrap();
+    let ids: Vec<&str> = page.commits.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, [child.as_str(), root.as_str()]);
+    assert!(!page.next_page_token.is_empty());
+    // Nothing skipped or repeated: the continuation is the end of history.
+    let rest = commits(repos, "", 3, page.next_page_token).await.unwrap();
+    assert!(rest.commits.is_empty() && rest.next_page_token.is_empty());
+}

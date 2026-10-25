@@ -475,7 +475,7 @@ impl RepoService for Repos {
                 .map_err(git_error("REVISION_NOT_FOUND"))?;
             // A page cut short by its bytes may have more behind it; the next page is
             // then empty at worst, as past the end of history.
-            let cut = page.iter().map(|c| c.message.len()).sum::<usize>() > MAX_COMMIT_PAGE_BYTES;
+            let cut = page.iter().map(|c| c.page_bytes()).sum::<usize>() > MAX_COMMIT_PAGE_BYTES;
             let more = page.len() > size || cut;
             page.truncate(size);
             let next_page_token = if more && skip + page.len() <= MAX_COMMIT_SKIP {
