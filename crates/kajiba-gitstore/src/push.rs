@@ -1,0 +1,103 @@
+//! Object checks run by the writer with the hook's quarantine environment (0053).
+use crate::{Error, Result, git, run, run_output};
+use std::{path::Path, process::Command, time::Duration};
+
+const ZERO: &str = "0000000000000000000000000000000000000000";
+const TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+pub struct Update<'a> {
+    pub old_id: &'a str,
+    pub new_id: &'a str,
+}
+
+#[derive(Default)]
+pub struct Quarantine<'a> {
+    pub object_directory: &'a str,
+    pub alternate_object_directories: &'a str,
+    pub quarantine_path: &'a str,
+}
+
+#[derive(Debug)]
+pub struct Facts {
+    /// Each commit reachable from new tips but no pre-push ref, exactly once.
+    pub commits: Vec<String>,
+    /// In update order; creations and deletions are false (no ancestry pair).
+    pub fast_forward: Vec<bool>,
+}
+
+pub(crate) fn facts(
+    repo: &Path,
+    updates: &[Update<'_>],
+    quarantine: &Quarantine<'_>,
+) -> Result<Facts> {
+    for update in updates {
+        for id in [update.old_id, update.new_id] {
+            if id.len() != 40 || !id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+                return Err(Error::Git("invalid push object id".into()));
+            }
+        }
+    }
+    for path in [quarantine.object_directory, quarantine.quarantine_path] {
+        if !path.is_empty() && (!Path::new(path).is_absolute() || path.contains('\0')) {
+            return Err(Error::Git("invalid quarantine path".into()));
+        }
+    }
+    let command = || {
+        let mut command = git();
+        command.arg("--git-dir").arg(repo);
+        for (name, value) in [
+            ("GIT_OBJECT_DIRECTORY", quarantine.object_directory),
+            (
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                quarantine.alternate_object_directories,
+            ),
+            ("GIT_QUARANTINE_PATH", quarantine.quarantine_path),
+        ] {
+            if !value.is_empty() {
+                command.env(name, value);
+            }
+        }
+        command
+    };
+    let tips: String = updates
+        .iter()
+        .filter(|u| u.new_id != ZERO)
+        .map(|u| format!("{}\n", u.new_id))
+        .collect();
+    let commits = if tips.is_empty() {
+        Vec::new()
+    } else {
+        let mut cmd = command();
+        // --all is evaluated before receive-pack changes any ref; stdin avoids ARG_MAX.
+        cmd.args(["rev-list", "--stdin"]);
+        run(cmd, &format!("{tips}--not\n--all\n"), TIMEOUT)?
+            .lines()
+            .map(String::from)
+            .collect()
+    };
+    let fast_forward = updates
+        .iter()
+        .map(|u| {
+            if u.old_id == ZERO || u.new_id == ZERO {
+                return Ok(false);
+            }
+            ancestor(command(), u.old_id, u.new_id)
+        })
+        .collect::<Result<_>>()?;
+    Ok(Facts {
+        commits,
+        fast_forward,
+    })
+}
+
+fn ancestor(mut command: Command, old: &str, new: &str) -> Result<bool> {
+    command.args(["merge-base", "--is-ancestor", old, new]);
+    let output = run_output(command, "", TIMEOUT)?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(Error::Git(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        )),
+    }
+}

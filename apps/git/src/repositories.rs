@@ -95,6 +95,33 @@ impl Repositories {
         Gix.set_head(&path, branch).map_err(internal)
     }
 
+    pub fn push_facts(
+        &self,
+        request: &kajiba_proto::hook::v1::PreReceiveRequest,
+    ) -> Result<kajiba_gitstore::push::Facts, Status> {
+        use kajiba_gitstore::push::{Quarantine, Update};
+        let path = self.present(&request.repo_public_id)?;
+        let updates: Vec<_> = request
+            .updates
+            .iter()
+            .map(|u| Update {
+                old_id: &u.old_id,
+                new_id: &u.new_id,
+            })
+            .collect();
+        let context = request.quarantine.clone().unwrap_or_default();
+        Gix.push_facts(
+            &path,
+            &updates,
+            &Quarantine {
+                object_directory: &context.object_directory,
+                alternate_object_directories: &context.alternate_object_directories,
+                quarantine_path: &context.quarantine_path,
+            },
+        )
+        .map_err(internal)
+    }
+
     pub fn sessions(&self) -> Vec<Session> {
         self.sessions
             .lock()

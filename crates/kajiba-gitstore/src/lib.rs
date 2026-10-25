@@ -4,6 +4,7 @@
 //! depend on gix types and pieces can be replaced one by one.
 
 pub mod import;
+pub mod push;
 
 use std::fmt;
 use std::os::unix::process::CommandExt;
@@ -174,6 +175,13 @@ pub trait GitStore {
     /// Fetches exactly these ids into these refs of `repo`, all or none
     /// (`git fetch --atomic`, no tag following); blocking.
     fn fetch(&self, repo: &Path, source: &str, credentials: &str, refs: &[Ref]) -> Result<()>;
+    /// Push-wide new commits and ordered ancestry facts, reading quarantined objects.
+    fn push_facts(
+        &self,
+        repo: &Path,
+        updates: &[push::Update<'_>],
+        quarantine: &push::Quarantine<'_>,
+    ) -> Result<push::Facts>;
 }
 
 /// Deadline of one git child of an import (`ls-remote`, then `fetch`): a hung
@@ -286,12 +294,14 @@ fn fetch_command(repo: &Path, source: &str, credentials: &str) -> Command {
 
 /// Reads a pipe to its end on a thread of its own, so a chatty or stuck pipe never
 /// blocks the deadline.
-fn drain(mut pipe: impl std::io::Read + Send + 'static) -> std::sync::mpsc::Receiver<Vec<u8>> {
+fn drain(
+    mut pipe: impl std::io::Read + Send + 'static,
+) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>> {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut buffer = Vec::new();
-        let _ = pipe.read_to_end(&mut buffer);
-        let _ = sender.send(buffer);
+        let result = pipe.read_to_end(&mut buffer).map(|_| buffer);
+        let _ = sender.send(result);
     });
     receiver
 }
@@ -319,7 +329,21 @@ fn wait_without_reaping(pid: libc::pid_t) {
 /// Runs the child to completion within `deadline`, a hard limit on the process, not
 /// on its pipes: a child that closes stdout and lingers is still killed, and a
 /// descendant (ssh, curl) holding a pipe dies with the child's process group.
-fn run(mut command: Command, stdin: &str, deadline: Duration) -> Result<String> {
+fn run(command: Command, stdin: &str, deadline: Duration) -> Result<String> {
+    let output = run_output(command, stdin, deadline)?;
+    if !output.status.success() {
+        return Err(Error::Git(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|err| Error::Git(err.to_string()))
+}
+
+fn run_output(
+    mut command: Command,
+    stdin: &str,
+    deadline: Duration,
+) -> Result<std::process::Output> {
     use std::io::Write;
     use std::os::unix::process::CommandExt;
     use std::sync::mpsc::channel;
@@ -354,16 +378,16 @@ fn run(mut command: Command, stdin: &str, deadline: Duration) -> Result<String> 
         )));
     }
     // A descendant that left the group (setsid) may still hold a pipe: bounded wait.
-    let collect = |pipe: std::sync::mpsc::Receiver<Vec<u8>>| {
+    let collect = |pipe: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| {
         pipe.recv_timeout(Duration::from_secs(10))
-            .unwrap_or_default()
+            .map_err(|err| Error::Git(format!("git output: {err}")))?
+            .map_err(|err| Error::Git(format!("git output: {err}")))
     };
-    if !status.success() {
-        return Err(Error::Git(
-            String::from_utf8_lossy(&collect(stderr)).trim().to_owned(),
-        ));
-    }
-    String::from_utf8(collect(stdout)).map_err(|err| Error::Git(err.to_string()))
+    Ok(std::process::Output {
+        status,
+        stdout: collect(stdout)?,
+        stderr: collect(stderr)?,
+    })
 }
 
 /// The gix + `git` binary implementation.
@@ -489,6 +513,15 @@ fn tree_at<'r>(repo: &'r gix::Repository, commit_id: &str, path: &str) -> Result
 }
 
 impl GitStore for Gix<'_> {
+    fn push_facts(
+        &self,
+        repo: &Path,
+        updates: &[push::Update<'_>],
+        quarantine: &push::Quarantine<'_>,
+    ) -> Result<push::Facts> {
+        push::facts(repo, updates, quarantine)
+    }
+
     fn init_bare(&self, path: &Path, default_branch: &str) -> Result<()> {
         kajiba_core::names::validate_ref(&format!("refs/heads/{default_branch}"))
             .map_err(|err| Error::Git(err.to_string()))?;

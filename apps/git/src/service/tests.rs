@@ -431,15 +431,84 @@ async fn hook_service_forwards_keys_and_session_and_fails_when_server_stops() {
 }
 
 #[tokio::test]
-async fn hook_context_is_required_and_unreachable_server_fails_closed() {
+async fn pre_receive_reads_quarantined_objects_and_fails_closed_on_missing_objects() {
     use kajiba_proto::hook::v1::{self as hook, hook_service_server::HookService};
     let temp = TempDir::new();
+    let _lock = crate::state::prepare(&temp.0).unwrap();
     let git = Git {
         generation: kajiba_core::new_id().unwrap(),
         server_socket: temp.0.join("absent.sock"),
         repositories: Arc::new(crate::repositories::Repositories::new(temp.0.clone())),
     };
     let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    git.repositories.create(id, "main").unwrap();
+    let repo = temp.0.join(format!("repos/{id}.git"));
+    let incoming = repo.join("objects/incoming-test");
+    std::fs::create_dir(&incoming).unwrap();
+    let command = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Alice")
+            .env("GIT_AUTHOR_EMAIL", "alice@example.org")
+            .env("GIT_COMMITTER_NAME", "Alice")
+            .env("GIT_COMMITTER_EMAIL", "alice@example.org")
+            .env("GIT_OBJECT_DIRECTORY", &incoming)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let tree = command(&["mktree"]);
+    let commit = command(&["commit-tree", &tree, "-m", "initial"]);
+    let mut request = hook::PreReceiveRequest {
+        user_public_id: id.into(),
+        repo_public_id: id.into(),
+        session_id: id.into(),
+        updates: vec![hook::RefUpdate {
+            ref_name: "refs/heads/main".into(),
+            old_id: "0000000000000000000000000000000000000000".into(),
+            new_id: commit.clone(),
+        }],
+        quarantine: Some(hook::Quarantine {
+            object_directory: incoming.to_str().unwrap().into(),
+            alternate_object_directories: repo.join("objects").to_str().unwrap().into(),
+            quarantine_path: incoming.to_str().unwrap().into(),
+        }),
+    };
+    let facts = git.repositories.push_facts(&request).unwrap();
+    assert_eq!(facts.commits, [commit]);
+    assert_eq!(facts.fast_forward, [false]);
+    let response = HookService::pre_receive(&git, Request::new(request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!response.allowed);
+    assert_eq!(response.refusals[0].reason, "pushes are not accepted yet");
+    request.quarantine = None;
+    assert!(
+        HookService::pre_receive(&git, Request::new(request))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn hook_context_is_required_and_unreachable_server_fails_closed() {
+    use kajiba_proto::hook::v1::{self as hook, hook_service_server::HookService};
+    let temp = TempDir::new();
+    let _lock = crate::state::prepare(&temp.0).unwrap();
+    let git = Git {
+        generation: kajiba_core::new_id().unwrap(),
+        server_socket: temp.0.join("absent.sock"),
+        repositories: Arc::new(crate::repositories::Repositories::new(temp.0.clone())),
+    };
+    let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    git.repositories.create(id, "main").unwrap();
     for (user, repo, session) in [("", id, id), (id, "", id), (id, id, ""), (id, id, "bad")] {
         let pre = hook::PreReceiveRequest {
             user_public_id: user.into(),

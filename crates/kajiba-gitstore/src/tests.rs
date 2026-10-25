@@ -1,6 +1,8 @@
 use super::*;
 use std::{fs, path::PathBuf};
 
+mod push;
+
 /// Runs the `git` binary with an isolated configuration and fixed identity.
 fn git(dir: &Path, args: &[&str], date: &str) -> String {
     let output = Command::new("git")
@@ -215,6 +217,12 @@ fn sh(script: &str) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command
+}
+
+#[test]
+fn drain_reports_read_errors_instead_of_returning_incomplete_output() {
+    let directory = fs::File::open(scratch("drain-error")).unwrap();
+    assert!(drain(directory).recv().unwrap().is_err());
 }
 
 #[test]
