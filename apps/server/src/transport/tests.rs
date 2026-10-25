@@ -72,7 +72,11 @@ pub(super) async fn get(app: &mut Router, path: &str) -> StatusCode {
         .status()
 }
 
-async fn grpc(app: &mut Router, path: &str, message: impl Message) -> http::Response<Body> {
+pub(super) async fn grpc(
+    app: &mut Router,
+    path: &str,
+    message: impl Message,
+) -> http::Response<Body> {
     let payload = message.encode_to_vec();
     let mut frame = vec![0];
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());

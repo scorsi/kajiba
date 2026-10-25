@@ -204,14 +204,18 @@ pub(super) async fn serve(
     registry: Arc<Registry>,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()> {
-    // An enroll request is a user name: a few bytes, never tonic's 4 MiB default.
-    let routes = Routes::new(AdminServiceServer::new(admin).max_decoding_message_size(4096))
+    local.serve(router(admin, registry).into(), shutdown).await
+}
+
+fn router(admin: Admin, registry: Arc<Registry>) -> axum::Router {
+    // Import carries two secret files, plus a 127-byte owner/name and protobuf overhead.
+    let max_request_bytes = 2 * kajiba_core::config::MAX_SECRET_BYTES as usize + 256;
+    Routes::new(AdminServiceServer::new(admin).max_decoding_message_size(max_request_bytes))
         .into_axum_router()
         .layer(middleware::from_fn_with_state(
             registry,
             correlation::request,
-        ));
-    local.serve(routes.into(), shutdown).await
+        ))
 }
 
 async fn client(

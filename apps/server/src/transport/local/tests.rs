@@ -357,6 +357,40 @@ async fn list_repos_maps_ids_to_names_by_pages_and_marks_archived() {
 }
 
 #[tokio::test]
+async fn import_request_limit_fits_both_maximum_size_files() {
+    use super::super::tests::grpc;
+    use prost::Message;
+
+    let dir = SocketDir::new();
+    let admin = admin(&dir.0, "").await;
+    let mut app = router(admin, Arc::default());
+    let method = "/kajiba.admin.v1.AdminService/Import";
+    let max = kajiba_core::config::MAX_SECRET_BYTES as usize;
+    let prefix = "https://example.org/";
+    let mut request = ImportRequest {
+        repo: format!("{}/{}", "a".repeat(63), "b".repeat(63)),
+        source: format!("{prefix}{}", "s".repeat(max - prefix.len())),
+        credentials: "c".repeat(max),
+    };
+    // A handler refusal proves that the combined fields passed the wire limit.
+    let response = grpc(&mut app, method, request.clone()).await;
+    let status = Status::from_header_map(response.headers()).unwrap();
+    assert_eq!(status.code(), Code::NotFound);
+    assert_eq!(
+        status.get_error_details().error_info().unwrap().reason,
+        "REPO_NOT_FOUND"
+    );
+    let limit = 2 * max + 256;
+    request
+        .credentials
+        .push_str(&"c".repeat(limit + 1 - request.encoded_len()));
+    assert_eq!(request.encoded_len(), limit + 1);
+    let response = grpc(&mut app, method, request).await;
+    let status = Status::from_header_map(response.headers()).unwrap();
+    assert_eq!(status.code(), Code::OutOfRange);
+}
+
+#[tokio::test]
 async fn import_never_returns_or_logs_source_credentials() {
     const CHILD: &str = "KAJIBA_IMPORT_CLI_TEST";
     if std::env::var_os(CHILD).is_none() {
