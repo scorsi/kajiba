@@ -328,7 +328,7 @@ in
         type = types.nullOr types.str;
         default = "127.0.0.1:${toString gitCfg.ssh.port}";
         defaultText = lib.literalExpression ''"127.0.0.1:''${toString config.services.kajiba-git.ssh.port}"'';
-        description = "Local loopback sshd address checked by /readyz with a one-second SSH banner probe. null disables the check; independent of the advertised host and port.";
+        description = "Local loopback sshd address checked by /readyz with a three-second SSH banner probe. null disables the check; independent of the advertised host and port.";
       };
       port = mkOption {
         type = types.nullOr types.port;

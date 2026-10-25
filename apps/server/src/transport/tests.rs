@@ -280,6 +280,32 @@ async fn readiness_tracks_sshd_and_git_link_and_skips_disabled_ssh() {
 }
 
 #[tokio::test]
+async fn ssh_readiness_accepts_a_slow_banner_after_cache_expiry() {
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
+
+    let mut state = State::new();
+    state.start().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    state.health.ssh_probe = Some(listener.local_addr().unwrap());
+    *state.health.ssh_status.lock().await = Some((Instant::now() - SSH_PROBE_TTL, true));
+    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    let peer = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        stream.write_all(b"SSH-2.0-OpenSSH_test\r\n").await.unwrap();
+    });
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), get(&mut app, "/readyz"))
+            .await
+            .unwrap(),
+        StatusCode::OK
+    );
+    peer.await.unwrap();
+    assert_eq!(serving_status(&mut app).await, ServingStatus::Serving);
+}
+
+#[tokio::test]
 async fn ssh_readiness_refuses_wrong_truncated_and_stalled_banners() {
     use tokio::{io::AsyncWriteExt, net::TcpListener};
 
@@ -302,9 +328,12 @@ async fn ssh_readiness_refuses_wrong_truncated_and_stalled_banners() {
             }
         });
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(2), get(&mut app, "/readyz"))
-                .await
-                .unwrap(),
+            tokio::time::timeout(
+                SSH_PROBE_TIMEOUT + Duration::from_secs(1),
+                get(&mut app, "/readyz")
+            )
+            .await
+            .unwrap(),
             StatusCode::SERVICE_UNAVAILABLE
         );
         peer.abort();
@@ -330,16 +359,22 @@ async fn ssh_readiness_recovers_after_a_banner_timeout() {
     });
 
     assert!(
-        !tokio::time::timeout(Duration::from_secs(2), health.ssh_ready())
-            .await
-            .unwrap()
+        !tokio::time::timeout(
+            SSH_PROBE_TIMEOUT + Duration::from_secs(1),
+            health.ssh_ready()
+        )
+        .await
+        .unwrap()
     );
     assert!(!health.ssh_ready().await);
     health.ssh_status.lock().await.as_mut().unwrap().0 -= SSH_PROBE_TTL;
     assert!(
-        tokio::time::timeout(Duration::from_secs(2), health.ssh_ready())
-            .await
-            .unwrap()
+        tokio::time::timeout(
+            SSH_PROBE_TIMEOUT + Duration::from_secs(1),
+            health.ssh_ready()
+        )
+        .await
+        .unwrap()
     );
     peer.await.unwrap();
 }

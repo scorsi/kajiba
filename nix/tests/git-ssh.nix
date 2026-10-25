@@ -149,7 +149,7 @@ pkgs.testers.runNixOSTest {
       forge.wait_for_unit(unit)
       forge.wait_for_unit("kajiba-git.service")
       forge.wait_for_unit("kajiba-sshd.service")
-      forge.succeed(f"curl -fsS {base}/readyz")
+      forge.wait_until_succeeds(f"curl -fsS {base}/readyz")
       directories = {}
       for key in ["demo", "empty"]:
           public_id = sql(f"SELECT public_id FROM repo WHERE config_key='{key}'")
@@ -305,7 +305,7 @@ pkgs.testers.runNixOSTest {
                   assert "archived" in git(args, success=False)
           settle()
           assert remote_refs() == before and events() == journal
-          forge.succeed(f"curl -fsS {base}/readyz")
+          forge.wait_until_succeeds(f"curl -fsS {base}/readyz")
           assert metric(metrics_url, 'kajiba_pushes_total{result="refused"}') == 2
 
       validate_logs(forge, unit)

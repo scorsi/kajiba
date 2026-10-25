@@ -42,6 +42,7 @@ pub struct Health {
 }
 
 const SSH_PROBE_TTL: Duration = Duration::from_secs(3);
+const SSH_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl Health {
     pub fn new(state_dir: PathBuf, git_state_dir: PathBuf, ssh_probe: Option<SocketAddr>) -> Self {
@@ -100,7 +101,7 @@ impl Health {
         // A canceled request must not let the next caller immediately probe again.
         *status = Some((Instant::now(), false));
         // Bound both connect and banner read; a listening non-SSH service is not ready.
-        let ready = tokio::time::timeout(Duration::from_secs(1), async {
+        let ready = tokio::time::timeout(SSH_PROBE_TIMEOUT, async {
             let mut stream = tokio::net::TcpStream::connect(address).await?;
             let mut banner = [0; 8];
             stream.read_exact(&mut banner).await?;
