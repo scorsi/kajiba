@@ -662,14 +662,19 @@ fn oversized_tree_and_commit_objects_are_refused_before_they_are_read() {
         t,
     );
     git(&f.bare, &["update-ref", "refs/tags/huge", &huge], t);
+    truncate_loose(&f.bare, &huge);
     let commit = Error::TooLarge(Limit::Commit);
-    // Reached by the walk, which reads commits for their parents: the page refuses it.
+    // An ancestor beyond the page is not read; one the walk reaches, returned or
+    // passed over by `skip`, is refused on its header (ADR 0051).
     assert_eq!(Gix.log(&f.bare, &child, 0, 1, usize::MAX).unwrap().len(), 1);
     assert_eq!(
         Gix.log(&f.bare, &child, 0, 2, usize::MAX).unwrap_err(),
         commit
     );
-    truncate_loose(&f.bare, &huge);
+    assert_eq!(
+        Gix.log(&f.bare, &child, 1, 1, usize::MAX).unwrap_err(),
+        commit
+    );
     // Named directly or through a tag: refused on its header.
     assert_eq!(
         Gix.tree(&f.bare, &huge, "", usize::MAX).unwrap_err(),
@@ -704,4 +709,92 @@ fn listing_limits_stop_trees_diffs_and_pages() {
         1
     );
     assert_eq!(Gix.log(&f.bare, &f.third, 0, 10, newest).unwrap().len(), 2);
+}
+
+#[test]
+fn commit_object_cap_is_checked_on_the_exact_size_of_every_ancestor() {
+    let f = fixture("exact");
+    let t = "1700000300 +0000";
+    let tree = git(&f.bare, &["rev-parse", &format!("{}^{{tree}}", f.first)], t);
+    let with_message = |bytes: usize| {
+        let path = f.bare.join("message");
+        std::fs::write(&path, "m".repeat(bytes)).unwrap();
+        git(
+            &f.bare,
+            &["commit-tree", &tree, "-F", path.to_str().unwrap()],
+            t,
+        )
+    };
+    // The object is the message plus a fixed header: measure it, then hit the cap.
+    let probe = with_message(100);
+    let overhead: usize = git(&f.bare, &["cat-file", "-s", &probe], t)
+        .parse::<usize>()
+        .unwrap()
+        - 100;
+    let cap = MAX_COMMIT_OBJECT_BYTES as usize;
+    let at_cap = with_message(cap - overhead);
+    let over_cap = with_message(cap + 1 - overhead);
+    let size = |id: &str| {
+        git(&f.bare, &["cat-file", "-s", id], t)
+            .parse::<u64>()
+            .unwrap()
+    };
+    assert_eq!(size(&at_cap), MAX_COMMIT_OBJECT_BYTES);
+    assert_eq!(size(&over_cap), MAX_COMMIT_OBJECT_BYTES + 1);
+    let child_of = |parent: &str| {
+        git(
+            &f.bare,
+            &["commit-tree", &tree, "-p", parent, "-m", "child"],
+            t,
+        )
+    };
+    let fine = child_of(&at_cap);
+    let bad = child_of(&over_cap);
+    assert_eq!(Gix.log(&f.bare, &fine, 0, 2, usize::MAX).unwrap().len(), 2);
+    assert_eq!(
+        Gix.log(&f.bare, &bad, 0, 2, usize::MAX).unwrap_err(),
+        Error::TooLarge(Limit::Commit)
+    );
+}
+
+#[test]
+fn log_follows_merges_in_commit_time_order_and_pages_without_gaps() {
+    let f = fixture("merge");
+    let tree = git(
+        &f.bare,
+        &["rev-parse", &format!("{}^{{tree}}", f.first)],
+        "0 +0000",
+    );
+    let side = git(
+        &f.bare,
+        &["commit-tree", &tree, "-p", &f.first, "-m", "side"],
+        "1700000150 +0000",
+    );
+    let merge = git(
+        &f.bare,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &f.third,
+            "-p",
+            &side,
+            "-m",
+            "merge",
+        ],
+        "1700000300 +0000",
+    );
+    let expected = git(&f.bare, &["rev-list", "--date-order", &merge], "0 +0000");
+    let expected: Vec<&str> = expected.lines().collect();
+    assert_eq!(expected, [&merge, &f.third, &side, &f.second, &f.first]);
+    let log = Gix.log(&f.bare, &merge, 0, 10, usize::MAX).unwrap();
+    let ids: Vec<&str> = log.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, expected);
+    assert_eq!(log[0].parents, [f.third.clone(), side.clone()]);
+    // Pages of two, by skip, cover the history once and in the same order.
+    let paged: Vec<String> = (0..3)
+        .flat_map(|page| Gix.log(&f.bare, &merge, page * 2, 2, usize::MAX).unwrap())
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(paged, expected);
 }

@@ -388,10 +388,19 @@ fn peel_to_commit<'r>(repo: &'r gix::Repository, mut id: gix::ObjectId) -> Resul
 /// The commit named by a full hex id (a tag id is not a commit, 0021).
 fn commit<'r>(repo: &'r gix::Repository, id: &str) -> Result<gix::Commit<'r>> {
     let id = gix::ObjectId::from_hex(id.as_bytes()).map_err(|_| Error::NotFound)?;
-    if header(repo, id)?.kind() != gix::object::Kind::Commit {
+    load_commit(repo, id)
+}
+
+/// A commit object, its kind and size checked before it is loaded.
+fn load_commit(repo: &gix::Repository, id: gix::ObjectId) -> Result<gix::Commit<'_>> {
+    let header = header(repo, id)?;
+    if header.kind() != gix::object::Kind::Commit {
         return Err(Error::NotFound);
     }
-    peel_to_commit(repo, id)
+    if header.size() > MAX_COMMIT_OBJECT_BYTES {
+        return Err(Error::TooLarge(Limit::Commit));
+    }
+    Ok(repo.find_object(id)?.into_commit())
 }
 
 /// A tree object, its kind and size checked before it is loaded.
@@ -531,36 +540,46 @@ impl GitStore for Gix {
         limit: usize,
         max_bytes: usize,
     ) -> Result<Vec<Commit>> {
+        use std::cmp::Reverse;
+        use std::collections::{BinaryHeap, HashSet};
         let repo = open(repo)?;
-        let tip = commit(&repo, commit_id)?.id;
-        let walk = repo
-            .rev_walk([tip])
-            .sorting(gix::revision::walk::Sorting::ByCommitTime(
-                Default::default(),
-            ))
-            .all()?;
+        let tip = commit(&repo, commit_id)?;
+        // The product's own commit-time walk (ADR 0051): newest first, insertion order
+        // among equal times; every ancestor's header is checked by `load_commit` before
+        // it is read, the ones passed over by `skip` included, and the parents of the
+        // commit that completes a page are not read at all.
+        let mut queue = BinaryHeap::from([(tip.time()?.seconds, Reverse(0), tip.id)]);
+        let mut seen = HashSet::from([tip.id]);
         let mut commits = Vec::new();
         let mut bytes = 0;
-        // Skipped entries are walk infos only (id, parents): no object is decoded.
-        for info in walk.skip(skip).take(limit) {
-            let info = info?;
-            if header(&repo, info.id)?.size() > MAX_COMMIT_OBJECT_BYTES {
-                return Err(Error::TooLarge(Limit::Commit));
+        let mut skipped = 0;
+        while let Some((_, _, id)) = queue.pop() {
+            let object = load_commit(&repo, id)?;
+            let parents: Vec<gix::ObjectId> = object.parent_ids().map(|id| id.detach()).collect();
+            if skipped < skip {
+                skipped += 1;
+            } else {
+                let author = object.author()?;
+                let message = object.message_raw_sloppy().to_string();
+                bytes += message.len();
+                commits.push(Commit {
+                    id: id.to_string(),
+                    parents: parents.iter().map(|id| id.to_string()).collect(),
+                    author_name: author.name.to_string(),
+                    author_email: author.email.to_string(),
+                    time: object.time()?.seconds,
+                    message,
+                });
             }
-            let object = info.object()?;
-            let author = object.author()?;
-            let message = object.message_raw_sloppy().to_string();
-            bytes += message.len();
-            commits.push(Commit {
-                id: info.id.to_string(),
-                parents: info.parent_ids().map(|id| id.to_string()).collect(),
-                author_name: author.name.to_string(),
-                author_email: author.email.to_string(),
-                time: object.time()?.seconds,
-                message,
-            });
-            if bytes > max_bytes {
+            if commits.len() >= limit || bytes > max_bytes {
                 break;
+            }
+            // shortcut: a parent is decoded here for its time and again when popped; cache it if walks get slow.
+            for parent in parents {
+                if seen.insert(parent) {
+                    let time = load_commit(&repo, parent)?.time()?.seconds;
+                    queue.push((time, Reverse(seen.len()), parent));
+                }
             }
         }
         Ok(commits)

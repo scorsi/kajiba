@@ -824,9 +824,22 @@ async fn commit_pages_end_at_their_byte_budget_and_oversized_commits_are_refused
         .trim()
         .to_owned();
     git(&bare, &["update-ref", "refs/heads/huge", &huge]);
+    let child = git(
+        &bare,
+        &["commit-tree", &tree_id, "-p", &huge, "-m", "child"],
+    )
+    .trim()
+    .to_owned();
+    git(&bare, &["update-ref", "refs/heads/child", &child]);
+    // The oversized ancestor is refused beyond the page and at a cursor boundary too
+    // (ADR 0051), the page's look-ahead reaching it in both cases.
     for status in [
         tree(repos, "alice/demo", "huge", "").await.unwrap_err(),
         commits(repos, "huge", 1, String::new()).await.unwrap_err(),
+        commits(repos, "child", 1, String::new()).await.unwrap_err(),
+        commits(repos, "", 1, cursor::encode("v1.ListCommits", &child, 1))
+            .await
+            .unwrap_err(),
         diff(repos, "huge").await.unwrap_err(),
     ] {
         assert_eq!(
