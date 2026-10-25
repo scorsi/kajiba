@@ -105,6 +105,57 @@ async fn serving_status(app: &mut Router) -> ServingStatus {
 }
 
 #[tokio::test]
+async fn repository_requests_are_size_bounded_before_decoding() {
+    use kajiba_proto::v1::{GetRepoRequest, get_repo_request};
+
+    let state = State::new();
+    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    for method in [
+        "GetRepo",
+        "ListRepos",
+        "GetTree",
+        "GetBlob",
+        "ListCommits",
+        "GetCommitDiff",
+    ] {
+        // Only the gRPC header: refuse the advertised size without decoding a payload.
+        let mut frame = vec![0];
+        frame.extend_from_slice(&(16 * 1024 + 1_u32).to_be_bytes());
+        let response = app
+            .call(
+                http::Request::post(format!("/kajiba.v1.RepoService/{method}"))
+                    .header("content-type", "application/grpc")
+                    .body(Body::from(frame))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let status = Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::OutOfRange, "{method}");
+        assert!(status.message().contains("16385 bytes"), "{status}");
+        assert!(status.message().contains("16384 bytes"), "{status}");
+    }
+
+    for size in [16 * 1024, 16 * 1024 + 1] {
+        // One field tag and a two-byte length prefix are part of the message limit.
+        let request = GetRepoRequest {
+            repo: Some(get_repo_request::Repo::PublicId("x".repeat(size - 3))),
+        };
+        assert_eq!(request.encoded_len(), size);
+        let response = grpc(&mut app, "/kajiba.v1.RepoService/GetRepo", request).await;
+        let status = Status::from_header_map(response.headers()).unwrap();
+        if size == 16 * 1024 {
+            // Reaching the unstarted handler proves the exact boundary was decoded.
+            assert_eq!(status.code(), tonic::Code::Unavailable);
+            assert_eq!(status.message(), "starting");
+        } else {
+            assert_eq!(status.code(), tonic::Code::OutOfRange);
+        }
+    }
+}
+
+#[tokio::test]
 async fn readiness_waits_for_startup_and_checks_database_and_directories() {
     let state = State::new();
     let mut app = router(state.health.clone(), false, Arc::default()).unwrap();

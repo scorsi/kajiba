@@ -118,7 +118,11 @@ fn router(
     registry: Arc<Registry>,
 ) -> Result<Router, tonic_reflection::server::Error> {
     let mut app = Routes::new(HealthServiceServer::new(health.clone()))
-        .add_service(RepoServiceServer::new(repos::Repos(health.clone())))
+        .add_service(
+            RepoServiceServer::new(repos::Repos(health.clone()))
+                // Bound inbound work before handler admission (ADR 0057).
+                .max_decoding_message_size(16 * 1024),
+        )
         .into_axum_router()
         // Browsing responses keep their permit through delivery (ADR 0050).
         .route_layer(middleware::from_fn(stream::guarded))
