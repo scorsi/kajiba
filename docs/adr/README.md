@@ -70,6 +70,7 @@ The ADRs describe the product. Values of a particular deployment (hosts, ports, 
 | 0060 | Mutation gate excludes read sessions                                         | Accepted                                                                                                                                                                                                                                                                                                                                                             |
 | 0061 | Session opening and cancellation                                             | Accepted                                                                                                                                                                                                                                                                                                                                                             |
 | 0062 | Push input and quarantine limits                                             | Accepted                                                                                                                                                                                                                                                                                                                                                             |
+| 0063 | SSH session resource limits |
 
 Relational schema: [`docs/schema.md`](../schema.md) (Accepted).
 

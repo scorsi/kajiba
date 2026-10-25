@@ -37,14 +37,18 @@ pub fn parse(command: &str) -> Option<GitCommand> {
 }
 
 mod handoff;
+mod session;
 
-use kajiba_core::local::Local;
 use kajiba_proto::{gate::v1 as gate, git::v1::SessionKind};
 use std::{io, os::fd::OwnedFd, path::Path, process::ExitCode, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
 };
+
+const SESSIONS: usize = 32;
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const LIFETIME: Duration = Duration::from_secs(60 * 60);
 
 pub const SOCKET_PATH: &str = "/run/kajiba-git/ssh.sock";
 
@@ -109,17 +113,28 @@ pub async fn run(path: &Path, user: &str, original: &str) -> ExitCode {
 }
 
 pub async fn serve(
-    mut listener: Local,
+    mut listener: impl tonic::codegen::tokio_stream::Stream<Item = io::Result<UnixStream>> + Unpin,
     git: Arc<crate::service::Git>,
     hooks: &Path,
 ) -> io::Result<()> {
     use tonic::codegen::tokio_stream::StreamExt;
+    let permits = Arc::new(tokio::sync::Semaphore::new(SESSIONS));
     while let Some(stream) = listener.next().await {
         let mut stream = stream?;
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+            // Never queue or spawn work for excess connections, even incomplete hand-offs.
+            let message = b"SSH session limit reached; retry later";
+            let mut response = vec![1];
+            response.extend_from_slice(&(message.len() as u16).to_be_bytes());
+            response.extend_from_slice(message);
+            let _ = stream.try_write(&response);
+            continue;
+        };
         let git = git.clone();
         let hooks = hooks.to_owned();
         // The supervisor owns the child, independently of the helper's connection.
         tokio::spawn(async move {
+            let _permit = permit;
             let result = async {
                 let (fds, user, command) =
                     tokio::time::timeout(Duration::from_secs(5), receive(&mut stream))
@@ -135,8 +150,11 @@ pub async fn serve(
                 Ok(status) => (status, String::new()),
                 Err(message) => (1, message),
             };
-            let _ = stream.write_u8(status).await;
-            let _ = handoff::write_text(&mut stream, &message).await;
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                stream.write_u8(status).await?;
+                handoff::write_text(&mut stream, &message).await
+            })
+            .await;
         });
     }
     Ok(())
@@ -235,34 +253,22 @@ async fn spawn(
             Service::UploadPack => kajiba_gitstore::Service::UploadPack,
             Service::ReceivePack => kajiba_gitstore::Service::ReceivePack,
         };
-        let [stdin, stdout, stderr] = fds;
         let mut process =
             tokio::process::Command::from(Gix.transport(service, &path, &[], Some(hooks)));
         process
-            .stdin(stdin)
-            .stdout(stdout)
-            .stderr(stderr)
             .env("KAJIBA_USER", &session.user_public_id)
             .env("KAJIBA_REPO", &session.repo_public_id)
-            .env("KAJIBA_SESSION", &session.session_id)
-            .kill_on_drop(true);
-        let mut child = process
-            .spawn()
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
-        drop(process);
-        exited = false;
-        tracing::info!(
-            event = "session-started",
-            request_id = session.correlation_id,
-            session = session.session_id,
-            kind = crate::metrics::kind_name(session.kind),
-            repo = session.repo_public_id
-        );
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
-        exited = true;
+            .env("KAJIBA_SESSION", &session.session_id);
+        let status = session::run(
+            &mut process,
+            fds,
+            &session,
+            IDLE_TIMEOUT,
+            LIFETIME,
+            &mut exited,
+        )
+        .await
+        .map_err(|e| tonic::Status::internal(e.to_string()))?;
         Ok(status
             .code()
             .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)) as u8)
@@ -300,6 +306,56 @@ mod tests {
             owner: owner.into(),
             name: name.into(),
         })
+    }
+
+    #[tokio::test]
+    async fn session_cap_refuses_excess_handoffs_and_releases_slots() {
+        use tonic::codegen::tokio_stream::wrappers::UnboundedReceiverStream;
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let git = Arc::new(crate::service::Git {
+            generation: kajiba_core::new_id().unwrap(),
+            server_socket: "/absent.sock".into(),
+            repositories: Arc::new(crate::repositories::Repositories::new("/absent".into())),
+        });
+        let daemon = tokio::spawn(async move {
+            serve(
+                UnboundedReceiverStream::new(receiver),
+                git,
+                Path::new("/absent"),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut held = Vec::new();
+            for _ in 0..SESSIONS {
+                let (peer, stream) = UnixStream::pair().unwrap();
+                sender.send(Ok(stream)).unwrap();
+                held.push(peer);
+            }
+            let (mut excess, stream) = UnixStream::pair().unwrap();
+            sender.send(Ok(stream)).unwrap();
+            let mut refusal = Vec::new();
+            excess.read_to_end(&mut refusal).await.unwrap();
+            assert!(refusal.is_empty() || refusal[0] == 1);
+            // Invalid hand-offs release every slot without reaching the absent gate.
+            for mut peer in held {
+                peer.shutdown().await.unwrap();
+                peer.read_to_end(&mut Vec::new()).await.unwrap();
+            }
+            let (mut peer, stream) = UnixStream::pair().unwrap();
+            sender.send(Ok(stream)).unwrap();
+            peer.write_u8(0).await.unwrap(); // Missing SCM_RIGHTS: admitted, then rejected.
+            assert_eq!(peer.read_u8().await.unwrap(), 1);
+            let message = handoff::read_text(&mut peer, u16::MAX.into())
+                .await
+                .unwrap();
+            assert!(!message.contains("limit"), "{message}");
+            assert!(message.contains("descriptor"), "{message}");
+            drop(sender);
+            daemon.await.unwrap().unwrap();
+        })
+        .await
+        .expect("session cap queued excess work or leaked permits");
     }
 
     #[tokio::test]
@@ -502,7 +558,7 @@ mod opening_tests {
             generation: kajiba_core::new_id().unwrap(),
             server_socket: dir.0.join("gate.sock"),
         });
-        let local = Local::bind(
+        let local = kajiba_core::local::Local::bind(
             &git.server_socket,
             Arc::default(),
             0o600,
