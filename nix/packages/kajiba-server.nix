@@ -5,6 +5,7 @@
   commonCargoArgs,
   cargoArtifacts,
   git,
+  procps,
 }:
 craneLib.buildPackage (
   commonCargoArgs
@@ -12,8 +13,11 @@ craneLib.buildPackage (
     inherit cargoArtifacts;
     pname = "kajiba-server";
     cargoExtraArgs = "--locked -p kajiba-server";
-    # Reconciliation tests write commits into bare repositories with the git binary.
-    nativeCheckInputs = [ git ];
+    # Tests create Git repositories and inspect descendant cleanup with ps.
+    nativeCheckInputs = [
+      git
+      procps
+    ];
     meta.mainProgram = "kajiba-server";
   }
 )

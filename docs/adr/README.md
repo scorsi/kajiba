@@ -72,6 +72,7 @@ The ADRs describe the product. Values of a particular deployment (hosts, ports, 
 | 0062 | Push input and quarantine limits                                             | Accepted                                                                                                                                                                                                                                                                                                                                                             |
 | 0063 | SSH session resource limits |
 | 0064 | Push verification resource limits |
+| 0065 | HTTP Git process group cleanup |
 
 Relational schema: [`docs/schema.md`](../schema.md) (Accepted).
 

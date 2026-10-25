@@ -14,6 +14,23 @@ impl http_body::Body for Unread {
     }
 }
 
+#[tokio::test]
+async fn upload_pack_leads_a_dedicated_process_group() {
+    let mut child = super::command(
+        std::path::Path::new("/nonexistent"),
+        std::path::Path::new("/nonexistent/repo.git"),
+        &["--stateless-rpc", "--advertise-refs"],
+        &http::HeaderMap::new(),
+    )
+    .spawn()
+    .unwrap();
+    let pid = child.id().unwrap() as libc::pid_t;
+    // SAFETY: the unreaped child reserves pid; getpgid only reads its group id.
+    let group = unsafe { libc::getpgid(pid) };
+    child.wait().await.unwrap();
+    assert_eq!(group, pid);
+}
+
 fn gzip(body: &[u8]) -> Vec<u8> {
     // Allow for the gzip wrapper in addition to the zlib compression bound.
     let mut output = vec![0; zlib_rs::compress_bound(body.len()) + 16];

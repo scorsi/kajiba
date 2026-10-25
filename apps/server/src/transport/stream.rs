@@ -147,6 +147,38 @@ pub(super) fn carry(
     })
 }
 
+struct ProcessGroup(libc::pid_t);
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        // SAFETY: the supervisor retains the unreaped child, reserving its group id.
+        unsafe { libc::kill(-self.0, libc::SIGKILL) };
+    }
+}
+
+fn wait_without_reaping(pid: libc::pid_t) -> io::Result<()> {
+    // SAFETY: waitid writes only the initialized out-parameter; WNOWAIT reserves pid.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    loop {
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as _,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// The child must lead its own process group, which remains reserved until cleanup.
 pub(super) fn body(
     mut child: Child,
     input: Vec<u8>,
@@ -156,6 +188,7 @@ pub(super) fn body(
     lifetime: Duration,
 ) -> Body {
     supervised(permit, |chunks| async move {
+        let group = ProcessGroup(child.id().expect("spawned child") as _);
         let mut stdout = child.stdout.take().expect("piped git stdout");
         let stdin = child.stdin.take();
         let transfer = async {
@@ -194,10 +227,13 @@ pub(super) fn body(
                     }
                     deadline = Instant::now() + idle;
                 }
-                let status = timeout_at(deadline, child.wait()).await??;
-                if !status.success() {
-                    return Err(io::Error::other("git upload-pack failed"));
-                }
+                let pid = group.0;
+                timeout_at(
+                    deadline,
+                    tokio::task::spawn_blocking(move || wait_without_reaping(pid)),
+                )
+                .await?
+                .map_err(io::Error::other)??;
                 Ok(())
             };
             tokio::try_join!(write, read).map(|_| ())
@@ -206,11 +242,14 @@ pub(super) fn body(
             _ = chunks.closed() => Err(io::Error::new(io::ErrorKind::BrokenPipe, "response dropped")),
             result = timeout(lifetime, transfer) => result.unwrap_or_else(|err| Err(err.into())),
         };
-        if result.is_err() {
-            // kill() also reaps; kill_on_drop remains the fallback during runtime shutdown.
-            let _ = child.kill().await;
+        // Kill descendants before reaping the leader or releasing the read permit.
+        drop(group);
+        let status = child.wait().await?;
+        result?;
+        if !status.success() {
+            return Err(io::Error::other("git upload-pack failed"));
         }
-        result
+        Ok(())
     })
 }
 
@@ -225,6 +264,7 @@ mod tests {
             .args(["-c", script])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .process_group(0)
             .kill_on_drop(true)
             .spawn()
             .unwrap()
@@ -285,6 +325,59 @@ mod tests {
         );
         drop(response);
         reaped(&budget, pid).await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_and_deadlines_kill_descendants_before_releasing_the_permit() {
+        for parent in ["wait", "exit 0"] {
+            for end in ["cancel", "idle", "lifetime"] {
+                let budget = Arc::new(Semaphore::new(1));
+                let child = child(&format!("sleep 30 & printf '%s\\n' $!; {parent}"));
+                let pid = child.id().unwrap();
+                let mut response = body(
+                    child,
+                    Vec::new(),
+                    b"",
+                    budget.clone().try_acquire_owned().unwrap(),
+                    Duration::from_millis(if end == "idle" { 200 } else { 10_000 }),
+                    Duration::from_millis(if end == "lifetime" { 200 } else { 10_000 }),
+                );
+                let frame = timeout(
+                    Duration::from_secs(5),
+                    std::future::poll_fn(|cx| Pin::new(&mut response).poll_frame(cx)),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap();
+                let descendant = std::str::from_utf8(&frame)
+                    .unwrap()
+                    .trim()
+                    .parse::<libc::pid_t>()
+                    .unwrap();
+                if end == "cancel" {
+                    drop(response);
+                } else {
+                    reaped(&budget, pid).await;
+                    assert!(axum::body::to_bytes(response, 1024).await.is_err());
+                }
+                reaped(&budget, pid).await;
+                // Orphans may remain zombies until init reaps them; neither is live work.
+                let state = std::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &descendant.to_string()])
+                    .output()
+                    .unwrap();
+                assert!(state.stderr.is_empty(), "ps failed: {state:?}");
+                let state = String::from_utf8(state.stdout).unwrap();
+                if !state.trim().is_empty() && !state.trim().starts_with('Z') {
+                    // SAFETY: clean up the test's surviving descendant on regression.
+                    unsafe { libc::kill(descendant, libc::SIGKILL) };
+                    panic!("descendant {descendant} survived {end} ({parent}): {state}");
+                }
+            }
+        }
     }
 
     #[tokio::test]

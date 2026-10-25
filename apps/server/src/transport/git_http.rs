@@ -63,6 +63,7 @@ fn command(
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .kill_on_drop(true);
     if let Some(protocol) = protocol(headers) {
         command.env("GIT_PROTOCOL", protocol);
