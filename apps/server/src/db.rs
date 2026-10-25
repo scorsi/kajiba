@@ -49,7 +49,7 @@ pub async fn reconcile(
 pub async fn reconcile_declared(
     writer: &mut SqliteConnection,
     config: &kajiba_core::config::ServerConfig,
-    store: &impl kajiba_git::GitStore,
+    store: &impl kajiba_gitstore::GitStore,
 ) -> Result<(), String> {
     let mut transaction = writer
         .begin()

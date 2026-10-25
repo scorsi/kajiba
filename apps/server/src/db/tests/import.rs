@@ -5,7 +5,7 @@ use crate::db::{
     pushes::{Gate, Refused},
 };
 use crate::import::{Error, import, supervise};
-use kajiba_git::{GitStore, Gix, Ref};
+use kajiba_gitstore::{GitStore, Gix, Ref};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,

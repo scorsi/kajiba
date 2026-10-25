@@ -14,7 +14,7 @@ use axum::{
     routing::get,
 };
 use http_body::Frame;
-use kajiba_git::{Error, GitStore, Gix};
+use kajiba_gitstore::{Error, GitStore, Gix};
 use std::time::Duration;
 use tokio::sync::OwnedSemaphorePermit;
 

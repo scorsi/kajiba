@@ -2,7 +2,7 @@ use super::users::changes;
 use super::*;
 use crate::db::{reconcile, repos::reconcile_repos};
 use kajiba_core::config::ServerConfig;
-use kajiba_git::{GitStore, Gix};
+use kajiba_gitstore::{GitStore, Gix};
 
 fn config(repos: &str) -> ServerConfig {
     ServerConfig::parse(&format!(

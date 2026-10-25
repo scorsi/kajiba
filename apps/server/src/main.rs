@@ -153,14 +153,16 @@ async fn main() -> ExitCode {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
-            if let Err(err) = db::reconcile_declared(&mut writer, &config, &kajiba_git::Gix).await {
+            if let Err(err) =
+                db::reconcile_declared(&mut writer, &config, &kajiba_gitstore::Gix).await
+            {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
             let bus = std::sync::Arc::new(db::events::EventBus::default());
             let gate = std::sync::Arc::new(db::pushes::Gate::default());
             if let Err(err) = gate
-                .reconcile(&mut writer, &bus, &config.state_dir, &kajiba_git::Gix)
+                .reconcile(&mut writer, &bus, &config.state_dir, &kajiba_gitstore::Gix)
                 .await
             {
                 log::error("fatal", &err);
@@ -182,7 +184,7 @@ async fn main() -> ExitCode {
             return match tokio::select! {
                 result = transport::serve(&config.http, &config.metrics, health, readers, bus.clone(), admin) => result,
                 () = dispatcher.run(&bus, &writer) => unreachable!("dispatcher runs until shutdown"),
-                () = gate.recover_periodically(&db::events::SystemClock, &writer, &bus, &config.state_dir, &kajiba_git::Gix) => unreachable!("recovery runs until shutdown"),
+                () = gate.recover_periodically(&db::events::SystemClock, &writer, &bus, &config.state_dir, &kajiba_gitstore::Gix) => unreachable!("recovery runs until shutdown"),
             } {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {

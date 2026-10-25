@@ -1,5 +1,5 @@
 use super::*;
-use kajiba_git::Gix;
+use kajiba_gitstore::Gix;
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicUsize, Ordering},
@@ -819,7 +819,7 @@ async fn commit_pages_end_at_their_byte_budget_and_oversized_commits_are_refused
     assert_eq!(rest.commits.len(), 2);
     assert!(rest.next_page_token.is_empty());
 
-    let path = message(kajiba_git::MAX_COMMIT_OBJECT_BYTES as usize + 1);
+    let path = message(kajiba_gitstore::MAX_COMMIT_OBJECT_BYTES as usize + 1);
     let huge = git(&bare, &["commit-tree", &tree_id, "-F", &path])
         .trim()
         .to_owned();

@@ -16,7 +16,7 @@ http-body.workspace = true
 hyper-util.workspace = true
 prost.workspace = true
 kajiba-core = { path = "../../crates/kajiba-core" }
-kajiba-git = { path = "../../crates/kajiba-git" }
+kajiba-gitstore = { path = "../../crates/kajiba-gitstore" }
 kajiba-proto = { path = "../../crates/kajiba-proto" }
 serde_json.workspace = true
 sqlx.workspace = true

@@ -6,7 +6,7 @@ use crate::db::{
     events::EventBus,
     pushes::{Gate, RefUpdate, Refused, ZERO, checkpoint},
 };
-use kajiba_git::{GitStore, Gix};
+use kajiba_gitstore::{GitStore, Gix};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -149,8 +149,8 @@ pub(crate) fn supervise(
     bus: Arc<EventBus>,
     state_dir: PathBuf,
     repo_id: i64,
-    mutate: impl FnOnce() -> kajiba_git::Result<()> + Send + 'static,
-) -> tokio::task::JoinHandle<Result<kajiba_git::Result<()>, String>> {
+    mutate: impl FnOnce() -> kajiba_gitstore::Result<()> + Send + 'static,
+) -> tokio::task::JoinHandle<Result<kajiba_gitstore::Result<()>, String>> {
     tokio::spawn(async move {
         let mutated = tokio::task::spawn_blocking(mutate)
             .await

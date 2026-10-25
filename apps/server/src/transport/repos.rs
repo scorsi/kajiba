@@ -4,7 +4,7 @@
 #![allow(clippy::result_large_err)]
 
 use super::{Health, cursor, local::refused};
-use kajiba_git::{GitStore, Gix};
+use kajiba_gitstore::{GitStore, Gix};
 use kajiba_proto::v1::{
     ChangeKind, Commit, EntryKind, FileChange, GetBlobRequest, GetBlobResponse,
     GetCommitDiffRequest, GetCommitDiffResponse, GetRepoRequest, GetRepoResponse, GetTreeRequest,
@@ -150,10 +150,10 @@ async fn blocking<T: Send + 'static>(
 
 /// `NotFound` from git becomes `<reason>`, `TooLarge` the RESOURCE_EXHAUSTED of what
 /// was exceeded (ADR 0043, 0047), anything else INTERNAL.
-fn git_error(reason: &'static str) -> impl Fn(kajiba_git::Error) -> Status {
-    use kajiba_git::{Limit, MAX_COMMIT_OBJECT_BYTES, MAX_TREE_OBJECT_BYTES};
+fn git_error(reason: &'static str) -> impl Fn(kajiba_gitstore::Error) -> Status {
+    use kajiba_gitstore::{Limit, MAX_COMMIT_OBJECT_BYTES, MAX_TREE_OBJECT_BYTES};
     move |err| match err {
-        kajiba_git::Error::NotFound => refused(
+        kajiba_gitstore::Error::NotFound => refused(
             tonic::Code::NotFound,
             reason,
             match reason {
@@ -162,7 +162,7 @@ fn git_error(reason: &'static str) -> impl Fn(kajiba_git::Error) -> Status {
             }
             .into(),
         ),
-        kajiba_git::Error::TooLarge(limit) => {
+        kajiba_gitstore::Error::TooLarge(limit) => {
             let (reason, message) = match limit {
                 Limit::Blob => (
                     "BLOB_TOO_LARGE",
@@ -187,7 +187,7 @@ fn git_error(reason: &'static str) -> impl Fn(kajiba_git::Error) -> Status {
             };
             refused(tonic::Code::ResourceExhausted, reason, message)
         }
-        kajiba_git::Error::Git(err) => Status::internal(format!("git: {err}")),
+        kajiba_gitstore::Error::Git(err) => Status::internal(format!("git: {err}")),
     }
 }
 
@@ -196,7 +196,9 @@ fn revision(dir: &Path, revision: &str) -> Result<String, Status> {
     match Gix.resolve(dir, revision) {
         Ok((commit, "")) => Ok(commit),
         // A path left over: `revision` is no ref.
-        Ok(_) => Err(git_error("REVISION_NOT_FOUND")(kajiba_git::Error::NotFound)),
+        Ok(_) => Err(git_error("REVISION_NOT_FOUND")(
+            kajiba_gitstore::Error::NotFound,
+        )),
         Err(err) => Err(git_error("REVISION_NOT_FOUND")(err)),
     }
 }
@@ -209,7 +211,7 @@ fn path(path: &str) -> Result<(), Status> {
         .map_err(|err| cursor::invalid_field("path", &err.to_string()))
 }
 
-fn commit(commit: kajiba_git::Commit) -> Commit {
+fn commit(commit: kajiba_gitstore::Commit) -> Commit {
     Commit {
         id: commit.id,
         parent_ids: commit.parents,
@@ -399,11 +401,11 @@ impl RepoService for Repos {
                 .map(|entry| TreeEntry {
                     name: entry.name,
                     kind: match entry.kind {
-                        kajiba_git::EntryKind::Tree => EntryKind::Tree,
-                        kajiba_git::EntryKind::Blob => EntryKind::Blob,
-                        kajiba_git::EntryKind::Executable => EntryKind::Executable,
-                        kajiba_git::EntryKind::Link => EntryKind::Link,
-                        kajiba_git::EntryKind::Submodule => EntryKind::Submodule,
+                        kajiba_gitstore::EntryKind::Tree => EntryKind::Tree,
+                        kajiba_gitstore::EntryKind::Blob => EntryKind::Blob,
+                        kajiba_gitstore::EntryKind::Executable => EntryKind::Executable,
+                        kajiba_gitstore::EntryKind::Link => EntryKind::Link,
+                        kajiba_gitstore::EntryKind::Submodule => EntryKind::Submodule,
                     }
                     .into(),
                     id: entry.id,
@@ -504,7 +506,7 @@ impl RepoService for Repos {
                 .log(&dir, &id, 0, 1, MAX_COMMIT_PAGE_BYTES)
                 .map_err(git_error("REVISION_NOT_FOUND"))?
                 .pop()
-                .ok_or_else(|| git_error("REVISION_NOT_FOUND")(kajiba_git::Error::NotFound))?;
+                .ok_or_else(|| git_error("REVISION_NOT_FOUND")(kajiba_gitstore::Error::NotFound))?;
             let changes = Gix
                 .diff(
                     &dir,
@@ -518,9 +520,9 @@ impl RepoService for Repos {
                 .map(|change| FileChange {
                     path: change.path,
                     kind: match change.kind {
-                        kajiba_git::ChangeKind::Added => ChangeKind::Added,
-                        kajiba_git::ChangeKind::Deleted => ChangeKind::Deleted,
-                        kajiba_git::ChangeKind::Modified => ChangeKind::Modified,
+                        kajiba_gitstore::ChangeKind::Added => ChangeKind::Added,
+                        kajiba_gitstore::ChangeKind::Deleted => ChangeKind::Deleted,
+                        kajiba_gitstore::ChangeKind::Modified => ChangeKind::Modified,
                     }
                     .into(),
                     old_id: change.old_id.unwrap_or_default(),

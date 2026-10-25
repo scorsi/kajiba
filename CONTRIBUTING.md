@@ -15,6 +15,9 @@ nix develop
 gives you Rust (stable), pnpm, buf, protoc, sqlx-cli, mold and Playwright. No
 other toolchain is supported.
 
+The shared GitStore library is `kajiba-gitstore` in `crates/kajiba-gitstore/`
+(ADRs 0002, 0018 and 0054).
+
 ## Checks
 
 ```sh

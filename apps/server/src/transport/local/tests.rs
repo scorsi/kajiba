@@ -405,7 +405,7 @@ async fn import_never_returns_or_logs_source_credentials() {
     crate::db::repos::reconcile_repos(
         &mut *admin.writer.lock().await,
         &dir.0,
-        &kajiba_git::Gix,
+        &kajiba_gitstore::Gix,
         &config.repos,
     )
     .await

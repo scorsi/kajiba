@@ -13,7 +13,7 @@ The CLI is a Rust crate (ADR 0007).
 
 - `proto/` — `.proto` files, the source of truth for the API and the
   forge↔runner protocol.
-- `crates/` — shared Rust libraries (no binary): `kajiba-core`, `kajiba-git`,
+- `crates/` — shared Rust libraries (no binary): `kajiba-core`, `kajiba-gitstore`,
   `kajiba-proto`, `kajiba-exec`.
 - `apps/` — the four deliverables, one subfolder each:
   - `server/` — `kajiba-server`, the Rust binary.

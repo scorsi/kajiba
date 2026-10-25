@@ -11,7 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
-use kajiba_git::{GitStore, Gix, Service};
+use kajiba_gitstore::{GitStore, Gix, Service};
 use std::{collections::HashMap, process::Stdio};
 
 pub fn routes(repos: Repos) -> Router {

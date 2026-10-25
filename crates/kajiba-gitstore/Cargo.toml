@@ -1,5 +1,5 @@
 [package]
-name = "kajiba-git"
+name = "kajiba-gitstore"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -22,8 +22,8 @@ relational schema.
   code (server and client) is generated at `cargo build` time by
   `crates/kajiba-proto/build.rs` (tonic-build), not through `buf`. Generated
   TypeScript is committed and checked fresh; generated Rust is not committed.
-- Crate and module names are fixed by ADR 0002/0018: `kajiba-core`,
-  `kajiba-git`, `kajiba-proto`, `kajiba-exec`, `kajiba-server`,
+- Crate and module names are fixed by ADR 0002/0018/0054: `kajiba-core`,
+  `kajiba-gitstore`, `kajiba-proto`, `kajiba-exec`, `kajiba-server`,
   `kajiba-runner`, `kajiba-cli`, `kajiba-ui`. NixOS options
   `services.kajiba-server` / `services.kajiba-runner`, system user `kajiba`
   (0015). Don't introduce new top-level crates without an ADR.

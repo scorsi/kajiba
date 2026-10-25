@@ -1,6 +1,6 @@
 use super::users::new_public_id;
 use kajiba_core::config::{RepoConfig, Role};
-use kajiba_git::GitStore;
+use kajiba_gitstore::GitStore;
 use sqlx::{Connection, SqliteConnection};
 use std::{
     collections::{BTreeMap, BTreeSet},

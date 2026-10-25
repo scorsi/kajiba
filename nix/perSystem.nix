@@ -83,7 +83,7 @@
           commonCargoArgs
           // {
             inherit cargoArtifacts;
-            # kajiba-git tests build their fixture repositories with the git binary.
+            # kajiba-gitstore tests build their fixture repositories with the git binary.
             nativeBuildInputs = commonCargoArgs.nativeBuildInputs ++ [ pkgs.git ];
           }
         );

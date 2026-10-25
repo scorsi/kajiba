@@ -1993,7 +1993,7 @@ name = "kajiba-exec"
 version = "0.1.0"
 
 [[package]]
-name = "kajiba-git"
+name = "kajiba-gitstore"
 version = "0.1.0"
 dependencies = [
  "gix",
@@ -2030,7 +2030,7 @@ dependencies = [
  "http-body",
  "hyper-util",
  "kajiba-core",
- "kajiba-git",
+ "kajiba-gitstore",
  "kajiba-proto",
  "prost",
  "serde_json",

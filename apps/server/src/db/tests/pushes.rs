@@ -3,7 +3,7 @@ use crate::db::{
     events::EventBus,
     pushes::{Gate, RefUpdate, Refused, ZERO},
 };
-use kajiba_git::Gix;
+use kajiba_gitstore::Gix;
 
 fn update(name: &str, old: &str, new: &str) -> RefUpdate {
     RefUpdate {
