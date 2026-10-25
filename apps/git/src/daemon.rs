@@ -6,7 +6,7 @@ use std::{ffi::OsStr, io, path::Path};
 use tokio::signal::unix::{SignalKind, signal};
 use tonic::service::Routes;
 
-const SOCKET_PATH: &str = "/run/kajiba-git/local.sock";
+use crate::local::SOCKET_PATH;
 
 pub async fn serve(config: GitConfig) -> Result<(), String> {
     tracing::info!(event = "start", version = env!("CARGO_PKG_VERSION"));
@@ -59,13 +59,15 @@ async fn run(
     tracing::info!(event = "ready");
     let repositories =
         std::sync::Arc::new(crate::repositories::Repositories::new(state_dir.to_owned()));
+    let git = std::sync::Arc::new(crate::service::Git {
+        generation: generation.clone(),
+        repositories: repositories.clone(),
+        server_socket: server_socket.into(),
+    });
     let routes = Routes::new(
-        kajiba_proto::git::v1::git_service_server::GitServiceServer::new(crate::service::Git {
-            generation: generation.clone(),
-            repositories: repositories.clone(),
-            server_socket: server_socket.into(),
-        }),
-    );
+        kajiba_proto::git::v1::git_service_server::GitServiceServer::from_arc(git.clone()),
+    )
+    .add_service(kajiba_proto::hook::v1::hook_service_server::HookServiceServer::from_arc(git));
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let mut metrics_stopped = stopped.clone();
     let app = crate::metrics::router(repositories.clone());

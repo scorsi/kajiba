@@ -1,5 +1,5 @@
 use super::*;
-use crate::transport::{local, tests::State};
+use crate::transport::{local, local::tests::PUBLIC_URL, tests::State};
 use kajiba_core::local::{channel, effective_uid};
 use kajiba_proto::gate::v1::gate_service_client::GateServiceClient;
 use std::{fs, os::unix::fs::MetadataExt, time::Duration};
@@ -200,6 +200,33 @@ async fn gate_auth_and_closed_hooks_leave_admin_socket_unchanged() {
             .await
             .unwrap()
             .contains("/auth/enroll#")
+    );
+    let mut hooks = kajiba_proto::hook::v1::hook_service_client::HookServiceClient::new(
+        channel(&admin_path, None).await.unwrap(),
+    );
+    assert_eq!(
+        hooks
+            .get_auth_key(kajiba_proto::hook::v1::GetAuthKeyRequest::default())
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Unimplemented
+    );
+    assert_eq!(
+        hooks
+            .pre_receive(kajiba_proto::hook::v1::PreReceiveRequest::default())
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Unimplemented
+    );
+    assert_eq!(
+        hooks
+            .post_receive(kajiba_proto::hook::v1::PostReceiveRequest::default())
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Unimplemented
     );
     let mut wrong = GateServiceClient::new(
         channel(&admin_path, Some(Duration::from_secs(2)))
@@ -684,4 +711,98 @@ async fn an_unstarted_reservation_is_recovered_and_a_late_fetch_is_refused() {
         .await
         .unwrap();
     assert_eq!(pending, 0);
+}
+
+const AUTH: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea";
+const AUTH_FP: &str = "SHA256:bbXpuKG6zhzdmnxq256TlqzFBzRl2f6OOg722cYNbU8";
+const SIGNING: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1AF8PoQ4lakrcKp00bfrycmCzPLsSWjMDNVfEq9GYM";
+const SIGNING_FP: &str = "SHA256:F34nin7tcaYH6WR5LSWSfj6weFBPfBpuyUUoPFP9YjA";
+
+#[tokio::test]
+async fn auth_key_lookup_resolves_only_active_users_auth_keys() {
+    let dir = State::new();
+    let socket = dir.health.state_dir.join("auth.sock");
+    let listener = Local::bind(&socket, Arc::default(), 0o660, vec![effective_uid()]).unwrap();
+    // The comment tries to smuggle options into the authorized_keys line.
+    let alice = format!(
+        "[users.alice]\nssh_keys=['{AUTH} x\",command=\"sh\" restrict']\nsigning_keys=['{SIGNING}']\n[users.bob]\n"
+    );
+    let admin = local::tests::admin(&dir.health.state_dir, &alice).await;
+    let writer = admin.writer.clone();
+    let server = tokio::spawn(serve(
+        listener,
+        Gate::new(&admin),
+        Arc::default(),
+        std::future::pending(),
+    ));
+    let public_id = |name: &'static str| {
+        let writer = writer.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT public_id FROM user WHERE name = ?")
+                .bind(name)
+                .fetch_one(&mut *writer.lock().await)
+                .await
+                .unwrap()
+        }
+    };
+    let reconcile = |users: String| {
+        let writer = writer.clone();
+        async move {
+            let users = kajiba_core::config::ServerConfig::parse(&format!(
+                "[http]\npublic_url='{PUBLIC_URL}'\n{users}"
+            ))
+            .unwrap()
+            .users;
+            crate::db::reconcile(&mut *writer.lock().await, &users)
+                .await
+                .unwrap();
+        }
+    };
+    let lookup = |fingerprint: &str| {
+        let socket = socket.clone();
+        let fingerprint = fingerprint.to_owned();
+        async move {
+            let mut client = GateServiceClient::new(channel(&socket, None).await.unwrap());
+            match client.get_auth_key(GetAuthKeyRequest { fingerprint }).await {
+                Ok(response) => {
+                    let response = response.into_inner();
+                    Ok(Some((response.user_public_id, response.public_key)))
+                }
+                Err(status) if status.code() == Code::NotFound => {
+                    assert_eq!(
+                        status.get_error_details().error_info().unwrap().reason,
+                        "KEY_NOT_FOUND"
+                    );
+                    Ok(None)
+                }
+                Err(status) => Err(status),
+            }
+        }
+    };
+
+    assert_eq!(
+        lookup(AUTH_FP).await.unwrap(),
+        Some((public_id("alice").await, AUTH.into()))
+    );
+    for unknown in [SIGNING_FP, "SHA256:unknown", ""] {
+        assert_eq!(lookup(unknown).await.unwrap(), None, "{unknown}");
+    }
+    // Reassigned to bob: resolves to him.
+    reconcile(format!("[users.alice]\n[users.bob]\nssh_keys=['{AUTH}']\n")).await;
+    assert_eq!(
+        lookup(AUTH_FP).await.unwrap(),
+        Some((public_id("bob").await, AUTH.into()))
+    );
+    // Removed key, then a disabled user still holding a key row.
+    reconcile("[users.alice]\n[users.bob]\n".into()).await;
+    assert_eq!(lookup(AUTH_FP).await.unwrap(), None);
+    reconcile(format!("[users.bob]\nssh_keys=['{AUTH}']\n")).await;
+    sqlx::query("UPDATE user SET disabled_at = 1 WHERE name = 'bob'")
+        .execute(&mut *writer.lock().await)
+        .await
+        .unwrap();
+    assert_eq!(lookup(AUTH_FP).await.unwrap(), None);
+    server.abort();
 }

@@ -165,8 +165,8 @@ impl Gate {
                 id
             }
             Some(open_session_request::Repository::RepoAddress(address)) => {
-                let parsed = crate::ssh::parse(&format!("git-upload-pack '{address}'"))
-                    .ok_or_else(|| {
+                let (owner, name) =
+                    kajiba_core::names::repo_address(&address).ok_or_else(|| {
                         rpc_error(
                             tonic::Code::InvalidArgument,
                             "INVALID_FIELD",
@@ -178,7 +178,7 @@ impl Gate {
                      WHERE user.name = ?1 AND repo.name = ?2
                      UNION ALL SELECT repo.public_id FROM repo_redirect JOIN repo ON repo.id = repo_redirect.repo_id
                      WHERE repo_redirect.owner_name = ?1 AND repo_redirect.name = ?2 LIMIT 1")
-                    .bind(parsed.owner).bind(parsed.name).fetch_optional(&mut *writer).await
+                    .bind(owner).bind(name).fetch_optional(&mut *writer).await
                     .map_err(|err| Status::internal(err.to_string()))?
                     .ok_or_else(|| rpc_error(tonic::Code::NotFound, "REPO_NOT_FOUND", "repository not found"))?
             }

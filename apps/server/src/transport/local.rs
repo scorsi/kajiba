@@ -10,12 +10,6 @@ use kajiba_proto::admin::v1::{
     admin_service_client::AdminServiceClient,
     admin_service_server::{AdminService, AdminServiceServer},
 };
-use kajiba_proto::hook::v1::{
-    GetAuthKeyRequest, GetAuthKeyResponse, PostReceiveRequest, PostReceiveResponse,
-    PreReceiveRequest, PreReceiveResponse, Refusal,
-    hook_service_client::HookServiceClient,
-    hook_service_server::{HookService, HookServiceServer},
-};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -195,47 +189,6 @@ impl AdminService for Admin {
     }
 }
 
-/// Compatibility for the server helpers until their move in J3 task 16.
-#[tonic::async_trait]
-impl HookService for Admin {
-    async fn get_auth_key(
-        &self,
-        request: Request<GetAuthKeyRequest>,
-    ) -> Result<Response<GetAuthKeyResponse>, Status> {
-        let found = super::gate::auth_key(&self.writer, request.into_inner().fingerprint).await?;
-        Ok(Response::new(GetAuthKeyResponse {
-            user_public_id: found.user_public_id,
-            public_key: found.public_key,
-        }))
-    }
-
-    async fn pre_receive(
-        &self,
-        _: Request<PreReceiveRequest>,
-    ) -> Result<Response<PreReceiveResponse>, Status> {
-        let response = super::gate::pre_receive();
-        Ok(Response::new(PreReceiveResponse {
-            allowed: response.allowed,
-            refusals: response
-                .refusals
-                .into_iter()
-                .map(|refusal| Refusal {
-                    ref_name: refusal.ref_name,
-                    reason: refusal.reason,
-                })
-                .collect(),
-        }))
-    }
-
-    async fn post_receive(
-        &self,
-        _: Request<PostReceiveRequest>,
-    ) -> Result<Response<PostReceiveResponse>, Status> {
-        // No push is admitted yet, so nothing waits for reconciliation (J3 task 22).
-        Ok(Response::new(PostReceiveResponse {}))
-    }
-}
-
 pub(super) fn bind(path: &Path, serving: Arc<Serving>) -> io::Result<Local> {
     Local::bind(
         path,
@@ -251,16 +204,13 @@ pub(super) async fn serve(
     registry: Arc<Registry>,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()> {
-    let admin = Arc::new(admin);
     // An enroll request is a user name: a few bytes, never tonic's 4 MiB default.
-    let routes =
-        Routes::new(AdminServiceServer::from_arc(admin.clone()).max_decoding_message_size(4096))
-            .add_service(HookServiceServer::from_arc(admin))
-            .into_axum_router()
-            .layer(middleware::from_fn_with_state(
-                registry,
-                correlation::request,
-            ));
+    let routes = Routes::new(AdminServiceServer::new(admin).max_decoding_message_size(4096))
+        .into_axum_router()
+        .layer(middleware::from_fn_with_state(
+            registry,
+            correlation::request,
+        ));
     local.serve(routes.into(), shutdown).await
 }
 
@@ -269,23 +219,6 @@ async fn client(
     timeout: Option<Duration>,
 ) -> Result<AdminServiceClient<tonic::transport::Channel>, Box<dyn std::error::Error>> {
     Ok(AdminServiceClient::new(channel(path, timeout).await?))
-}
-
-/// The user public id and canonical key of an active user's auth key; `None` when the
-/// fingerprint names no such key.
-pub async fn auth_key(
-    path: &Path,
-    fingerprint: String,
-) -> Result<Option<(String, String)>, Box<dyn std::error::Error>> {
-    let mut client = HookServiceClient::new(channel(path, Some(Duration::from_secs(5))).await?);
-    match client.get_auth_key(GetAuthKeyRequest { fingerprint }).await {
-        Ok(response) => {
-            let response = response.into_inner();
-            Ok(Some((response.user_public_id, response.public_key)))
-        }
-        Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
-        Err(status) => Err(status.into()),
-    }
 }
 
 pub async fn enroll(path: &Path, user: String) -> Result<String, Box<dyn std::error::Error>> {
@@ -314,24 +247,6 @@ pub async fn import(
         .await?
         .into_inner()
         .refs)
-}
-
-/// One pre-receive check; no timeout: checking a large push takes as long as it takes.
-pub async fn pre_receive(
-    path: &Path,
-    request: PreReceiveRequest,
-) -> Result<PreReceiveResponse, Box<dyn std::error::Error>> {
-    let mut client = HookServiceClient::new(channel(path, None).await?);
-    Ok(client.pre_receive(request).await?.into_inner())
-}
-
-pub async fn post_receive(
-    path: &Path,
-    request: PostReceiveRequest,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = HookServiceClient::new(channel(path, Some(Duration::from_secs(5))).await?);
-    client.post_receive(request).await?;
-    Ok(())
 }
 
 /// Every page, in name order.

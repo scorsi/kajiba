@@ -9,11 +9,11 @@ service HookService {
   // fingerprint, a signing-only key or a disabled user is NOT_FOUND
   // (KEY_NOT_FOUND).
   rpc GetAuthKey(GetAuthKeyRequest) returns (GetAuthKeyResponse);
-  // `kajiba-server hook pre-receive`: check a push's ref updates before
+  // `kajiba-git hook pre-receive`: check a push's ref updates before
   // receive-pack applies them; allowed only once every check passed and the
   // push is admitted (0003, 0014).
   rpc PreReceive(PreReceiveRequest) returns (PreReceiveResponse);
-  // `kajiba-server hook post-receive`: receive-pack updated refs; wakes push
+  // `kajiba-git hook post-receive`: receive-pack updated refs; wakes push
   // reconciliation and returns without waiting for receive-pack (0003).
   rpc PostReceive(PostReceiveRequest) returns (PostReceiveResponse);
 }
@@ -38,7 +38,7 @@ message RefUpdate {
 }
 
 // Git's quarantine environment of the pre-receive hook, passed verbatim so the
-// server's Git checks see the pushed objects (0014). Empty when Git set none
+// daemon's Git checks see the pushed objects (0014). Empty when Git set none
 // (a push that only deletes refs).
 message Quarantine {
   // GIT_OBJECT_DIRECTORY
@@ -50,11 +50,12 @@ message Quarantine {
 }
 
 message PreReceiveRequest {
-  // Transport context set by serve-ssh (KAJIBA_USER, KAJIBA_REPO).
+  // Transport context set by serve-ssh (KAJIBA_USER, KAJIBA_REPO, KAJIBA_SESSION).
   string user_public_id = 1;
   string repo_public_id = 2;
   repeated RefUpdate updates = 3;
   Quarantine quarantine = 4;
+  string session_id = 5;
 }
 
 message PreReceiveResponse {
@@ -73,6 +74,7 @@ message PostReceiveRequest {
   string user_public_id = 1;
   string repo_public_id = 2;
   repeated RefUpdate updates = 3;
+  string session_id = 4;
 }
 
 message PostReceiveResponse {}

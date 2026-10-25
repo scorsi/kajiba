@@ -106,3 +106,84 @@ fn both_commands_reject_invalid_configuration_naming_the_field() {
     }
     std::fs::remove_dir(dir).unwrap();
 }
+
+#[test]
+fn hooks_outside_serve_ssh_fail_with_a_clear_error() {
+    for args in [vec!["hook", "pre-receive"], vec!["hook", "post-receive"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_kajiba-git"))
+            .args(&args)
+            .env_remove("RUST_LOG")
+            .env_remove("KAJIBA_USER")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+        let name = args[..2].join(" ");
+        let line: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(line["event"], "fatal");
+        assert_eq!(
+            line["err"],
+            format!("{name}: KAJIBA_USER is not set (hooks run under serve-ssh)")
+        );
+    }
+}
+
+#[test]
+fn hooks_require_session_even_when_user_and_repository_are_set() {
+    for hook in ["pre-receive", "post-receive"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_kajiba-git"))
+            .args(["hook", hook])
+            .env("KAJIBA_USER", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .env("KAJIBA_REPO", "01ARZ3NDEKTSV4RRFFQ69G5FAW")
+            .env_remove("KAJIBA_SESSION")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let line: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert!(
+            line["err"]
+                .as_str()
+                .unwrap()
+                .contains("KAJIBA_SESSION is not set")
+        );
+    }
+}
+
+#[test]
+fn serve_ssh_validates_context_but_never_starts_transport_yet() {
+    for (user, command, message) in [
+        (
+            "alice",
+            "git-upload-pack 'alice/demo'",
+            "invalid user public id",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "sh -c 'id'",
+            "invalid SSH command",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "git-upload-pack 'alice/demo'",
+            "SSH transport is not implemented yet",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "git-receive-pack 'alice/demo'",
+            "SSH transport is not implemented yet",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_kajiba-git"))
+            .args(["serve-ssh", "--user", user])
+            .env("SSH_ORIGINAL_COMMAND", command)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let line: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(line["err"], format!("serve-ssh: {message}"));
+    }
+}

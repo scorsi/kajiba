@@ -57,6 +57,14 @@ pub fn validate_name(name: &str) -> Result<String, NameError> {
     Ok(name)
 }
 
+/// SSH repository address: optional leading slash and `.git`, normalized names.
+pub fn repo_address(path: &str) -> Option<(String, String)> {
+    let path = path.strip_prefix('/').unwrap_or(path);
+    let (owner, name) = path.split_once('/')?;
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    Some((validate_name(owner).ok()?, validate_name(name).ok()?))
+}
+
 /// Why a ref name breaks a `git check-ref-format` rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefError {

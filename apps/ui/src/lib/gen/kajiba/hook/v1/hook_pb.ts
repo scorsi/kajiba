@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file kajiba/hook/v1/hook.proto.
  */
 export const file_kajiba_hook_v1_hook: GenFile = /*@__PURE__*/
-  fileDesc("ChlrYWppYmEvaG9vay92MS9ob29rLnByb3RvEg5rYWppYmEuaG9vay52MSIoChFHZXRBdXRoS2V5UmVxdWVzdBITCgtmaW5nZXJwcmludBgBIAEoCSJAChJHZXRBdXRoS2V5UmVzcG9uc2USFgoOdXNlcl9wdWJsaWNfaWQYASABKAkSEgoKcHVibGljX2tleRgCIAEoCSI9CglSZWZVcGRhdGUSEAoIcmVmX25hbWUYASABKAkSDgoGb2xkX2lkGAIgASgJEg4KBm5ld19pZBgDIAEoCSJlCgpRdWFyYW50aW5lEhgKEG9iamVjdF9kaXJlY3RvcnkYASABKAkSJAocYWx0ZXJuYXRlX29iamVjdF9kaXJlY3RvcmllcxgCIAEoCRIXCg9xdWFyYW50aW5lX3BhdGgYAyABKAkinwEKEVByZVJlY2VpdmVSZXF1ZXN0EhYKDnVzZXJfcHVibGljX2lkGAEgASgJEhYKDnJlcG9fcHVibGljX2lkGAIgASgJEioKB3VwZGF0ZXMYAyADKAsyGS5rYWppYmEuaG9vay52MS5SZWZVcGRhdGUSLgoKcXVhcmFudGluZRgEIAEoCzIaLmthamliYS5ob29rLnYxLlF1YXJhbnRpbmUiUAoSUHJlUmVjZWl2ZVJlc3BvbnNlEg8KB2FsbG93ZWQYASABKAgSKQoIcmVmdXNhbHMYAiADKAsyFy5rYWppYmEuaG9vay52MS5SZWZ1c2FsIisKB1JlZnVzYWwSEAoIcmVmX25hbWUYASABKAkSDgoGcmVhc29uGAIgASgJInAKElBvc3RSZWNlaXZlUmVxdWVzdBIWCg51c2VyX3B1YmxpY19pZBgBIAEoCRIWCg5yZXBvX3B1YmxpY19pZBgCIAEoCRIqCgd1cGRhdGVzGAMgAygLMhkua2FqaWJhLmhvb2sudjEuUmVmVXBkYXRlIhUKE1Bvc3RSZWNlaXZlUmVzcG9uc2UyjwIKC0hvb2tTZXJ2aWNlElMKCkdldEF1dGhLZXkSIS5rYWppYmEuaG9vay52MS5HZXRBdXRoS2V5UmVxdWVzdBoiLmthamliYS5ob29rLnYxLkdldEF1dGhLZXlSZXNwb25zZRJTCgpQcmVSZWNlaXZlEiEua2FqaWJhLmhvb2sudjEuUHJlUmVjZWl2ZVJlcXVlc3QaIi5rYWppYmEuaG9vay52MS5QcmVSZWNlaXZlUmVzcG9uc2USVgoLUG9zdFJlY2VpdmUSIi5rYWppYmEuaG9vay52MS5Qb3N0UmVjZWl2ZVJlcXVlc3QaIy5rYWppYmEuaG9vay52MS5Qb3N0UmVjZWl2ZVJlc3BvbnNlYgZwcm90bzM");
+  fileDesc("ChlrYWppYmEvaG9vay92MS9ob29rLnByb3RvEg5rYWppYmEuaG9vay52MSIoChFHZXRBdXRoS2V5UmVxdWVzdBITCgtmaW5nZXJwcmludBgBIAEoCSJAChJHZXRBdXRoS2V5UmVzcG9uc2USFgoOdXNlcl9wdWJsaWNfaWQYASABKAkSEgoKcHVibGljX2tleRgCIAEoCSI9CglSZWZVcGRhdGUSEAoIcmVmX25hbWUYASABKAkSDgoGb2xkX2lkGAIgASgJEg4KBm5ld19pZBgDIAEoCSJlCgpRdWFyYW50aW5lEhgKEG9iamVjdF9kaXJlY3RvcnkYASABKAkSJAocYWx0ZXJuYXRlX29iamVjdF9kaXJlY3RvcmllcxgCIAEoCRIXCg9xdWFyYW50aW5lX3BhdGgYAyABKAkiswEKEVByZVJlY2VpdmVSZXF1ZXN0EhYKDnVzZXJfcHVibGljX2lkGAEgASgJEhYKDnJlcG9fcHVibGljX2lkGAIgASgJEioKB3VwZGF0ZXMYAyADKAsyGS5rYWppYmEuaG9vay52MS5SZWZVcGRhdGUSLgoKcXVhcmFudGluZRgEIAEoCzIaLmthamliYS5ob29rLnYxLlF1YXJhbnRpbmUSEgoKc2Vzc2lvbl9pZBgFIAEoCSJQChJQcmVSZWNlaXZlUmVzcG9uc2USDwoHYWxsb3dlZBgBIAEoCBIpCghyZWZ1c2FscxgCIAMoCzIXLmthamliYS5ob29rLnYxLlJlZnVzYWwiKwoHUmVmdXNhbBIQCghyZWZfbmFtZRgBIAEoCRIOCgZyZWFzb24YAiABKAkihAEKElBvc3RSZWNlaXZlUmVxdWVzdBIWCg51c2VyX3B1YmxpY19pZBgBIAEoCRIWCg5yZXBvX3B1YmxpY19pZBgCIAEoCRIqCgd1cGRhdGVzGAMgAygLMhkua2FqaWJhLmhvb2sudjEuUmVmVXBkYXRlEhIKCnNlc3Npb25faWQYBCABKAkiFQoTUG9zdFJlY2VpdmVSZXNwb25zZTKPAgoLSG9va1NlcnZpY2USUwoKR2V0QXV0aEtleRIhLmthamliYS5ob29rLnYxLkdldEF1dGhLZXlSZXF1ZXN0GiIua2FqaWJhLmhvb2sudjEuR2V0QXV0aEtleVJlc3BvbnNlElMKClByZVJlY2VpdmUSIS5rYWppYmEuaG9vay52MS5QcmVSZWNlaXZlUmVxdWVzdBoiLmthamliYS5ob29rLnYxLlByZVJlY2VpdmVSZXNwb25zZRJWCgtQb3N0UmVjZWl2ZRIiLmthamliYS5ob29rLnYxLlBvc3RSZWNlaXZlUmVxdWVzdBojLmthamliYS5ob29rLnYxLlBvc3RSZWNlaXZlUmVzcG9uc2ViBnByb3RvMw");
 
 /**
  * @generated from message kajiba.hook.v1.GetAuthKeyRequest
@@ -87,7 +87,7 @@ export const RefUpdateSchema: GenMessage<RefUpdate> = /*@__PURE__*/
 
 /**
  * Git's quarantine environment of the pre-receive hook, passed verbatim so the
- * server's Git checks see the pushed objects (0014). Empty when Git set none
+ * daemon's Git checks see the pushed objects (0014). Empty when Git set none
  * (a push that only deletes refs).
  *
  * @generated from message kajiba.hook.v1.Quarantine
@@ -127,7 +127,7 @@ export const QuarantineSchema: GenMessage<Quarantine> = /*@__PURE__*/
  */
 export type PreReceiveRequest = Message<"kajiba.hook.v1.PreReceiveRequest"> & {
   /**
-   * Transport context set by serve-ssh (KAJIBA_USER, KAJIBA_REPO).
+   * Transport context set by serve-ssh (KAJIBA_USER, KAJIBA_REPO, KAJIBA_SESSION).
    *
    * @generated from field: string user_public_id = 1;
    */
@@ -147,6 +147,11 @@ export type PreReceiveRequest = Message<"kajiba.hook.v1.PreReceiveRequest"> & {
    * @generated from field: kajiba.hook.v1.Quarantine quarantine = 4;
    */
   quarantine?: Quarantine | undefined;
+
+  /**
+   * @generated from field: string session_id = 5;
+   */
+  sessionId: string;
 };
 
 /**
@@ -222,6 +227,11 @@ export type PostReceiveRequest = Message<"kajiba.hook.v1.PostReceiveRequest"> & 
    * @generated from field: repeated kajiba.hook.v1.RefUpdate updates = 3;
    */
   updates: RefUpdate[];
+
+  /**
+   * @generated from field: string session_id = 4;
+   */
+  sessionId: string;
 };
 
 /**
@@ -264,7 +274,7 @@ export const HookService: GenService<{
     output: typeof GetAuthKeyResponseSchema;
   },
   /**
-   * `kajiba-server hook pre-receive`: check a push's ref updates before
+   * `kajiba-git hook pre-receive`: check a push's ref updates before
    * receive-pack applies them; allowed only once every check passed and the
    * push is admitted (0003, 0014).
    *
@@ -276,7 +286,7 @@ export const HookService: GenService<{
     output: typeof PreReceiveResponseSchema;
   },
   /**
-   * `kajiba-server hook post-receive`: receive-pack updated refs; wakes push
+   * `kajiba-git hook post-receive`: receive-pack updated refs; wakes push
    * reconciliation and returns without waiting for receive-pack (0003).
    *
    * @generated from rpc kajiba.hook.v1.HookService.PostReceive

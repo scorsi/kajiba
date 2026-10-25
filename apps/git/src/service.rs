@@ -1,5 +1,6 @@
 // Tonic handlers return Status by value across the blocking filesystem work.
 #![allow(clippy::result_large_err)]
+mod hooks;
 use kajiba_core::local::{channel, rpc_error, version_error};
 use kajiba_proto::{gate::v1 as gate, git::v1::*};
 use std::{path::Path, time::Duration};

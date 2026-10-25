@@ -1,4 +1,4 @@
-//! `kajiba-server hook pre-receive|post-receive` (ADR 0003): validate Git's input and
+//! `kajiba-git hook pre-receive|post-receive` (ADR 0003): validate Git's input and
 //! serve-ssh's context, make one call over the local socket, and decide nothing itself.
 
 use kajiba_core::log;
@@ -15,7 +15,7 @@ pub enum Kind {
     PostReceive,
 }
 
-/// Runs one hook: exit 0 when the server allows (or acknowledges) the push, 1 otherwise.
+/// Runs one hook: exit 0 when the git daemon allows (or acknowledges) the push, 1 otherwise.
 /// Refusal reasons go to stderr as plain lines, which Git shows the pusher.
 pub async fn run(
     socket: &Path,
@@ -56,6 +56,7 @@ async fn call(
 ) -> Result<Vec<(String, String)>, String> {
     let user_public_id = public_id(env, "KAJIBA_USER")?;
     let repo_public_id = public_id(env, "KAJIBA_REPO")?;
+    let session_id = public_id(env, "KAJIBA_SESSION")?;
     let mut buffer = Vec::new();
     input
         .take(MAX_INPUT + 1)
@@ -66,16 +67,17 @@ async fn call(
     }
     let updates = updates(&buffer)?;
     let unavailable = |err: Box<dyn std::error::Error>| match err.downcast_ref::<tonic::Status>() {
-        Some(status) => format!("the server refused the check: {}", status.message()),
-        None => format!("the server is unavailable, retry later ({err})"),
+        Some(status) => format!("the git daemon refused the check: {}", status.message()),
+        None => format!("the git daemon is unavailable, retry later ({err})"),
     };
     match kind {
         Kind::PreReceive => {
-            let response = crate::transport::local::pre_receive(
+            let response = crate::local::pre_receive(
                 socket,
                 PreReceiveRequest {
                     user_public_id,
                     repo_public_id,
+                    session_id,
                     updates,
                     quarantine: Some(quarantine(env)?),
                 },
@@ -91,16 +93,17 @@ async fn call(
                 .map(|refusal| (refusal.ref_name, refusal.reason))
                 .collect();
             if refusals.is_empty() {
-                refusals.push((String::new(), "refused by the server".into()));
+                refusals.push((String::new(), "refused by the git daemon".into()));
             }
             Ok(refusals)
         }
         Kind::PostReceive => {
-            crate::transport::local::post_receive(
+            crate::local::post_receive(
                 socket,
                 PostReceiveRequest {
                     user_public_id,
                     repo_public_id,
+                    session_id,
                     updates,
                 },
             )

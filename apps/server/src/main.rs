@@ -3,12 +3,8 @@ use kajiba_core::{config::ServerConfig, log};
 use std::{path::PathBuf, process::ExitCode};
 
 mod db;
-mod hook;
 mod import;
 mod metrics;
-// serve-ssh joins it in J3 task 14.
-#[cfg_attr(not(test), allow(dead_code))]
-mod ssh;
 mod state;
 mod transport;
 
@@ -39,17 +35,6 @@ enum Command {
     Admin {
         #[command(subcommand)]
         command: AdminCommand,
-    },
-    /// sshd's AuthorizedKeysCommand: print the forced-command line of an active user's
-    /// auth key, or nothing for an unknown key (ADR 0004).
-    SshKeys {
-        /// `SHA256:…`, as sshd's `%f` gives it.
-        fingerprint: String,
-    },
-    /// Forward a Git hook to the running server.
-    Hook {
-        #[command(subcommand)]
-        command: HookCommand,
     },
 }
 
@@ -95,14 +80,6 @@ enum AdminCommand {
 enum RepoCommand {
     /// Map repository IDs (directories under repos/) to names; archived ones are marked.
     List,
-}
-
-#[derive(Debug, PartialEq, Eq, Subcommand)]
-enum HookCommand {
-    /// Check ref updates before receive-pack applies them.
-    PreReceive,
-    /// Notify the server that receive-pack updated refs.
-    PostReceive,
 }
 
 #[tokio::main]
@@ -248,51 +225,7 @@ async fn main() -> ExitCode {
                 return admin_repo_list(std::path::Path::new(transport::local::SOCKET_PATH)).await;
             }
         },
-        Command::SshKeys { fingerprint } => {
-            return ssh_keys(
-                std::path::Path::new(transport::local::SOCKET_PATH),
-                fingerprint,
-            )
-            .await;
-        }
-        Command::Hook { command } => {
-            let kind = match command {
-                HookCommand::PreReceive => hook::Kind::PreReceive,
-                HookCommand::PostReceive => hook::Kind::PostReceive,
-            };
-            hook::run(
-                std::path::Path::new(transport::local::SOCKET_PATH),
-                kind,
-                std::io::stdin(),
-                &|var| std::env::var(var).ok(),
-            )
-            .await
-        }
     }
-}
-
-async fn ssh_keys(path: &std::path::Path, fingerprint: String) -> ExitCode {
-    match transport::local::auth_key(path, fingerprint).await {
-        Ok(Some((user, key))) => {
-            println!("{}", authorized_key(&user, &key));
-            ExitCode::SUCCESS
-        }
-        // sshd then refuses the key; it logs the failed authentication itself.
-        Ok(None) => ExitCode::SUCCESS,
-        Err(err) => {
-            let message = match err.downcast_ref::<tonic::Status>() {
-                Some(status) => status.message().to_owned(),
-                None => err.to_string(),
-            };
-            log::error("fatal", &format!("ssh-keys: {message}"));
-            ExitCode::FAILURE
-        }
-    }
-}
-
-/// ADR 0004's line: the canonical stored key (no comment, no configured options).
-fn authorized_key(user_public_id: &str, public_key: &str) -> String {
-    format!("command=\"kajiba-server serve-ssh --user {user_public_id}\",restrict {public_key}")
 }
 
 async fn admin_enroll(path: &std::path::Path, user: String) -> ExitCode {
@@ -512,33 +445,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_ssh_keys_and_prints_adr_0004_line() {
-        assert_eq!(
-            Args::try_parse_from(["kajiba-server", "ssh-keys", "SHA256:abc"])
-                .unwrap()
-                .command,
-            Command::SshKeys {
-                fingerprint: "SHA256:abc".into()
-            }
-        );
-        assert_eq!(
-            authorized_key("01ARZ3NDEKTSV4RRFFQ69G5FAV", "ssh-ed25519 AAAA"),
-            "command=\"kajiba-server serve-ssh --user 01ARZ3NDEKTSV4RRFFQ69G5FAV\",restrict ssh-ed25519 AAAA"
-        );
-    }
-
-    #[test]
-    fn parses_hook_commands() {
-        for (name, command) in [
-            ("pre-receive", HookCommand::PreReceive),
-            ("post-receive", HookCommand::PostReceive),
-        ] {
-            assert_eq!(
-                Args::try_parse_from(["kajiba-server", "hook", name])
-                    .unwrap()
-                    .command,
-                Command::Hook { command }
-            );
+    fn ssh_helpers_are_unknown_subcommands() {
+        for command in ["ssh-keys", "hook", "serve-ssh"] {
+            let error = Args::try_parse_from(["kajiba-server", command]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
         }
     }
 }

@@ -279,6 +279,12 @@ async fn repository_rpcs_run_in_the_real_daemon() {
     .unwrap();
     let mut client =
         GitServiceClient::new(kajiba_core::local::channel(&socket, None).await.unwrap());
+    let error = crate::local::auth_key(&socket, "known".into())
+        .await
+        .unwrap_err();
+    let status = error.downcast_ref::<tonic::Status>().unwrap();
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert!(status.message().contains("server unavailable"));
     let id = "00000000000000000000000001";
     client
         .create_repository(CreateRepositoryRequest {

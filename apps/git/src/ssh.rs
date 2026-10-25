@@ -1,8 +1,6 @@
 //! `serve-ssh`'s reading of `SSH_ORIGINAL_COMMAND` (ADR 0004, 0021). Nothing here
 //! evaluates the command through a shell.
 
-use kajiba_core::names::validate_name;
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum Service {
     UploadPack,
@@ -30,13 +28,11 @@ pub fn parse(command: &str) -> Option<GitCommand> {
     // Valid names contain no quote, so a valid path needs no unquoting: any quote,
     // space or other shell character left inside fails name validation below.
     let path = argument.strip_prefix('\'')?.strip_suffix('\'')?;
-    let path = path.strip_prefix('/').unwrap_or(path);
-    let (owner, name) = path.split_once('/')?;
-    let name = name.strip_suffix(".git").unwrap_or(name);
+    let (owner, name) = kajiba_core::names::repo_address(path)?;
     Some(GitCommand {
         service,
-        owner: validate_name(owner).ok()?,
-        name: validate_name(name).ok()?,
+        owner,
+        name,
     })
 }
 
