@@ -224,8 +224,10 @@ let
   # systemd lets ExecStartPost run after the main process died, until TimeoutStartSec: stop
   # probing once $MAINPID is gone so a failed startup fails the unit at once. Silent: any
   # output would be a non-JSON line in the unit's journal (0022).
+  # Before it drops to User=, the forked main process is still root: kill -0 then fails with
+  # EPERM (ProtectProc=invisible), which is alive, not gone. Only ESRCH means it died.
   readyProbe = pkgs.writeShellScript "kajiba-server-ready" ''
-    while kill -0 "$MAINPID" 2>/dev/null; do
+    while ! kill -0 "$MAINPID" 2>&1 | ${pkgs.gnugrep}/bin/grep -q "No such process"; do
       ${lib.getExe pkgs.curl} --silent --fail --output /dev/null --max-time 5 "$1" && exit 0
       ${pkgs.coreutils}/bin/sleep 1
     done
