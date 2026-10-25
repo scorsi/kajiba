@@ -247,9 +247,9 @@ pkgs.testers.runNixOSTest {
           assert inode(git_dir(public_id)) == directory
           no_orphans()
 
-      with subtest("a stray directory under repos/ is quarantined in tmp/orphans/"):
+      with subtest("an empty stray repository is quarantined in tmp/orphans/"):
           forge.succeed(
-              "install -d -o kajiba-git -g kajiba-git -m 0750 ${gitStateDir}/repos/01ARZ3NDEKTSV4RRFFQ69G5FAV.git",
+              "runuser -u kajiba-git -- sh -c 'umask 027; git init --bare --template= --initial-branch=main ${gitStateDir}/repos/01ARZ3NDEKTSV4RRFFQ69G5FAV.git'",
               "install -o kajiba-git -g kajiba-git -m 0640 /dev/null ${gitStateDir}/repos/01ARZ3NDEKTSV4RRFFQ69G5FAV.git/marker",
               f"systemctl stop {unit}",
           )

@@ -75,6 +75,22 @@ impl Repositories {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(internal(err)),
         }
+        // Quarantine entries reserve the identity across daemon restarts (0067).
+        let orphans = self.root.join("tmp/orphans");
+        real_dir(&orphans).map_err(internal)?;
+        let name = format!("{id}.git");
+        let prefix = format!("{name}.");
+        for entry in fs::read_dir(&orphans).map_err(internal)? {
+            let entry = entry.map_err(internal)?.file_name();
+            let entry = entry.to_string_lossy();
+            if entry == name || entry.starts_with(&prefix) {
+                return Err(rpc_error(
+                    Code::AlreadyExists,
+                    "ALREADY_EXISTS",
+                    "repository identity is quarantined",
+                ));
+            }
+        }
         let tmp = self.root.join("tmp");
         real_dir(&tmp).map_err(internal)?;
         let staging = tmp.join(kajiba_core::new_id().map_err(internal)?);
@@ -355,6 +371,41 @@ impl Repositories {
         real_dir(&self.root.join("tmp")).map_err(internal)?;
         let orphans = self.root.join("tmp/orphans");
         real_dir(&orphans).map_err(internal)?;
+        // The server's orphan claim is untrusted; verify emptiness locally (0067).
+        // Hold the session lock through the move so no child can start meanwhile.
+        let sessions = self.sessions.lock().unwrap();
+        let ineligible = || {
+            rpc_error(
+                Code::FailedPrecondition,
+                "INVALID_STATE",
+                "quarantine requires an idle repository without refs or objects",
+            )
+        };
+        if sessions
+            .running
+            .values()
+            .any(|(session, _)| session.repo_public_id == id)
+            || !Gix.refs(&path).map_err(internal)?.is_empty()
+        {
+            return Err(ineligible());
+        }
+        let objects = path.join("objects");
+        real_dir(&objects).map_err(internal)?;
+        for entry in fs::read_dir(&objects).map_err(internal)? {
+            let entry = entry.map_err(internal)?;
+            if (entry.file_name() == "info" || entry.file_name() == "pack")
+                && entry.file_type().map_err(internal)?.is_dir()
+                && fs::read_dir(entry.path())
+                    .map_err(internal)?
+                    .next()
+                    .transpose()
+                    .map_err(internal)?
+                    .is_none()
+            {
+                continue;
+            }
+            return Err(ineligible());
+        }
         let name = format!("{id}.git");
         let mut destination = orphans.join(&name);
         let mut suffix = 0_u64;

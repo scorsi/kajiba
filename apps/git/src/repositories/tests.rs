@@ -107,10 +107,9 @@ fn creation_head_and_quarantine_validate_the_boundary_and_preserve_data() {
         "collision"
     );
     assert!(!path.exists());
-    repos.create(ID, "main").unwrap();
     assert_eq!(
-        repos.quarantine(ID).unwrap(),
-        orphans.join(format!("{ID}.git.4"))
+        repos.create(ID, "main").unwrap_err().code(),
+        Code::AlreadyExists
     );
 }
 

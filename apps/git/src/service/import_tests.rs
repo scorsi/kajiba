@@ -158,6 +158,130 @@ fn branches_and_tags(path: &Path) -> Vec<Ref> {
 }
 
 #[tokio::test]
+async fn quarantine_cannot_replace_history_or_reuse_an_identity() {
+    let dir = TempDir::new();
+    let lock = prepare(&dir.0).unwrap();
+    let mut daemon = Git {
+        generation: kajiba_core::new_id().unwrap(),
+        repositories: Arc::new(crate::repositories::Repositories::new(dir.0.clone())),
+        server_socket: dir.0.join("absent.sock"),
+    };
+    let target = dir.0.join(format!("repos/{ID}.git"));
+    // Filesystem fixtures keep this regression independent of writing Git commands.
+    for name in ["refs/heads", "objects/info", "objects/pack"] {
+        std::fs::create_dir_all(target.join(name)).unwrap();
+    }
+    std::fs::write(target.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(target.join("config"), "[core]\n\tbare = true\n").unwrap();
+    let original = "1111111111111111111111111111111111111111";
+    std::fs::write(target.join("refs/heads/main"), format!("{original}\n")).unwrap();
+    let replacement = || {
+        vec![RemoteRef {
+            ref_name: "refs/heads/main".into(),
+            object_id: "2222222222222222222222222222222222222222".into(),
+        }]
+    };
+    assert_eq!(
+        daemon
+            .quarantine_repository(Request::new(QuarantineRepositoryRequest {
+                repo_public_id: ID.into(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::FailedPrecondition
+    );
+    assert_eq!(
+        daemon
+            .create_repository(Request::new(CreateRepositoryRequest {
+                repo_public_id: ID.into(),
+                default_branch: "main".into(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::AlreadyExists
+    );
+    let fetch = request(&daemon, "/unused/source.git", replacement());
+    // Exercise Fetch's shared guard without a Gate socket or a writing Git child.
+    assert_eq!(
+        daemon.repositories.fetch(fetch).unwrap_err().code(),
+        tonic::Code::FailedPrecondition
+    );
+    assert_eq!(Gix.refs(&target).unwrap()[0].target, original);
+
+    std::fs::remove_file(target.join("refs/heads/main")).unwrap();
+    // Even without refs, stored history is not independently known to be empty.
+    let object = target.join("objects/pack/history.pack");
+    std::fs::write(&object, "preserve history").unwrap();
+    assert_eq!(
+        daemon
+            .quarantine_repository(Request::new(QuarantineRepositoryRequest {
+                repo_public_id: ID.into()
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::FailedPrecondition
+    );
+    std::fs::remove_file(object).unwrap();
+    let session = request(&daemon, "/unused/source.git", replacement())
+        .session
+        .unwrap();
+    daemon
+        .repositories
+        .register(session.clone(), String::new())
+        .unwrap();
+    assert_eq!(
+        daemon
+            .quarantine_repository(Request::new(QuarantineRepositoryRequest {
+                repo_public_id: ID.into()
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::FailedPrecondition
+    );
+    daemon.repositories.finished(&session.session_id, 1);
+    let destination = daemon
+        .quarantine_repository(Request::new(QuarantineRepositoryRequest {
+            repo_public_id: ID.into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .destination;
+    assert!(Path::new(&destination).join("HEAD").is_file());
+    assert_eq!(
+        daemon.repositories.create(ID, "main").unwrap_err().code(),
+        tonic::Code::AlreadyExists
+    );
+
+    // Restart cleanup must retain the identity reservation, including suffixed moves.
+    std::fs::rename(&destination, format!("{destination}.3")).unwrap();
+    drop(lock);
+    let _lock = prepare(&dir.0).unwrap();
+    daemon.repositories = Arc::new(crate::repositories::Repositories::new(dir.0.clone()));
+    assert_eq!(
+        daemon
+            .create_repository(Request::new(CreateRepositoryRequest {
+                repo_public_id: ID.into(),
+                default_branch: "main".into()
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::AlreadyExists
+    );
+    assert!(!target.exists());
+    let fetch = request(&daemon, "/unused/source.git", replacement());
+    assert_eq!(
+        daemon.repositories.fetch(fetch).unwrap_err().code(),
+        tonic::Code::NotFound
+    );
+}
+
+#[tokio::test]
 async fn imports_paths_bundles_and_urls_preserving_refs_tags_and_head() {
     for kind in ["path", "bundle", "url"] {
         let dir = TempDir::new();
