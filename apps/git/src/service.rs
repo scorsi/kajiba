@@ -149,6 +149,7 @@ impl git_service_server::GitService for Git {
                 }
                 tracing::info!(
                     event = "session-started",
+                    request_id = session.correlation_id,
                     session = session.session_id,
                     kind = "import",
                     repo = session.repo_public_id

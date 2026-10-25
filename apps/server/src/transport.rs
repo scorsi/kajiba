@@ -293,7 +293,7 @@ pub async fn serve(
         kajiba_core::local::user_id(c"kajiba-git")?,
         kajiba_core::local::group_id(c"kajiba-git")?,
     )?;
-    let gate = gate::Gate::new(&admin);
+    let gate = gate::Gate::new(&admin, registry.clone());
     let git_side = health.git_side.clone();
     let app = router(health, config.reflection, registry.clone()).map_err(std::io::Error::other)?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;

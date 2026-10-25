@@ -23,6 +23,7 @@ pub struct Gate {
     pub admission: Arc<crate::db::pushes::Gate>,
     pub bus: Arc<crate::db::events::EventBus>,
     pub state_dir: std::path::PathBuf,
+    pub registry: Arc<Registry>,
 }
 
 #[tonic::async_trait]
@@ -64,54 +65,56 @@ impl GateService for Gate {
         &self,
         request: Request<OpenSessionRequest>,
     ) -> Result<Response<OpenSessionResponse>, Status> {
-        self.open(request.into_inner()).await.map(Response::new)
+        let request = request.into_inner();
+        let result = self.open(&request).await;
+        if request.kind == kajiba_proto::git::v1::SessionKind::ReceivePack as i32 {
+            if let Err(err) = &result {
+                self.registry.push(false);
+                let repo = match &request.repository {
+                    Some(open_session_request::Repository::RepoPublicId(id)) => id.as_str(),
+                    Some(open_session_request::Repository::RepoAddress(address)) => {
+                        address.as_str()
+                    }
+                    None => "",
+                };
+                refused(&request.correlation_id, repo, "", refusal_reason(err));
+            }
+        }
+        result.map(Response::new)
     }
 
     async fn pre_receive(
         &self,
         request: Request<PreReceiveRequest>,
     ) -> Result<Response<PreReceiveResponse>, Status> {
+        let fallback = request
+            .extensions()
+            .get::<correlation::RequestId>()
+            .cloned();
         let request = request.into_inner();
-        // Policy, admission and session exit share the writer lock.
-        let mut writer = self.writer.lock().await;
-        let mut refusals = self.refusals(&mut writer, &request).await?;
-        if refusals.is_empty() {
-            let (repo, session) = self
-                .admission
-                .session(&request.session_id)
-                .ok_or_else(|| Status::failed_precondition("live receive-pack session required"))?;
-            let principal: i64 = sqlx::query_scalar("SELECT id FROM user WHERE public_id = ?")
-                .bind(&session.user_public_id)
-                .fetch_one(&mut *writer)
-                .await
-                .map_err(|err| Status::internal(err.to_string()))?;
-            let updates: Vec<_> = request
-                .updates
-                .into_iter()
-                .map(|update| crate::db::pushes::RefUpdate {
-                    name: update.ref_name,
-                    old: update.old_id,
-                    new: update.new_id,
-                })
-                .collect();
-            if let Err(err) = self
-                .admission
-                .admit_session(&mut writer, repo, principal, &session, &updates)
-                .await
-            {
-                if let crate::db::pushes::Refused::Database(err) = err {
-                    return Err(Status::internal(err.to_string()));
+        let session = self.admission.session(&request.session_id);
+        let request_id = match &session {
+            Some((_, session)) => session.correlation_id.clone(),
+            None => match fallback {
+                Some(id) => id.0,
+                None => kajiba_core::new_id().map_err(|err| Status::internal(err.to_string()))?,
+            },
+        };
+        let repo = session
+            .as_ref()
+            .map_or("", |(_, session)| session.repo_public_id.as_str());
+        let result = self.admit(request).await;
+        self.registry
+            .push(result.as_ref().is_ok_and(|response| response.allowed));
+        match &result {
+            Ok(response) => {
+                for refusal in &response.refusals {
+                    refused(&request_id, repo, &refusal.ref_name, &refusal.reason);
                 }
-                refusals.push(Refusal {
-                    ref_name: String::new(),
-                    reason: err.to_string(),
-                });
             }
+            Err(err) => refused(&request_id, repo, "", refusal_reason(err)),
         }
-        Ok(Response::new(PreReceiveResponse {
-            allowed: refusals.is_empty(),
-            refusals,
-        }))
+        result.map(Response::new)
     }
 
     async fn post_receive(
@@ -165,17 +168,61 @@ impl GateService for Gate {
 }
 
 impl Gate {
-    pub fn new(admin: &super::local::Admin) -> Self {
+    async fn admit(&self, request: PreReceiveRequest) -> Result<PreReceiveResponse, Status> {
+        // Policy, admission and session exit share the writer lock.
+        let mut writer = self.writer.lock().await;
+        let mut refusals = self.refusals(&mut writer, &request).await?;
+        if refusals.is_empty() {
+            let (repo, session) = self
+                .admission
+                .session(&request.session_id)
+                .ok_or_else(|| Status::failed_precondition("live receive-pack session required"))?;
+            let principal: i64 = sqlx::query_scalar("SELECT id FROM user WHERE public_id = ?")
+                .bind(&session.user_public_id)
+                .fetch_one(&mut *writer)
+                .await
+                .map_err(|err| Status::internal(err.to_string()))?;
+            let updates: Vec<_> = request
+                .updates
+                .into_iter()
+                .map(|update| crate::db::pushes::RefUpdate {
+                    name: update.ref_name,
+                    old: update.old_id,
+                    new: update.new_id,
+                })
+                .collect();
+            if let Err(err) = self
+                .admission
+                .admit_session(&mut writer, repo, principal, &session, &updates)
+                .await
+            {
+                if let crate::db::pushes::Refused::Database(err) = err {
+                    return Err(Status::internal(err.to_string()));
+                }
+                refusals.push(Refusal {
+                    ref_name: String::new(),
+                    reason: err.to_string(),
+                });
+            }
+        }
+        Ok(PreReceiveResponse {
+            allowed: refusals.is_empty(),
+            refusals,
+        })
+    }
+
+    pub fn new(admin: &super::local::Admin, registry: Arc<Registry>) -> Self {
         Self {
             writer: admin.writer.clone(),
             generation: Mutex::default(),
             admission: admin.gate.clone(),
             bus: admin.bus.clone(),
             state_dir: admin.state_dir.clone(),
+            registry,
         }
     }
 
-    async fn open(&self, request: OpenSessionRequest) -> Result<OpenSessionResponse, Status> {
+    async fn open(&self, request: &OpenSessionRequest) -> Result<OpenSessionResponse, Status> {
         use kajiba_core::config::Role as Permission;
         use kajiba_proto::git::v1::{Session, SessionKind};
         let kind = SessionKind::try_from(request.kind)
@@ -208,21 +255,20 @@ impl Gate {
         if self.admission.generation().as_ref() != Some(&generation) {
             return Err(super::git_side::unavailable("session snapshot required"));
         }
-        let public_id = match request.repository {
+        let public_id = match &request.repository {
             Some(open_session_request::Repository::RepoPublicId(id))
-                if kajiba_core::names::is_public_id(&id) =>
+                if kajiba_core::names::is_public_id(id) =>
             {
-                id
+                id.clone()
             }
             Some(open_session_request::Repository::RepoAddress(address)) => {
-                let (owner, name) =
-                    kajiba_core::names::repo_address(&address).ok_or_else(|| {
-                        rpc_error(
-                            tonic::Code::InvalidArgument,
-                            "INVALID_FIELD",
-                            "invalid repository address",
-                        )
-                    })?;
+                let (owner, name) = kajiba_core::names::repo_address(address).ok_or_else(|| {
+                    rpc_error(
+                        tonic::Code::InvalidArgument,
+                        "INVALID_FIELD",
+                        "invalid repository address",
+                    )
+                })?;
                 sqlx::query_scalar::<_, String>(
                     "SELECT repo.public_id FROM repo JOIN user ON user.id = repo.owner_id
                      WHERE user.name = ?1 AND repo.name = ?2
@@ -359,8 +405,8 @@ impl Gate {
             session_id,
             kind: kind.into(),
             repo_public_id: public_id.clone(),
-            user_public_id: request.user_public_id,
-            correlation_id: request.correlation_id,
+            user_public_id: request.user_public_id.clone(),
+            correlation_id: request.correlation_id.clone(),
             generation,
         };
         self.admission.opened(repo, session.clone());
@@ -372,6 +418,20 @@ impl Gate {
             is_admin,
             allowed_signers: signers,
         })
+    }
+}
+
+fn refused(request_id: &str, repo: &str, ref_name: &str, reason: &str) {
+    tracing::info_span!("push", request_id).in_scope(|| {
+        tracing::warn!(event = "push-refused", repo, "ref" = ref_name, reason);
+    });
+}
+
+fn refusal_reason(status: &Status) -> &str {
+    if status.code() == tonic::Code::Internal {
+        "push admission failed"
+    } else {
+        status.message()
     }
 }
 

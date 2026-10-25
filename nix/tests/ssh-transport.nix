@@ -190,6 +190,40 @@ pkgs.testers.runNixOSTest {
         assert forge.succeed("cat /root/push.out")
         git("-C /root/work push host:alice/demo main")
 
+    with subtest("push and session logs retain admission correlation without duplicate replay"):
+        forge.succeed("journalctl --sync")
+        def journal(service):
+            return [json.loads(line) for line in forge.succeed(f"journalctl _SYSTEMD_UNIT={service} -o cat --no-pager").splitlines()]
+
+        server_logs = journal(unit)
+        daemon_logs = journal("kajiba-git.service")
+        pushes = [line for line in server_logs if line.get("event") == "push"]
+        events = json.loads(forge.succeed(f"sqlite3 -json {db} \"SELECT correlation_id, payload FROM event WHERE kind='push' ORDER BY id\""))
+        assert len(pushes) == len(events), (pushes, events)
+        for push, event in zip(pushes, events):
+            assert push["request_id"] == event["correlation_id"]
+            assert push["repo"] == "alice/demo" and push["user"] == "alice"
+            for field, value in json.loads(event["payload"]).items():
+                assert push[field] == value, (push, event)
+        refusals = [line for line in server_logs if line.get("event") == "push-refused"]
+        assert any(line["reason"] == "repository role required" for line in refusals)
+        for line in refusals:
+            assert line["level"] == "warn" and line["request_id"] and line["repo"]
+            assert "ref" in line and line["reason"]
+        starts = [line for line in daemon_logs if line.get("event") == "session-started"]
+        exits = [line for line in daemon_logs if line.get("event") == "session-exited"]
+        assert len(starts) == len(exits) == len({line["session"] for line in exits})
+        for start in starts:
+            exit = next(line for line in exits if line["session"] == start["session"])
+            assert start["level"] == exit["level"] == "info"
+            assert start["kind"] in ["receive_pack", "upload_pack"]
+            for field in ["session", "kind", "repo", "request_id"]:
+                assert start[field] and start[field] == exit[field], (start, exit)
+            assert isinstance(exit["status"], int)
+        for push in pushes:
+            assert any(start["kind"] == "receive_pack" and start["request_id"] == push["request_id"] for start in starts)
+        assert "ssh-ed25519" not in json.dumps(server_logs + daemon_logs)
+
     validate_logs(forge, unit)
     validate_logs(forge, "kajiba-git.service")
   '';

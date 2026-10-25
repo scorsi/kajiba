@@ -6,6 +6,9 @@ fn golden_exposition() {
     registry.observe(Kind::Other, "200", Duration::from_millis(250));
     registry.observe(Kind::Other, "404", Duration::from_secs(31));
     registry.observe(Kind::Grpc, "UNAVAILABLE", Duration::ZERO);
+    registry.push(true);
+    registry.push(false);
+    registry.push(false);
     assert_eq!(
         registry.exposition("test", [2, 1, 3, 3], [1, 0, 0, 0]),
         include_str!("../../tests/fixtures/metrics.prom")
@@ -72,7 +75,18 @@ fn labels_are_closed_and_version_is_escaped() {
         }
     }
     let samples = output.lines().filter(|line| !line.starts_with('#')).count();
-    assert_eq!(samples, 195);
+    let pushes: Vec<_> = output
+        .lines()
+        .filter(|line| line.starts_with("kajiba_pushes_total{"))
+        .collect();
+    assert_eq!(
+        pushes,
+        [
+            "kajiba_pushes_total{result=\"accepted\"} 0",
+            "kajiba_pushes_total{result=\"refused\"} 0",
+        ]
+    );
+    assert_eq!(samples, 197);
     assert!(samples <= 500);
 }
 
@@ -84,11 +98,14 @@ fn concurrent_updates_are_not_lost() {
             scope.spawn(|| {
                 for _ in 0..1000 {
                     registry.observe(Kind::Grpc, "OK", Duration::from_millis(250));
+                    registry.push(true);
+                    registry.push(false);
                 }
             });
         }
     });
     assert_eq!(registry.requests[0][0].get(), 4000);
+    assert_eq!(registry.pushes.map(|count| count.get()), [4000; 2]);
     assert_eq!(registry.durations[0].bins[2].get(), 4000);
     assert_eq!(
         f64::from_bits(registry.durations[0].sum.load(Relaxed)),

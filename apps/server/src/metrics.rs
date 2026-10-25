@@ -103,8 +103,14 @@ impl Histogram {
 pub struct Registry {
     requests: [[Counter; 22]; 6],
     durations: [Histogram; 6],
+    pushes: [Counter; 2],
 }
 impl Registry {
+    /// Count admission decisions once per push, regardless of its number of refs.
+    pub fn push(&self, accepted: bool) {
+        self.pushes[usize::from(!accepted)].add(1);
+    }
+
     pub fn observe(&self, kind: Kind, status: &str, duration: Duration) {
         let code = status
             .parse::<u16>()
@@ -153,6 +159,15 @@ impl Registry {
             writeln!(
                 out,
                 "kajiba_request_duration_seconds_count{{kind=\"{kind}\"}} {count}"
+            )
+            .unwrap();
+        }
+        out.push_str("# HELP kajiba_pushes_total Push admission decisions.\n# TYPE kajiba_pushes_total counter\n");
+        for (result, count) in ["accepted", "refused"].into_iter().zip(&self.pushes) {
+            writeln!(
+                out,
+                "kajiba_pushes_total{{result=\"{result}\"}} {}",
+                count.get()
             )
             .unwrap();
         }

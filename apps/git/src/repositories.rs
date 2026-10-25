@@ -236,6 +236,7 @@ impl Repositories {
             }
             tracing::info!(
                 event = "session-exited",
+                request_id = session.correlation_id,
                 session = session.session_id,
                 kind = crate::metrics::kind_name(session.kind),
                 repo = session.repo_public_id,

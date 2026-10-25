@@ -10,7 +10,7 @@ use tonic_types::StatusExt;
 async fn hello_checks_exact_version_before_recording_a_canonical_generation() {
     let state = State::new();
     let admin = local::tests::admin(&state.health.state_dir, "").await;
-    let gate = Gate::new(&admin);
+    let gate = Gate::new(&admin, Default::default());
     let generation = kajiba_core::new_id().unwrap();
     for version in [
         String::new(),
@@ -86,7 +86,7 @@ async fn git_socket_has_its_own_peer_policy_mode_and_services() {
         assert_eq!(metadata.uid(), effective_uid());
         assert_eq!(metadata.gid(), gid);
         let admin = local::tests::admin(&dir.join("db"), "").await;
-        let gate = Gate::new(&admin);
+        let gate = Gate::new(&admin, Default::default());
         let server = tokio::spawn(serve(local, gate, Arc::default(), std::future::pending()));
         let result = tokio::time::timeout(Duration::from_secs(2), async {
             let channel = channel(&path, Some(Duration::from_secs(1)))
@@ -127,7 +127,7 @@ async fn gate_auth_and_closed_hooks_leave_admin_socket_unchanged() {
         &format!("[users.alice]\nssh_keys=['{KEY} ignored comment']"),
     )
     .await;
-    let gate = Gate::new(&admin);
+    let gate = Gate::new(&admin, Default::default());
     let admin_path = dir.join("local.sock");
     let admin_server = tokio::spawn(local::serve(
         local::bind(&admin_path, Arc::default()).unwrap(),
@@ -264,7 +264,7 @@ async fn session_fixture() -> (State, local::Admin, Gate, String) {
     .await
     .unwrap()
     .committed();
-    let gate = Gate::new(&admin);
+    let gate = Gate::new(&admin, Default::default());
     let generation = kajiba_core::new_id().unwrap();
     gate.admission
         .rebuild(&mut *admin.writer.lock().await, &generation, vec![])
@@ -576,7 +576,7 @@ async fn controlled_process_crash_recovery() {
             .unwrap();
         *admin.writer.lock().await = writer;
         admin.gate = Arc::default();
-        let gate = Gate::new(&admin);
+        let gate = Gate::new(&admin, Default::default());
         let generation = if crash == "server" {
             session.generation.clone()
         } else {
@@ -675,7 +675,7 @@ async fn an_unstarted_reservation_is_recovered_and_a_late_fetch_is_refused() {
         .await
         .unwrap();
     admin.gate = Arc::default();
-    let gate = Gate::new(&admin);
+    let gate = Gate::new(&admin, Default::default());
     let generation = kajiba_core::new_id().unwrap();
     gate.admission
         .rebuild(&mut *admin.writer.lock().await, &generation, vec![])
@@ -735,7 +735,7 @@ async fn auth_key_lookup_resolves_only_active_users_auth_keys() {
     let writer = admin.writer.clone();
     let server = tokio::spawn(serve(
         listener,
-        Gate::new(&admin),
+        Gate::new(&admin, Default::default()),
         Arc::default(),
         std::future::pending(),
     ));
@@ -888,6 +888,39 @@ async fn post_receive_returns_before_exit_and_converts_only_applied_refs_in_orde
     use kajiba_proto::git::v1::SessionKind;
     use std::process::{Command, Stdio};
 
+    const CHILD: &str = "KAJIBA_TEST_PUSH_LOGS";
+    if std::env::var_os(CHILD).is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "transport::gate::tests::post_receive_returns_before_exit_and_converts_only_applied_refs_in_order", "--nocapture"])
+            .env(CHILD, "1").env_remove("RUST_LOG").output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let text = String::from_utf8(output.stderr).unwrap();
+        let logs: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let pushes: Vec<_> = logs.iter().filter(|line| line["event"] == "push").collect();
+        assert_eq!(pushes.len(), 9, "{text}");
+        for outcome in ["partial", "unexpected", "archived"] {
+            let correlation = format!("push-request-{outcome}");
+            let applied: Vec<_> = pushes
+                .iter()
+                .filter(|line| line["request_id"] == correlation)
+                .collect();
+            assert_eq!(applied.len(), 3, "{text}");
+            for (line, name) in applied.iter().zip(["main", "gone", "new"]) {
+                assert_eq!(line["level"], "info");
+                assert_eq!(line["repo"], "alice/demo");
+                assert_eq!(line["user"], "alice");
+                assert_eq!(line["ref"], format!("refs/heads/{name}"));
+                for field in ["old", "new"] {
+                    assert_eq!(line[field].as_str().unwrap().len(), 40);
+                }
+            }
+        }
+        return;
+    }
+    kajiba_core::log::init("info").unwrap();
     for outcome in ["partial", "failed", "unexpected", "archived"] {
         let (_state, admin, gate, alice) = session_fixture().await;
         let open = OpenSessionRequest {
@@ -896,7 +929,7 @@ async fn post_receive_returns_before_exit_and_converts_only_applied_refs_in_orde
             repository: Some(open_session_request::Repository::RepoAddress(
                 "alice/demo".into(),
             )),
-            correlation_id: "push-request".into(),
+            correlation_id: format!("push-request-{outcome}"),
             import_session_id: String::new(),
         };
         let session = gate
@@ -1029,7 +1062,12 @@ async fn post_receive_returns_before_exit_and_converts_only_applied_refs_in_orde
             exit_status: 1,
         };
         for _ in 0..2 {
+            use tracing::Instrument;
             gate.session_exited(Request::new(exit.clone()))
+                .instrument(tracing::info_span!(
+                    "request",
+                    request_id = "completion-rpc"
+                ))
                 .await
                 .unwrap();
             gate.post_receive(Request::new(post.clone())).await.unwrap();
@@ -1049,7 +1087,7 @@ async fn post_receive_returns_before_exit_and_converts_only_applied_refs_in_orde
                     .fetch_one(&mut *writer)
                     .await
                     .unwrap();
-            assert_eq!(pending.0, "push-request");
+            assert_eq!(pending.0, format!("push-request-{outcome}"));
             assert_eq!(
                 serde_json::from_str::<Vec<serde_json::Value>>(&pending.1)
                     .unwrap()
@@ -1097,7 +1135,7 @@ async fn post_receive_returns_before_exit_and_converts_only_applied_refs_in_orde
         } else {
             [0, 2, 4].into_iter().map(|i| {
                 let update = &updates[i];
-                ("user".to_owned(), principal, 1, "push-request".to_owned(),
+                ("user".to_owned(), principal, 1, format!("push-request-{outcome}"),
                     serde_json::json!({"ref": update.ref_name, "old": update.old_id, "new": update.new_id}).to_string())
             }).collect()
         };
@@ -1109,6 +1147,16 @@ async fn post_receive_returns_before_exit_and_converts_only_applied_refs_in_orde
         assert_eq!(pending, 0);
         drop(writer);
         assert!(gate.open_session(Request::new(open)).await.is_ok());
+        let metrics = gate.registry.exposition("test", [0; 4], [0; 4]);
+        assert!(metrics.contains("kajiba_pushes_total{result=\"accepted\"} 1\n"));
+        let refused = if matches!(outcome, "unexpected" | "archived") {
+            2
+        } else {
+            1
+        };
+        assert!(metrics.contains(&format!(
+            "kajiba_pushes_total{{result=\"refused\"}} {refused}\n"
+        )));
     }
 }
 
@@ -1162,4 +1210,110 @@ async fn post_receive_validates_session_and_wakes_recovery_without_a_timer_tick(
         () = &mut recovery => unreachable!("recovery runs until shutdown"),
         result = tokio::time::timeout(Duration::from_secs(2), converted) => result.unwrap(),
     }
+}
+
+#[tokio::test]
+async fn push_refusals_have_correlated_logs_and_count_once() {
+    use kajiba_proto::git::v1::SessionKind;
+    use tracing::Instrument;
+    const CHILD: &str = "KAJIBA_TEST_PUSH_REFUSALS";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "transport::gate::tests::push_refusals_have_correlated_logs_and_count_once",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let text = String::from_utf8(output.stderr).unwrap();
+        for secret in [AUTH, SIGNING, "ssh-ed25519", "private database diagnostic"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+        let logs: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let refused: Vec<_> = logs
+            .iter()
+            .filter(|line| line["event"] == "push-refused")
+            .collect();
+        assert_eq!(refused.len(), 5, "{text}");
+        for line in &refused {
+            assert_eq!(line["level"], "warn");
+            assert_eq!(line["request_id"], "admission-request");
+            assert!(!line["repo"].as_str().unwrap().is_empty());
+            assert!(line["ref"].is_string());
+            assert!(!line["reason"].as_str().unwrap().is_empty());
+        }
+        assert_eq!(refused[0]["repo"], "alice/demo");
+        assert_eq!(refused[0]["ref"], ""); // No ref is known before receive-pack starts.
+        assert_eq!(refused[0]["reason"], "repository role required");
+        for (line, name) in refused[1..3].iter().zip(["one", "two"]) {
+            assert_eq!(line["ref"], format!("refs/heads/{name}"));
+            assert_eq!(
+                line["reason"],
+                "signature verification failed: commit 1111111111111111111111111111111111111111: wrong signer"
+            );
+        }
+        assert_eq!(refused[3]["reason"], "push admission failed");
+        assert!(refused[4]["reason"].as_str().unwrap().contains("retry"));
+        assert!(!logs.iter().any(|line| line["event"] == "push"));
+        return;
+    }
+    kajiba_core::log::init("info").unwrap();
+    let (_state, admin, gate, alice) = session_fixture().await;
+    let config = kajiba_core::config::ServerConfig::parse(&format!(
+        "[http]\npublic_url='{PUBLIC_URL}'\n[users.alice]\nssh_keys=['{AUTH}']\nsigning_keys=['{SIGNING}']\n[users.bob]\n"
+    )).unwrap();
+    crate::db::reconcile(&mut *admin.writer.lock().await, &config.users)
+        .await
+        .unwrap();
+    async {
+        let mut open = OpenSessionRequest {
+            user_public_id: sqlx::query_scalar("SELECT public_id FROM user WHERE name = 'bob'")
+                .fetch_one(&mut *admin.writer.lock().await).await.unwrap(),
+            kind: SessionKind::ReceivePack.into(),
+            repository: Some(open_session_request::Repository::RepoAddress("alice/demo".into())),
+            correlation_id: "admission-request".into(),
+            ..Default::default()
+        };
+        assert_eq!(gate.open_session(Request::new(open.clone())).await.unwrap_err().code(), Code::PermissionDenied);
+        // A failed read session must not count as a refused push.
+        let mut read = open.clone();
+        read.kind = SessionKind::UploadPack.into();
+        read.repository = Some(open_session_request::Repository::RepoAddress("alice/missing".into()));
+        assert!(gate.open_session(Request::new(read)).await.is_err());
+        open.user_public_id = alice;
+        let opened = gate.open_session(Request::new(open)).await.unwrap().into_inner();
+        assert!(opened.allowed_signers.contains(SIGNING));
+        let mut request = PreReceiveRequest {
+            session_id: opened.session.unwrap().session_id,
+            updates: ["one", "two"].into_iter().map(|name| RefUpdate {
+                ref_name: format!("refs/heads/{name}"),
+                old_id: crate::db::pushes::ZERO.into(),
+                new_id: "1111111111111111111111111111111111111111".into(),
+                fast_forward: Some(false),
+                signature: SignatureVerdict::Refused.into(),
+                signature_reason: "commit 1111111111111111111111111111111111111111: wrong signer".into(),
+            }).collect(),
+        };
+        assert!(!gate.pre_receive(Request::new(request.clone())).await.unwrap().into_inner().allowed);
+        for update in &mut request.updates {
+            update.signature = SignatureVerdict::Verified.into();
+            update.signature_reason.clear();
+        }
+        sqlx::query("CREATE TEMP TRIGGER fail_admission BEFORE INSERT ON pending_push BEGIN SELECT RAISE(ABORT, 'private database diagnostic'); END")
+            .execute(&mut *admin.writer.lock().await).await.unwrap();
+        assert_eq!(gate.pre_receive(Request::new(request.clone())).await.unwrap_err().code(), Code::Internal);
+        sqlx::query("DROP TRIGGER fail_admission").execute(&mut *admin.writer.lock().await).await.unwrap();
+        assert!(gate.pre_receive(Request::new(request.clone())).await.unwrap().into_inner().allowed);
+        assert!(!gate.pre_receive(Request::new(request)).await.unwrap().into_inner().allowed);
+        let metrics = gate.registry.exposition("test", [0; 4], [0; 4]);
+        assert!(metrics.contains("kajiba_pushes_total{result=\"accepted\"} 1\n"));
+        assert!(metrics.contains("kajiba_pushes_total{result=\"refused\"} 4\n"));
+    }.instrument(tracing::info_span!("request", request_id = "current-rpc")).await;
 }

@@ -380,17 +380,20 @@ impl Gate {
             }
             .await;
             result.map_err(|err| format!("push reconciliation: {repo}: {err}"))?;
-            for update in applied {
-                tracing::info!(
-                    event = "push",
-                    request_id = correlation_id,
-                    repo,
-                    "ref" = update.name,
-                    old = update.old,
-                    new = update.new,
-                    user
-                );
-            }
+            // Completion RPCs have their own request span; retain the admission identity.
+            tracing::info_span!("push", request_id = correlation_id).in_scope(|| {
+                for update in applied {
+                    tracing::info!(
+                        event = "push",
+                        request_id = correlation_id,
+                        repo,
+                        "ref" = update.name,
+                        old = update.old,
+                        new = update.new,
+                        user
+                    );
+                }
+            });
         }
         Ok(())
     }

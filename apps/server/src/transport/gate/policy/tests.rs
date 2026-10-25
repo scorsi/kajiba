@@ -165,7 +165,7 @@ async fn fixture() -> (State, Gate, Session) {
         "[users.alice]\n[users.bob]\n[users.carol]\nis_admin=true\n",
     )
     .await;
-    let gate = Gate::new(&admin);
+    let gate = Gate::new(&admin, Default::default());
     let mut writer = gate.writer.lock().await;
     let repo = kajiba_core::new_id().unwrap();
     sqlx::query("INSERT INTO repo (public_id, owner_id, name, config_key, visibility, ci_enabled, default_branch, description, created_at)

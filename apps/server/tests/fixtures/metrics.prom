@@ -191,6 +191,10 @@ kajiba_request_duration_seconds_bucket{kind="other",le="30"} 1
 kajiba_request_duration_seconds_bucket{kind="other",le="+Inf"} 2
 kajiba_request_duration_seconds_sum{kind="other"} 31.25
 kajiba_request_duration_seconds_count{kind="other"} 2
+# HELP kajiba_pushes_total Push admission decisions.
+# TYPE kajiba_pushes_total counter
+kajiba_pushes_total{result="accepted"} 1
+kajiba_pushes_total{result="refused"} 2
 # HELP kajiba_handler_lag_events Journal events after the handler checkpoint.
 # TYPE kajiba_handler_lag_events gauge
 kajiba_handler_lag_events{handler="ci"} 2
