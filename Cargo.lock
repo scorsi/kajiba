@@ -1978,9 +1978,12 @@ dependencies = [
 name = "kajiba-core"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "http",
+ "http-body",
  "hyper-util",
  "libc",
+ "prost",
  "serde",
  "serde_json",
  "ssh-key",
@@ -2009,6 +2012,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tonic",
+ "tonic-types",
  "tracing",
 ]
 

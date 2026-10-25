@@ -355,3 +355,133 @@ async fn repository_rpcs_run_in_the_real_daemon() {
     stop.send(()).unwrap();
     daemon.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn repository_rpc_routes_correlate_errors_and_logs() {
+    use tonic_types::StatusExt;
+    const CHILD: &str = "KAJIBA_TEST_DAEMON_RPC_LOGS";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "daemon::tests::repository_rpc_routes_correlate_errors_and_logs",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let errors: Vec<(String, String)> = serde_json::from_str(
+            stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("ERROR_IDS="))
+                .unwrap(),
+        )
+        .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(!stderr.contains("DO-NOT-TRUST"));
+        let logs: Vec<serde_json::Value> = stderr
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let requests: Vec<_> = logs
+            .iter()
+            .filter(|line| line["event"] == "request")
+            .collect();
+        assert_eq!(requests.len(), 4, "{logs:?}");
+        let ids: std::collections::BTreeSet<_> = requests
+            .iter()
+            .map(|line| line["request_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), requests.len());
+        for line in &requests {
+            assert_eq!(line["status"], 200);
+            assert!(line["dur_us"].is_number());
+            assert!(line["method"].as_str().unwrap().starts_with("/kajiba."));
+        }
+        for (id, code) in errors {
+            let request = requests
+                .iter()
+                .find(|line| line["request_id"] == id)
+                .unwrap();
+            assert_eq!(request["grpc_code"], code);
+        }
+        let created = logs
+            .iter()
+            .find(|line| line["event"] == "repo-created")
+            .unwrap();
+        assert!(
+            requests.iter().any(
+                |line| line["request_id"] == created["request_id"] && line["grpc_code"] == "OK"
+            )
+        );
+        let internal = requests
+            .iter()
+            .find(|line| line["grpc_code"] == "INTERNAL")
+            .unwrap();
+        assert_eq!(internal["level"], "error");
+        assert!(internal["err"].as_str().unwrap().contains("repos"));
+        return;
+    }
+    kajiba_core::log::init("info").unwrap();
+    use kajiba_proto::git::v1::{CreateRepositoryRequest, git_service_client::GitServiceClient};
+    use kajiba_proto::hook::v1::{PreReceiveRequest, hook_service_client::HookServiceClient};
+    let temp = TempDir::new();
+    let _lock = crate::state::prepare(&temp.0).unwrap();
+    let app = routes(std::sync::Arc::new(crate::service::Git {
+        generation: "generation".into(),
+        server_socket: temp.0.join("absent.sock"),
+        repositories: std::sync::Arc::new(crate::repositories::Repositories::new(temp.0.clone())),
+    }))
+    .into_axum_router();
+    let mut client = GitServiceClient::new(app.clone());
+    let request = CreateRepositoryRequest {
+        repo_public_id: "00000000000000000000000001".into(),
+        default_branch: "main".into(),
+    };
+    client.create_repository(request.clone()).await.unwrap();
+    let mut duplicate = tonic::Request::new(request.clone());
+    duplicate
+        .metadata_mut()
+        .insert("x-request-id", "DO-NOT-TRUST".parse().unwrap());
+    let duplicate = client.create_repository(duplicate).await.unwrap_err();
+    // A filesystem error stays in the correlated log, never in the response.
+    fs::rename(temp.0.join("repos"), temp.0.join("saved-repos")).unwrap();
+    fs::write(temp.0.join("repos"), "not a directory").unwrap();
+    let internal = client.create_repository(request).await.unwrap_err();
+    assert_eq!(internal.message(), "internal error");
+    let hook = HookServiceClient::new(app)
+        .pre_receive(PreReceiveRequest::default())
+        .await
+        .unwrap_err();
+    let mut ids = Vec::new();
+    for (error, code, reason, grpc_code) in [
+        (
+            duplicate,
+            tonic::Code::AlreadyExists,
+            "ALREADY_EXISTS",
+            "ALREADY_EXISTS",
+        ),
+        (internal, tonic::Code::Internal, "INTERNAL", "INTERNAL"),
+        (
+            hook,
+            tonic::Code::InvalidArgument,
+            "INVALID_FIELD",
+            "INVALID_ARGUMENT",
+        ),
+    ] {
+        assert_eq!(error.code(), code);
+        let details = error.get_error_details();
+        let info = details.error_info().unwrap();
+        assert_eq!(info.domain, "kajiba");
+        assert_eq!(info.reason, reason);
+        assert_eq!(info.metadata.len(), 1);
+        assert!(kajiba_core::names::is_public_id(
+            &info.metadata["request_id"]
+        ));
+        ids.push((info.metadata["request_id"].clone(), grpc_code));
+    }
+    println!("ERROR_IDS={}", serde_json::to_string(&ids).unwrap());
+}

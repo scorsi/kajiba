@@ -7,6 +7,9 @@ license.workspace = true
 [lib]
 
 [dependencies]
+axum.workspace = true
+http-body.workspace = true
+prost.workspace = true
 http.workspace = true
 libc.workspace = true
 serde.workspace = true

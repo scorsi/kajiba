@@ -1,6 +1,7 @@
 //! Shared domain validation, permissions and events.
 
 pub mod config;
+pub mod correlation;
 pub mod local;
 pub mod log;
 pub mod names;

@@ -75,6 +75,7 @@ The ADRs describe the product. Values of a particular deployment (hosts, ports, 
 | 0065 | HTTP Git process group cleanup |
 | 0066 | Incoming Git object validation |
 | 0067 | Quarantine eligibility and repository identity reservation |
+| 0068 | Shared request middleware dependencies |
 
 Relational schema: [`docs/schema.md`](../schema.md) (Accepted).
 

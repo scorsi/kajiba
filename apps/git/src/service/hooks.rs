@@ -32,7 +32,9 @@ impl hook_service_server::HookService for Git {
             &request.session_id,
         )?;
         let repositories = self.repositories.clone();
+        let span = tracing::Span::current();
         let (request, facts, refusals) = tokio::task::spawn_blocking(move || {
+            let _entered = span.enter();
             let (facts, refusals) = repositories.check_signatures(&request)?;
             Ok::<_, Status>((request, facts, refusals))
         })

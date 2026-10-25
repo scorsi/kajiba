@@ -73,12 +73,7 @@ async fn run(
         repositories: repositories.clone(),
         server_socket: server_socket.clone(),
     });
-    let routes = Routes::new(
-        kajiba_proto::git::v1::git_service_server::GitServiceServer::from_arc(git.clone()),
-    )
-    .add_service(
-        kajiba_proto::hook::v1::hook_service_server::HookServiceServer::from_arc(git.clone()),
-    );
+    let routes = routes(git.clone());
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let mut metrics_stopped = stopped.clone();
     let mut ssh_stopped = stopped.clone();
@@ -116,6 +111,39 @@ async fn run(
         },
         () = crate::service::connect_server(server_socket, &generation, &repositories) => unreachable!("connection loop runs until shutdown"),
     }
+}
+
+fn routes(git: std::sync::Arc<crate::service::Git>) -> Routes {
+    Routes::new(kajiba_proto::git::v1::git_service_server::GitServiceServer::from_arc(git.clone()))
+        .add_service(kajiba_proto::hook::v1::hook_service_server::HookServiceServer::from_arc(git))
+        .into_axum_router()
+        .layer(axum::middleware::from_fn(rpc_request))
+        .into()
+}
+
+async fn rpc_request(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    let method = match request.uri().path() {
+        "/kajiba.git.v1.GitService/Hello" => "/kajiba.git.v1.GitService/Hello",
+        "/kajiba.git.v1.GitService/ListSessions" => "/kajiba.git.v1.GitService/ListSessions",
+        "/kajiba.git.v1.GitService/CreateRepository" => {
+            "/kajiba.git.v1.GitService/CreateRepository"
+        }
+        "/kajiba.git.v1.GitService/SetHead" => "/kajiba.git.v1.GitService/SetHead",
+        "/kajiba.git.v1.GitService/QuarantineRepository" => {
+            "/kajiba.git.v1.GitService/QuarantineRepository"
+        }
+        "/kajiba.git.v1.GitService/ListRemoteRefs" => "/kajiba.git.v1.GitService/ListRemoteRefs",
+        "/kajiba.git.v1.GitService/Fetch" => "/kajiba.git.v1.GitService/Fetch",
+        "/kajiba.git.v1.GitService/Spawn" => "/kajiba.git.v1.GitService/Spawn",
+        "/kajiba.hook.v1.HookService/GetAuthKey" => "/kajiba.hook.v1.HookService/GetAuthKey",
+        "/kajiba.hook.v1.HookService/PreReceive" => "/kajiba.hook.v1.HookService/PreReceive",
+        "/kajiba.hook.v1.HookService/PostReceive" => "/kajiba.hook.v1.HookService/PostReceive",
+        _ => "other",
+    };
+    kajiba_core::correlation::request(request, next, method, true, |_, _| {}).await
 }
 
 fn notify_ready(path: Option<&OsStr>) -> io::Result<()> {

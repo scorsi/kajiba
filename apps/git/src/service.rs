@@ -5,6 +5,7 @@ use kajiba_core::local::{channel, rpc_error, version_error};
 use kajiba_proto::{gate::v1 as gate, git::v1::*};
 use std::{path::Path, time::Duration};
 use tonic::{Request, Response, Status};
+use tracing::Instrument;
 
 pub struct Git {
     pub generation: String,
@@ -44,7 +45,9 @@ impl git_service_server::GitService for Git {
     ) -> Result<Response<CreateRepositoryResponse>, Status> {
         let request = request.into_inner();
         let repositories = self.repositories.clone();
+        let span = tracing::Span::current();
         let () = tokio::task::spawn_blocking(move || {
+            let _entered = span.enter();
             repositories.create(&request.repo_public_id, &request.default_branch)
         })
         .await
@@ -57,7 +60,9 @@ impl git_service_server::GitService for Git {
     ) -> Result<Response<SetHeadResponse>, Status> {
         let request = request.into_inner();
         let repositories = self.repositories.clone();
+        let span = tracing::Span::current();
         let () = tokio::task::spawn_blocking(move || {
+            let _entered = span.enter();
             repositories.set_head(&request.repo_public_id, &request.branch)
         })
         .await
@@ -70,10 +75,12 @@ impl git_service_server::GitService for Git {
     ) -> Result<Response<QuarantineRepositoryResponse>, Status> {
         let request = request.into_inner();
         let repositories = self.repositories.clone();
-        let result =
-            tokio::task::spawn_blocking(move || repositories.quarantine(&request.repo_public_id))
-                .await
-                .map_err(|err| Status::internal(err.to_string()))??;
+        let span = tracing::Span::current();
+        let result = tokio::task::spawn_blocking(move || {
+            span.in_scope(|| repositories.quarantine(&request.repo_public_id))
+        })
+        .await
+        .map_err(|err| Status::internal(err.to_string()))??;
         Ok(Response::new(QuarantineRepositoryResponse {
             destination: result.to_string_lossy().into_owned(),
         }))
@@ -86,7 +93,9 @@ impl git_service_server::GitService for Git {
         let request = request.into_inner();
         kajiba_gitstore::import::check_source(&request.source)
             .map_err(|err| rpc_error(tonic::Code::InvalidArgument, "INVALID_FIELD", err))?;
+        let span = tracing::Span::current();
         let refs = tokio::task::spawn_blocking(move || {
+            let _entered = span.enter();
             kajiba_gitstore::Gix
                 .remote_refs(&request.source, &request.credentials)
                 .map_err(crate::repositories::source_error)
@@ -129,48 +138,54 @@ impl git_service_server::GitService for Git {
         let repositories = self.repositories.clone();
         let server_socket = self.server_socket.clone();
         // Admission, child wait and exit recording all survive a cancelled Fetch RPC.
-        tokio::spawn(async move {
-            let mut worker_completed = true;
-            let result = async {
-                let mut client = server_client(&server_socket, &session.generation).await?;
-                let opened = client
-                    .open_session(gate::OpenSessionRequest {
-                        user_public_id: String::new(),
-                        kind: SessionKind::Import.into(),
-                        repository: Some(gate::open_session_request::Repository::RepoPublicId(
-                            session.repo_public_id.clone(),
-                        )),
-                        correlation_id: session.correlation_id.clone(),
-                        session_id: session.session_id.clone(),
-                        generation: session.generation.clone(),
+        tokio::spawn(
+            async move {
+                let mut worker_completed = true;
+                let result = async {
+                    let mut client = server_client(&server_socket, &session.generation).await?;
+                    let opened = client
+                        .open_session(gate::OpenSessionRequest {
+                            user_public_id: String::new(),
+                            kind: SessionKind::Import.into(),
+                            repository: Some(gate::open_session_request::Repository::RepoPublicId(
+                                session.repo_public_id.clone(),
+                            )),
+                            correlation_id: session.correlation_id.clone(),
+                            session_id: session.session_id.clone(),
+                            generation: session.generation.clone(),
+                        })
+                        .await?
+                        .into_inner();
+                    if opened.session.as_ref() != Some(&session) {
+                        return Err(Status::failed_precondition("import session changed"));
+                    }
+                    tracing::info!(
+                        event = "session-started",
+                        request_id = session.correlation_id,
+                        session = session.session_id,
+                        kind = "import",
+                        repo = session.repo_public_id
+                    );
+                    let worker = repositories.clone();
+                    worker_completed = false;
+                    let span = tracing::Span::current();
+                    let result = tokio::task::spawn_blocking(move || {
+                        span.in_scope(|| worker.fetch(request))
                     })
-                    .await?
-                    .into_inner();
-                if opened.session.as_ref() != Some(&session) {
-                    return Err(Status::failed_precondition("import session changed"));
-                }
-                tracing::info!(
-                    event = "session-started",
-                    request_id = session.correlation_id,
-                    session = session.session_id,
-                    kind = "import",
-                    repo = session.repo_public_id
-                );
-                let worker = repositories.clone();
-                worker_completed = false;
-                let result = tokio::task::spawn_blocking(move || worker.fetch(request))
                     .await
                     .map_err(|_| Status::internal("import worker failed"))?;
-                worker_completed = true;
+                    worker_completed = true;
+                    result
+                }
+                .await;
+                // A worker panic is not proof of child termination (0053).
+                if worker_completed {
+                    repositories.finished(&session.session_id, if result.is_ok() { 0 } else { 1 });
+                }
                 result
             }
-            .await;
-            // A worker panic is not proof of child termination (0053).
-            if worker_completed {
-                repositories.finished(&session.session_id, if result.is_ok() { 0 } else { 1 });
-            }
-            result
-        })
+            .in_current_span(),
+        )
         .await
         .map_err(|_| Status::internal("import supervisor failed"))??;
         Ok(Response::new(FetchResponse {}))
