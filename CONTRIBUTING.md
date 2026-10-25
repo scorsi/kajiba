@@ -16,7 +16,11 @@ gives you Rust (stable), pnpm, buf, protoc, sqlx-cli, mold and Playwright. No
 other toolchain is supported.
 
 The shared GitStore library is `kajiba-gitstore` in `crates/kajiba-gitstore/`
-(ADRs 0002, 0018 and 0054).
+(ADRs 0002, 0018 and 0054). The git-side app is `kajiba-git` in `apps/git/`,
+also the binary and Nix package name. It depends on `kajiba-gitstore` and
+shares the workspace's version and Cargo dependency artifacts. Its commands
+are `kajiba-git --version`, `kajiba-git config check <path>` and
+`kajiba-git serve --config <path>`; the daemon runtime is added in J3 task 9.
 
 ## Checks
 
@@ -72,4 +76,5 @@ Before 1.0.0, breaking changes are allowed in a minor bump (ADRs 0020, 0023).
 
 One semver version, in `VERSION` at the repo root, mirrored in
 `Cargo.toml`'s `[workspace.package].version` and `apps/ui/package.json`. The
-`versions-identical` check fails if they drift (ADR 0023).
+`versions-identical` check fails if they drift and requires `kajiba-git` to
+inherit the workspace version (ADRs 0023, 0054).

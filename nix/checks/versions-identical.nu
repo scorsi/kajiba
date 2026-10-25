@@ -4,6 +4,10 @@
 let version = (open VERSION | str trim)
 let cargo_version = (open Cargo.toml | get workspace.package.version)
 let ui_version = (open apps/ui/package.json | get version)
+if (open apps/git/Cargo.toml | get package.version) != { workspace: true } {
+    print -e "kajiba-git must inherit the workspace version"
+    exit 1
+}
 let checks = [
     { name: "cargo", value: $cargo_version }
     { name: "ui", value: $ui_version }

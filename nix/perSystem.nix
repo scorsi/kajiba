@@ -20,6 +20,7 @@
             (craneLib.fileset.commonCargoSources ../crates)
             ../crates/kajiba-core/tests/fixtures
             (craneLib.fileset.commonCargoSources ../apps/server)
+            (craneLib.fileset.commonCargoSources ../apps/git)
             ../apps/server/migrations
             ../apps/server/tests/fixtures
             (craneLib.fileset.commonCargoSources ../apps/runner)
@@ -40,6 +41,9 @@
     {
       packages = {
         kajiba-server = pkgs.callPackage ./packages/kajiba-server.nix {
+          inherit craneLib commonCargoArgs cargoArtifacts;
+        };
+        kajiba-git = pkgs.callPackage ./packages/kajiba-git.nix {
           inherit craneLib commonCargoArgs cargoArtifacts;
         };
         kajiba-runner = pkgs.callPackage ./packages/kajiba-runner.nix {
@@ -74,6 +78,7 @@
       checks = {
         inherit (config.packages)
           kajiba-server
+          kajiba-git
           kajiba-runner
           kajiba-cli
           kajiba-ui
@@ -104,6 +109,7 @@
                 fileset = lib.fileset.unions [
                   ../VERSION
                   ../Cargo.toml
+                  ../apps/git/Cargo.toml
                   ../apps/ui/package.json
                 ];
               };

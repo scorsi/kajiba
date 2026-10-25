@@ -14,8 +14,9 @@ relational schema.
   `ui`'s `package.json`; Nix packages read `VERSION`. `nix flake check`'s
   `versions-identical` check enforces it (0023).
 - Everything kajiba ships is Rust, except the UI (TypeScript). The CLI is the
-  `kajiba-cli` crate, binary `kajiba` (0007); the server binary is
-  `kajiba-server` and carries the host-local subcommands (0002).
+  `kajiba-cli` crate, binary `kajiba` (0007); the host binaries are
+  `kajiba-server` in `apps/server/` and `kajiba-git` in `apps/git/`
+  (0002, 0054), each with its own host-local subcommands.
 - `proto/` is the only place `.proto` contracts are defined. Regenerate after
   editing: `cd proto && buf generate` (TypeScript; needs
   `apps/ui/node_modules/.bin` on `PATH`, provided by `nix develop`). The Rust
@@ -23,7 +24,7 @@ relational schema.
   `crates/kajiba-proto/build.rs` (tonic-build), not through `buf`. Generated
   TypeScript is committed and checked fresh; generated Rust is not committed.
 - Crate and module names are fixed by ADR 0002/0018/0054: `kajiba-core`,
-  `kajiba-gitstore`, `kajiba-proto`, `kajiba-exec`, `kajiba-server`,
+  `kajiba-gitstore`, `kajiba-proto`, `kajiba-exec`, `kajiba-server`, `kajiba-git`,
   `kajiba-runner`, `kajiba-cli`, `kajiba-ui`. NixOS options
   `services.kajiba-server` / `services.kajiba-runner`, system user `kajiba`
   (0015). Don't introduce new top-level crates without an ADR.

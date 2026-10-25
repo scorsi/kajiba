@@ -1,0 +1,11 @@
+# Git-side configuration from ADR 0054's field table.
+state_dir = "/var/lib/kajiba-git"
+server_socket = "/run/kajiba/git.sock"
+hooks_path = "/nix/store/example-kajiba-hooks"
+
+[log]
+level = "info"
+
+# Omit metrics.listen to disable the listener (the default).
+[metrics]
+listen = "127.0.0.1:9433"

@@ -1,4 +1,4 @@
-//! TOML configuration shared by the server, runner and offline validation.
+//! TOML configuration shared by the server, git side, runner and offline validation.
 
 use std::{
     collections::BTreeMap,
@@ -41,6 +41,20 @@ pub struct ServerConfig {
     pub ci: CiConfig,
     #[serde(default)]
     pub dump: DumpConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitConfig {
+    #[serde(default = "git_state_dir")]
+    pub state_dir: PathBuf,
+    #[serde(default = "server_socket")]
+    pub server_socket: PathBuf,
+    pub hooks_path: PathBuf,
+    #[serde(default)]
+    pub log: LogConfig,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,6 +291,12 @@ pub enum Backend {
 
 fn server_state_dir() -> PathBuf {
     "/var/lib/kajiba".into()
+}
+fn git_state_dir() -> PathBuf {
+    "/var/lib/kajiba-git".into()
+}
+fn server_socket() -> PathBuf {
+    "/run/kajiba/git.sock".into()
 }
 fn runner_state_dir() -> PathBuf {
     "/var/lib/kajiba-runner".into()
@@ -759,6 +779,24 @@ impl ServerConfig {
             )?;
         }
         Ok(())
+    }
+}
+
+impl GitConfig {
+    pub fn parse(input: &str) -> Result<Self, String> {
+        let config: Self = parse(input)?;
+        crate::log::filter(&config.log.level, None)?;
+        validate_metrics(&config.metrics)?;
+        for (path, field) in [
+            (&config.state_dir, "state_dir"),
+            (&config.server_socket, "server_socket"),
+            (&config.hooks_path, "hooks_path"),
+        ] {
+            if !path.is_absolute() {
+                return Err(format!("{field}: expected an absolute path"));
+            }
+        }
+        Ok(config)
     }
 }
 

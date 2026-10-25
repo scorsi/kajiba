@@ -1,0 +1,17 @@
+[package]
+name = "kajiba-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kajiba-git"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+kajiba-core = { path = "../../crates/kajiba-core" }
+kajiba-gitstore = { path = "../../crates/kajiba-gitstore" }
+
+[dev-dependencies]
+serde_json.workspace = true

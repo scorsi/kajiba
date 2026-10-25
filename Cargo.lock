@@ -1993,6 +1993,16 @@ name = "kajiba-exec"
 version = "0.1.0"
 
 [[package]]
+name = "kajiba-git"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "kajiba-core",
+ "kajiba-gitstore",
+ "serde_json",
+]
+
+[[package]]
 name = "kajiba-gitstore"
 version = "0.1.0"
 dependencies = [
