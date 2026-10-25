@@ -23,6 +23,7 @@ pub struct Repos(pub Health);
 impl Repos {
     pub fn read_permit(
         &self,
+        permits: u32,
     ) -> Result<tokio::sync::OwnedSemaphorePermit, axum::response::Response> {
         use axum::{
             http::{StatusCode, header},
@@ -31,7 +32,7 @@ impl Repos {
         self.0
             .public_reads
             .clone()
-            .try_acquire_owned()
+            .try_acquire_many_owned(permits)
             .map_err(|_| {
                 (
                     StatusCode::SERVICE_UNAVAILABLE,

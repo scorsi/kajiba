@@ -648,7 +648,7 @@ async fn browsing_shares_the_public_read_budget() {
         .await;
     let repos = &fixture.repos;
     let permits: Vec<_> = (0..super::super::PUBLIC_READS)
-        .map(|_| repos.read_permit().unwrap())
+        .map(|_| repos.read_permit(1).unwrap())
         .collect();
     for status in [
         tree(repos, "alice/demo", "main", "").await.unwrap_err(),

@@ -176,7 +176,7 @@ const PUBLIC: Limits = Limits {
 };
 /// Time to produce a response head on non-streaming routes, request body included.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Shared by upload-pack processes and raw reads (ADR 0040).
+/// Shared by public reads; gzip upload-pack costs eight permits (ADR 0058).
 const PUBLIC_READS: usize = 32;
 
 /// gRPC callers get a gRPC status (HTTP 200), everything else a plain HTTP status.

@@ -91,7 +91,7 @@ async fn info_refs(
         )
             .into_response();
     }
-    let permit = match repos.read_permit() {
+    let permit = match repos.read_permit(1) {
         Ok(permit) => permit,
         Err(response) => return response,
     };
@@ -137,6 +137,8 @@ async fn info_refs(
 
 /// Requests hold wants and haves only; git gzips those up to its post buffer (1 MiB).
 const REQUEST_LIMIT: usize = 16 << 20;
+/// ADR 0058: at most four gzip inputs share the public read budget.
+const GZIP_PERMITS: u32 = 8;
 
 fn gunzip(body: &[u8], cap: usize) -> Result<Vec<u8>, StatusCode> {
     let mut size = (body.len().max(1024) * 4).min(cap);
@@ -145,7 +147,11 @@ fn gunzip(body: &[u8], cap: usize) -> Result<Vec<u8>, StatusCode> {
         let mut output = vec![0; size];
         let config = zlib_rs::InflateConfig { window_bits: 31 };
         match zlib_rs::decompress_slice(&mut output, body, config) {
-            (data, zlib_rs::ReturnCode::Ok) => return Ok(data.to_vec()),
+            (data, zlib_rs::ReturnCode::Ok) => {
+                let len = data.len();
+                output.truncate(len);
+                return Ok(output);
+            }
             (_, zlib_rs::ReturnCode::BufError) if size < cap => size = (size * 2).min(cap),
             (_, zlib_rs::ReturnCode::BufError) => return Err(StatusCode::PAYLOAD_TOO_LARGE),
             _ => return Err(StatusCode::BAD_REQUEST),
@@ -176,7 +182,7 @@ async fn upload_pack(
     if encodings.next().is_some() || !matches!(encoding, None | Some(b"gzip" | b"x-gzip")) {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
-    let permit = match repos.read_permit() {
+    let permit = match repos.read_permit(if encoding.is_some() { GZIP_PERMITS } else { 1 }) {
         Ok(permit) => permit,
         Err(response) => return response,
     };

@@ -63,7 +63,7 @@ async fn raw(
     if kajiba_core::names::validate_path(&spec).is_err() {
         return (StatusCode::BAD_REQUEST, "invalid path\n").into_response();
     }
-    let permit = match repos.read_permit() {
+    let permit = match repos.read_permit(1) {
         Ok(permit) => permit,
         Err(response) => return response,
     };

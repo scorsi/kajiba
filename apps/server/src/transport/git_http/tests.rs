@@ -2,6 +2,18 @@ use super::super::repos::tests::{DEMO, Fixture, git};
 use axum::http;
 use tonic::codegen::Service;
 
+struct Unread;
+impl http_body::Body for Unread {
+    type Data = axum::body::Bytes;
+    type Error = std::convert::Infallible;
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        panic!("body must not be polled");
+    }
+}
+
 fn gzip(body: &[u8]) -> Vec<u8> {
     // Allow for the gzip wrapper in addition to the zlib compression bound.
     let mut output = vec![0; zlib_rs::compress_bound(body.len()) + 16];
@@ -46,6 +58,101 @@ fn gunzip_refuses_malformed_bodies() {
             Err(http::StatusCode::BAD_REQUEST)
         );
     }
+}
+
+#[tokio::test]
+async fn gzip_budget_is_global_and_released_on_cancellation_and_error() {
+    // No Git repository is needed: admitted requests stall before inflation or spawning git.
+    let database = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    sqlx::migrate!("./migrations").run(&database).await.unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at)
+         VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
+         INSERT INTO repo (public_id, owner_id, name, visibility, ci_enabled,
+                           default_branch, description, created_at)
+         VALUES ('00000000000000000000000002', 1, 'demo', 'public', 0, 'main', '', 0);",
+    )
+    .execute(&database)
+    .await
+    .unwrap();
+    let health = super::super::Health::new(Default::default(), Default::default(), None);
+    health.started(database);
+    let repos = super::Repos(health.clone());
+    let mut app = super::super::router(health.clone(), false, Default::default()).unwrap();
+
+    struct Pending(Option<tokio::sync::oneshot::Sender<()>>);
+    impl http_body::Body for Pending {
+        type Data = axum::body::Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            if let Some(polled) = self.0.take() {
+                polled.send(()).unwrap();
+            }
+            std::task::Poll::Pending
+        }
+    }
+    let request = |encoding: &str, body| {
+        http::Request::post("/alice/demo.git/git-upload-pack")
+            .header("content-type", "application/x-git-upload-pack-request")
+            .header("content-encoding", encoding)
+            .body(body)
+            .unwrap()
+    };
+
+    let mut tasks = Vec::new();
+    for (index, encoding) in ["gzip", "x-gzip", "gzip", "x-gzip"].iter().enumerate() {
+        let (polled, ready) = tokio::sync::oneshot::channel();
+        let request = request(encoding, axum::body::Body::new(Pending(Some(polled))));
+        let mut app = app.clone();
+        tasks.push(tokio::spawn(
+            async move { app.call(request).await.unwrap() },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            health.public_reads.available_permits(),
+            32 - (index + 1) * 8
+        );
+    }
+    assert!(repos.read_permit(1).is_err());
+    for encoding in ["gzip", "x-gzip"] {
+        let response = app
+            .call(request(encoding, axum::body::Body::new(Unread)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "1");
+    }
+
+    let task = tasks.pop().unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(health.public_reads.available_permits(), 8);
+    let plain = repos.read_permit(1).unwrap();
+    let response = app
+        .call(request("gzip", axum::body::Body::new(Unread)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(health.public_reads.available_permits(), 7);
+    drop(plain);
+    let response = app
+        .call(request("gzip", axum::body::Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(health.public_reads.available_permits(), 8);
+    for task in tasks {
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+    assert_eq!(health.public_reads.available_permits(), 32);
 }
 
 /// Serves the whole public router on an ephemeral loopback port.
@@ -251,7 +358,7 @@ async fn unknown_archived_and_ui_routes_answer_plain_statuses() {
 async fn public_read_budget_is_shared_and_refuses_before_reading_requests() {
     let fixture = Fixture::new(DEMO).await;
     let permits: Vec<_> = (0..super::super::PUBLIC_READS)
-        .map(|_| fixture.repos.read_permit().unwrap())
+        .map(|_| fixture.repos.read_permit(1).unwrap())
         .collect();
     for path in [
         "/alice/demo.git/info/refs?service=git-upload-pack",
@@ -261,17 +368,7 @@ async fn public_read_budget_is_shared_and_refuses_before_reading_requests() {
         assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.headers()["retry-after"], "1");
     }
-    struct Unread;
-    impl http_body::Body for Unread {
-        type Data = axum::body::Bytes;
-        type Error = std::convert::Infallible;
-        fn poll_frame(
-            self: std::pin::Pin<&mut Self>,
-            _: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-            panic!("busy request body must not be polled");
-        }
-    }
+
     let response = super::super::router(fixture.repos.0.clone(), false, Default::default())
         .unwrap()
         .call(
@@ -357,17 +454,6 @@ async fn upload_pack_accepts_plain_gzip_and_x_gzip_through_the_router() {
 
 #[tokio::test]
 async fn upload_pack_rejects_multiple_or_unsupported_encodings_before_reading() {
-    struct Unread;
-    impl http_body::Body for Unread {
-        type Data = axum::body::Bytes;
-        type Error = std::convert::Infallible;
-        fn poll_frame(
-            self: std::pin::Pin<&mut Self>,
-            _: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-            panic!("unsupported encoding must be rejected before polling the body");
-        }
-    }
     let fixture = Fixture::new(DEMO).await;
     for encodings in [
         vec!["br"],

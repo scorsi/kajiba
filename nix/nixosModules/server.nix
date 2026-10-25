@@ -202,6 +202,7 @@ let
     LimitCORE = 0;
     LimitNOFILE = lib.mkDefault 8192;
     TasksMax = lib.mkDefault 1024;
+    # ADR 0058: four gzip inputs retain at most 320 MiB, leaving runtime headroom.
     MemoryMax = lib.mkDefault "2G";
 
     # Per-request logging (nisshi 0009).
