@@ -5,6 +5,7 @@
 use super::events::{Clock, EventBus, NewEvent, append_event};
 use super::users::new_public_id;
 use kajiba_gitstore::GitStore;
+use kajiba_proto::git::v1::SessionKind;
 use sqlx::{Connection, SqliteConnection};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -45,7 +46,7 @@ impl std::fmt::Display for Refused {
     }
 }
 
-/// Live daemon sessions supplement durable pending-row session identities (0053).
+/// Live mutating sessions supplement durable pending-row identities (0053, 0060).
 #[derive(Default)]
 pub struct Gate {
     wake: tokio::sync::Notify,
@@ -85,6 +86,9 @@ impl Gate {
             {
                 return Err("invalid git-side session snapshot".into());
             }
+            if session.kind == SessionKind::UploadPack as i32 {
+                continue;
+            }
             let repo: Option<i64> = sqlx::query_scalar("SELECT id FROM repo WHERE public_id = ?")
                 .bind(&session.repo_public_id)
                 .fetch_optional(&mut *writer)
@@ -101,6 +105,9 @@ impl Gate {
     }
 
     pub fn opened(&self, repo: i64, session: kajiba_proto::git::v1::Session) {
+        if session.kind == SessionKind::UploadPack as i32 {
+            return;
+        }
         self.running.lock().unwrap().insert(repo);
         self.sessions
             .lock()

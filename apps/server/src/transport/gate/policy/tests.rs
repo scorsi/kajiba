@@ -328,6 +328,10 @@ async fn policy_refusals_keep_ref_order_and_require_live_receive_pack_session() 
         SessionKind::Import,
         SessionKind::Maintenance,
     ] {
+        gate.admission
+            .session_exited(&mut *gate.writer.lock().await, &session.session_id)
+            .await
+            .unwrap();
         gate.admission.opened(
             1,
             Session {
@@ -485,6 +489,131 @@ async fn one_bad_ref_or_signature_admits_nothing() {
             .await
             .unwrap();
         assert_eq!(pending, 0);
+    }
+}
+
+#[tokio::test]
+async fn upload_pack_does_not_block_mutation_admission_or_recovery() {
+    for rebuild in [false, true] {
+        let (_state, gate, session, _) = writable_fixture().await;
+        let reader = Session {
+            session_id: kajiba_core::new_id().unwrap(),
+            kind: SessionKind::UploadPack.into(),
+            ..session.clone()
+        };
+        let mut writer = gate.writer.lock().await;
+        gate.admission
+            .session_exited(&mut writer, &session.session_id)
+            .await
+            .unwrap();
+        if rebuild {
+            gate.admission
+                .rebuild(&mut writer, &session.generation, vec![reader.clone()])
+                .await
+                .unwrap();
+        } else {
+            gate.admission.opened(1, reader.clone());
+        }
+        assert!(
+            !gate.admission.running(1),
+            "a clone must not block a writer"
+        );
+        gate.admission.opened(1, session.clone());
+        let later_reader = Session {
+            session_id: kajiba_core::new_id().unwrap(),
+            ..reader.clone()
+        };
+        gate.admission.opened(1, later_reader.clone());
+        if rebuild {
+            gate.admission
+                .rebuild(
+                    &mut writer,
+                    &session.generation,
+                    vec![reader.clone(), session.clone(), later_reader.clone()],
+                )
+                .await
+                .unwrap();
+        }
+        drop(writer);
+        assert!(
+            gate.pre_receive(Request::new(PreReceiveRequest {
+                session_id: session.session_id.clone(),
+                updates: vec![update("refs/heads/topic", ZERO, A, false)],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .allowed,
+            "a clone opened during a push must not prevent admission"
+        );
+        let mut writer = gate.writer.lock().await;
+        gate.admission
+            .session_exited(&mut writer, &reader.session_id)
+            .await
+            .unwrap();
+        assert!(gate.admission.running(1), "the writer is still live");
+        gate.admission
+            .reconcile(
+                &mut writer,
+                &gate.bus,
+                &gate.state_dir,
+                &kajiba_gitstore::Gix,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pending_push")
+                .fetch_one(&mut *writer)
+                .await
+                .unwrap(),
+            1,
+            "a reader exiting must not trigger premature recovery"
+        );
+        gate.admission
+            .session_exited(&mut writer, &session.session_id)
+            .await
+            .unwrap();
+        assert!(
+            !gate.admission.running(1),
+            "the remaining clone is not a writer"
+        );
+
+        // An empty bare repository: the admitted creation was never applied.
+        let path = gate
+            .state_dir
+            .join(format!("repos/{}.git", session.repo_public_id));
+        std::fs::create_dir_all(path.join("objects")).unwrap();
+        std::fs::create_dir_all(path.join("refs/heads")).unwrap();
+        std::fs::write(path.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        gate.admission
+            .reconcile(
+                &mut writer,
+                &gate.bus,
+                &gate.state_dir,
+                &kajiba_gitstore::Gix,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pending_push")
+                .fetch_one(&mut *writer)
+                .await
+                .unwrap(),
+            0,
+            "recovery must finish while the remaining clone is live"
+        );
+        gate.admission
+            .admit(&mut writer, 1, None, "next-import", &[])
+            .await
+            .unwrap();
+        gate.admission
+            .session_exited(&mut writer, &later_reader.session_id)
+            .await
+            .unwrap();
+        assert!(
+            gate.admission.running(1),
+            "the import reservation is still live"
+        );
     }
 }
 

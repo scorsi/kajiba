@@ -101,7 +101,19 @@ async fn socket_permissions_stale_recovery_and_path_safety() {
     fs::remove_file(dir.socket()).unwrap();
     let stale = UnixListener::bind(dir.socket()).unwrap();
     drop(stale);
-    let local = bind(&dir.socket(), Arc::default()).unwrap();
+    // Parallel tests can fork a child that holds the listener until exec.
+    let local = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match bind(&dir.socket(), Arc::default()) {
+                Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                result => break result.unwrap(),
+            }
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(fs::metadata(dir.socket()).unwrap().mode() & 0o777, 0o600);
     assert!(bind(&dir.socket(), Arc::default()).is_err());
     drop(local);
