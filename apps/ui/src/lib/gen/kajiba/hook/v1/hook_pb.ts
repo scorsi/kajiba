@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file kajiba/hook/v1/hook.proto.
  */
 export const file_kajiba_hook_v1_hook: GenFile = /*@__PURE__*/
-  fileDesc("ChlrYWppYmEvaG9vay92MS9ob29rLnByb3RvEg5rYWppYmEuaG9vay52MSIoChFHZXRBdXRoS2V5UmVxdWVzdBITCgtmaW5nZXJwcmludBgBIAEoCSJAChJHZXRBdXRoS2V5UmVzcG9uc2USFgoOdXNlcl9wdWJsaWNfaWQYASABKAkSEgoKcHVibGljX2tleRgCIAEoCTJiCgtIb29rU2VydmljZRJTCgpHZXRBdXRoS2V5EiEua2FqaWJhLmhvb2sudjEuR2V0QXV0aEtleVJlcXVlc3QaIi5rYWppYmEuaG9vay52MS5HZXRBdXRoS2V5UmVzcG9uc2ViBnByb3RvMw");
+  fileDesc("ChlrYWppYmEvaG9vay92MS9ob29rLnByb3RvEg5rYWppYmEuaG9vay52MSIoChFHZXRBdXRoS2V5UmVxdWVzdBITCgtmaW5nZXJwcmludBgBIAEoCSJAChJHZXRBdXRoS2V5UmVzcG9uc2USFgoOdXNlcl9wdWJsaWNfaWQYASABKAkSEgoKcHVibGljX2tleRgCIAEoCSI9CglSZWZVcGRhdGUSEAoIcmVmX25hbWUYASABKAkSDgoGb2xkX2lkGAIgASgJEg4KBm5ld19pZBgDIAEoCSJlCgpRdWFyYW50aW5lEhgKEG9iamVjdF9kaXJlY3RvcnkYASABKAkSJAocYWx0ZXJuYXRlX29iamVjdF9kaXJlY3RvcmllcxgCIAEoCRIXCg9xdWFyYW50aW5lX3BhdGgYAyABKAkinwEKEVByZVJlY2VpdmVSZXF1ZXN0EhYKDnVzZXJfcHVibGljX2lkGAEgASgJEhYKDnJlcG9fcHVibGljX2lkGAIgASgJEioKB3VwZGF0ZXMYAyADKAsyGS5rYWppYmEuaG9vay52MS5SZWZVcGRhdGUSLgoKcXVhcmFudGluZRgEIAEoCzIaLmthamliYS5ob29rLnYxLlF1YXJhbnRpbmUiUAoSUHJlUmVjZWl2ZVJlc3BvbnNlEg8KB2FsbG93ZWQYASABKAgSKQoIcmVmdXNhbHMYAiADKAsyFy5rYWppYmEuaG9vay52MS5SZWZ1c2FsIisKB1JlZnVzYWwSEAoIcmVmX25hbWUYASABKAkSDgoGcmVhc29uGAIgASgJInAKElBvc3RSZWNlaXZlUmVxdWVzdBIWCg51c2VyX3B1YmxpY19pZBgBIAEoCRIWCg5yZXBvX3B1YmxpY19pZBgCIAEoCRIqCgd1cGRhdGVzGAMgAygLMhkua2FqaWJhLmhvb2sudjEuUmVmVXBkYXRlIhUKE1Bvc3RSZWNlaXZlUmVzcG9uc2UyjwIKC0hvb2tTZXJ2aWNlElMKCkdldEF1dGhLZXkSIS5rYWppYmEuaG9vay52MS5HZXRBdXRoS2V5UmVxdWVzdBoiLmthamliYS5ob29rLnYxLkdldEF1dGhLZXlSZXNwb25zZRJTCgpQcmVSZWNlaXZlEiEua2FqaWJhLmhvb2sudjEuUHJlUmVjZWl2ZVJlcXVlc3QaIi5rYWppYmEuaG9vay52MS5QcmVSZWNlaXZlUmVzcG9uc2USVgoLUG9zdFJlY2VpdmUSIi5rYWppYmEuaG9vay52MS5Qb3N0UmVjZWl2ZVJlcXVlc3QaIy5rYWppYmEuaG9vay52MS5Qb3N0UmVjZWl2ZVJlc3BvbnNlYgZwcm90bzM");
 
 /**
  * @generated from message kajiba.hook.v1.GetAuthKeyRequest
@@ -56,6 +56,195 @@ export const GetAuthKeyResponseSchema: GenMessage<GetAuthKeyResponse> = /*@__PUR
   messageDesc(file_kajiba_hook_v1_hook, 1);
 
 /**
+ * One line of the hook's stdin, in receive order. A zero id (40 zeros) is an
+ * absent ref: creation when old, deletion when new.
+ *
+ * @generated from message kajiba.hook.v1.RefUpdate
+ */
+export type RefUpdate = Message<"kajiba.hook.v1.RefUpdate"> & {
+  /**
+   * @generated from field: string ref_name = 1;
+   */
+  refName: string;
+
+  /**
+   * @generated from field: string old_id = 2;
+   */
+  oldId: string;
+
+  /**
+   * @generated from field: string new_id = 3;
+   */
+  newId: string;
+};
+
+/**
+ * Describes the message kajiba.hook.v1.RefUpdate.
+ * Use `create(RefUpdateSchema)` to create a new message.
+ */
+export const RefUpdateSchema: GenMessage<RefUpdate> = /*@__PURE__*/
+  messageDesc(file_kajiba_hook_v1_hook, 2);
+
+/**
+ * Git's quarantine environment of the pre-receive hook, passed verbatim so the
+ * server's Git checks see the pushed objects (0014). Empty when Git set none
+ * (a push that only deletes refs).
+ *
+ * @generated from message kajiba.hook.v1.Quarantine
+ */
+export type Quarantine = Message<"kajiba.hook.v1.Quarantine"> & {
+  /**
+   * GIT_OBJECT_DIRECTORY
+   *
+   * @generated from field: string object_directory = 1;
+   */
+  objectDirectory: string;
+
+  /**
+   * GIT_ALTERNATE_OBJECT_DIRECTORIES, in Git's own encoding
+   *
+   * @generated from field: string alternate_object_directories = 2;
+   */
+  alternateObjectDirectories: string;
+
+  /**
+   * GIT_QUARANTINE_PATH
+   *
+   * @generated from field: string quarantine_path = 3;
+   */
+  quarantinePath: string;
+};
+
+/**
+ * Describes the message kajiba.hook.v1.Quarantine.
+ * Use `create(QuarantineSchema)` to create a new message.
+ */
+export const QuarantineSchema: GenMessage<Quarantine> = /*@__PURE__*/
+  messageDesc(file_kajiba_hook_v1_hook, 3);
+
+/**
+ * @generated from message kajiba.hook.v1.PreReceiveRequest
+ */
+export type PreReceiveRequest = Message<"kajiba.hook.v1.PreReceiveRequest"> & {
+  /**
+   * Transport context set by serve-ssh (KAJIBA_USER, KAJIBA_REPO).
+   *
+   * @generated from field: string user_public_id = 1;
+   */
+  userPublicId: string;
+
+  /**
+   * @generated from field: string repo_public_id = 2;
+   */
+  repoPublicId: string;
+
+  /**
+   * @generated from field: repeated kajiba.hook.v1.RefUpdate updates = 3;
+   */
+  updates: RefUpdate[];
+
+  /**
+   * @generated from field: kajiba.hook.v1.Quarantine quarantine = 4;
+   */
+  quarantine?: Quarantine | undefined;
+};
+
+/**
+ * Describes the message kajiba.hook.v1.PreReceiveRequest.
+ * Use `create(PreReceiveRequestSchema)` to create a new message.
+ */
+export const PreReceiveRequestSchema: GenMessage<PreReceiveRequest> = /*@__PURE__*/
+  messageDesc(file_kajiba_hook_v1_hook, 4);
+
+/**
+ * @generated from message kajiba.hook.v1.PreReceiveResponse
+ */
+export type PreReceiveResponse = Message<"kajiba.hook.v1.PreReceiveResponse"> & {
+  /**
+   * @generated from field: bool allowed = 1;
+   */
+  allowed: boolean;
+
+  /**
+   * Why the push is refused; shown to the pusher.
+   *
+   * @generated from field: repeated kajiba.hook.v1.Refusal refusals = 2;
+   */
+  refusals: Refusal[];
+};
+
+/**
+ * Describes the message kajiba.hook.v1.PreReceiveResponse.
+ * Use `create(PreReceiveResponseSchema)` to create a new message.
+ */
+export const PreReceiveResponseSchema: GenMessage<PreReceiveResponse> = /*@__PURE__*/
+  messageDesc(file_kajiba_hook_v1_hook, 5);
+
+/**
+ * @generated from message kajiba.hook.v1.Refusal
+ */
+export type Refusal = Message<"kajiba.hook.v1.Refusal"> & {
+  /**
+   * Empty when the reason concerns the whole push.
+   *
+   * @generated from field: string ref_name = 1;
+   */
+  refName: string;
+
+  /**
+   * @generated from field: string reason = 2;
+   */
+  reason: string;
+};
+
+/**
+ * Describes the message kajiba.hook.v1.Refusal.
+ * Use `create(RefusalSchema)` to create a new message.
+ */
+export const RefusalSchema: GenMessage<Refusal> = /*@__PURE__*/
+  messageDesc(file_kajiba_hook_v1_hook, 6);
+
+/**
+ * @generated from message kajiba.hook.v1.PostReceiveRequest
+ */
+export type PostReceiveRequest = Message<"kajiba.hook.v1.PostReceiveRequest"> & {
+  /**
+   * @generated from field: string user_public_id = 1;
+   */
+  userPublicId: string;
+
+  /**
+   * @generated from field: string repo_public_id = 2;
+   */
+  repoPublicId: string;
+
+  /**
+   * @generated from field: repeated kajiba.hook.v1.RefUpdate updates = 3;
+   */
+  updates: RefUpdate[];
+};
+
+/**
+ * Describes the message kajiba.hook.v1.PostReceiveRequest.
+ * Use `create(PostReceiveRequestSchema)` to create a new message.
+ */
+export const PostReceiveRequestSchema: GenMessage<PostReceiveRequest> = /*@__PURE__*/
+  messageDesc(file_kajiba_hook_v1_hook, 7);
+
+/**
+ * @generated from message kajiba.hook.v1.PostReceiveResponse
+ */
+export type PostReceiveResponse = Message<"kajiba.hook.v1.PostReceiveResponse"> & {
+};
+
+/**
+ * Describes the message kajiba.hook.v1.PostReceiveResponse.
+ * Use `create(PostReceiveResponseSchema)` to create a new message.
+ */
+export const PostReceiveResponseSchema: GenMessage<PostReceiveResponse> = /*@__PURE__*/
+  messageDesc(file_kajiba_hook_v1_hook, 8);
+
+/**
  * The SSH integration and the Git hooks, over the local socket (0003, 0004).
  *
  * @generated from service kajiba.hook.v1.HookService
@@ -73,6 +262,29 @@ export const HookService: GenService<{
     methodKind: "unary";
     input: typeof GetAuthKeyRequestSchema;
     output: typeof GetAuthKeyResponseSchema;
+  },
+  /**
+   * `kajiba-server hook pre-receive`: check a push's ref updates before
+   * receive-pack applies them; allowed only once every check passed and the
+   * push is admitted (0003, 0014).
+   *
+   * @generated from rpc kajiba.hook.v1.HookService.PreReceive
+   */
+  preReceive: {
+    methodKind: "unary";
+    input: typeof PreReceiveRequestSchema;
+    output: typeof PreReceiveResponseSchema;
+  },
+  /**
+   * `kajiba-server hook post-receive`: receive-pack updated refs; wakes push
+   * reconciliation and returns without waiting for receive-pack (0003).
+   *
+   * @generated from rpc kajiba.hook.v1.HookService.PostReceive
+   */
+  postReceive: {
+    methodKind: "unary";
+    input: typeof PostReceiveRequestSchema;
+    output: typeof PostReceiveResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_kajiba_hook_v1_hook, 0);

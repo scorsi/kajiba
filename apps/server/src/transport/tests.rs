@@ -190,7 +190,8 @@ async fn reflection_lists_health_and_returns_its_descriptor_when_enabled() {
         assert!(
             list.service
                 .iter()
-                .all(|service| !service.name.starts_with("kajiba.admin."))
+                .all(|service| !service.name.starts_with("kajiba.admin.")
+                    && !service.name.starts_with("kajiba.hook."))
         );
         let response = grpc(
             &mut app,
@@ -599,7 +600,16 @@ async fn requests_update_metrics_after_body_completion_including_grpc_trailers()
     let response = grpc(&mut app, "/kajiba.v1.Unknown/Call", CheckRequest {}).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["grpc-status"], "12");
-    assert_eq!(response.headers()["content-type"], "application/grpc");
+    assert_eq!(response.headers()["content-type"], "application/grpc"); // Local-socket services are never routed on the public listener (ADR 0003).
+    for path in [
+        "/kajiba.hook.v1.HookService/PreReceive",
+        "/kajiba.hook.v1.HookService/PostReceive",
+        "/kajiba.hook.v1.HookService/GetAuthKey",
+        "/kajiba.admin.v1.AdminService/Enroll",
+    ] {
+        let response = grpc(&mut app, path, CheckRequest {}).await;
+        assert_eq!(response.headers()["grpc-status"], "12", "{path}");
+    }
 }
 
 #[tokio::test]

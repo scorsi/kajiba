@@ -9,7 +9,8 @@ use kajiba_proto::admin::v1::{
     admin_service_server::{AdminService, AdminServiceServer},
 };
 use kajiba_proto::hook::v1::{
-    GetAuthKeyRequest, GetAuthKeyResponse,
+    GetAuthKeyRequest, GetAuthKeyResponse, PostReceiveRequest, PostReceiveResponse,
+    PreReceiveRequest, PreReceiveResponse, Refusal,
     hook_service_client::HookServiceClient,
     hook_service_server::{HookService, HookServiceServer},
 };
@@ -248,6 +249,28 @@ impl HookService for Admin {
             public_key,
         }))
     }
+
+    async fn pre_receive(
+        &self,
+        _: Request<PreReceiveRequest>,
+    ) -> Result<Response<PreReceiveResponse>, Status> {
+        // Refused until the ref, signature and admission checks are wired (J3 task 12).
+        Ok(Response::new(PreReceiveResponse {
+            allowed: false,
+            refusals: vec![Refusal {
+                ref_name: String::new(),
+                reason: "pushes are not accepted yet".into(),
+            }],
+        }))
+    }
+
+    async fn post_receive(
+        &self,
+        _: Request<PostReceiveRequest>,
+    ) -> Result<Response<PostReceiveResponse>, Status> {
+        // No push is admitted yet, so nothing waits for reconciliation (J3 task 13).
+        Ok(Response::new(PostReceiveResponse {}))
+    }
 }
 
 pub(super) struct Local {
@@ -318,7 +341,7 @@ impl Local {
         let routes = Routes::new(
             AdminServiceServer::from_arc(admin.clone()).max_decoding_message_size(4096),
         )
-        .add_service(HookServiceServer::from_arc(admin).max_decoding_message_size(4096))
+        .add_service(HookServiceServer::from_arc(admin))
         .into_axum_router()
         .layer(middleware::from_fn_with_state(
             registry,
@@ -460,6 +483,24 @@ pub async fn import(
         .await?
         .into_inner()
         .refs)
+}
+
+/// One pre-receive check; no timeout: checking a large push takes as long as it takes.
+pub async fn pre_receive(
+    path: &Path,
+    request: PreReceiveRequest,
+) -> Result<PreReceiveResponse, Box<dyn std::error::Error>> {
+    let mut client = HookServiceClient::new(channel(path, None).await?);
+    Ok(client.pre_receive(request).await?.into_inner())
+}
+
+pub async fn post_receive(
+    path: &Path,
+    request: PostReceiveRequest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = HookServiceClient::new(channel(path, Some(Duration::from_secs(5))).await?);
+    client.post_receive(request).await?;
+    Ok(())
 }
 
 /// Every page, in name order.

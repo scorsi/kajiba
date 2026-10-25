@@ -45,15 +45,24 @@ fn usage_errors_exit_two() {
 }
 
 #[test]
-fn placeholders_fail_with_distinct_exit_code_and_clear_error() {
+fn hooks_outside_serve_ssh_fail_with_a_clear_error() {
     for args in [vec!["hook", "pre-receive"], vec!["hook", "post-receive"]] {
-        let output = run(&args);
-        assert_eq!(output.status.code(), Some(3), "{args:?}: {output:?}");
+        let output = Command::new(env!("CARGO_BIN_EXE_kajiba-server"))
+            .args(&args)
+            .env_remove("RUST_LOG")
+            .env_remove("KAJIBA_USER")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
         assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
         let name = args[..2].join(" ");
         let line: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
         assert_eq!(line["event"], "fatal");
-        assert_eq!(line["err"], format!("{name}: not implemented yet"));
+        assert_eq!(
+            line["err"],
+            format!("{name}: KAJIBA_USER is not set (hooks run under serve-ssh)")
+        );
     }
 }
 

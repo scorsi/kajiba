@@ -3,6 +3,7 @@ use kajiba_core::{config::ServerConfig, log};
 use std::{path::PathBuf, process::ExitCode};
 
 mod db;
+mod hook;
 mod import;
 mod metrics;
 // serve-ssh joins it in J3 task 14.
@@ -11,9 +12,7 @@ mod ssh;
 mod state;
 mod transport;
 
-// Exit codes: 0 success (including help/version), 1 runtime error, 2 usage error
-// (clap), 3 command not implemented yet.
-const NOT_IMPLEMENTED: u8 = 3;
+// Exit codes: 0 success (including help/version), 1 runtime error, 2 usage error (clap).
 
 /// kajiba-server — the forge's HTTP/gRPC server and host-local commands.
 #[derive(Debug, Parser)]
@@ -100,9 +99,9 @@ enum RepoCommand {
 
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 enum HookCommand {
-    /// Check ref updates before receiving a push (not implemented yet).
+    /// Check ref updates before receive-pack applies them.
     PreReceive,
-    /// Notify the server after receiving a push (not implemented yet).
+    /// Notify the server that receive-pack updated refs.
     PostReceive,
 }
 
@@ -120,7 +119,7 @@ async fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
     };
-    let name = match command {
+    match command {
         Command::Serve { config } => {
             let config = match load_config(&config, true) {
                 Ok(config) => config,
@@ -236,13 +235,20 @@ async fn main() -> ExitCode {
             )
             .await;
         }
-        Command::Hook { command } => match command {
-            HookCommand::PreReceive => "hook pre-receive",
-            HookCommand::PostReceive => "hook post-receive",
-        },
-    };
-    log::error("fatal", &format!("{name}: not implemented yet"));
-    ExitCode::from(NOT_IMPLEMENTED)
+        Command::Hook { command } => {
+            let kind = match command {
+                HookCommand::PreReceive => hook::Kind::PreReceive,
+                HookCommand::PostReceive => hook::Kind::PostReceive,
+            };
+            hook::run(
+                std::path::Path::new(transport::local::SOCKET_PATH),
+                kind,
+                std::io::stdin(),
+                &|var| std::env::var(var).ok(),
+            )
+            .await
+        }
+    }
 }
 
 async fn ssh_keys(path: &std::path::Path, fingerprint: String) -> ExitCode {

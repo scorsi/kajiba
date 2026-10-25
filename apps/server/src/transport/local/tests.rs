@@ -534,3 +534,164 @@ async fn auth_key_lookup_resolves_only_active_users_auth_keys() {
         std::process::ExitCode::FAILURE
     );
 }
+
+/// Counts calls and answers PreReceive with a fixed verdict.
+struct FakeHook {
+    calls: Arc<AtomicUsize>,
+    allowed: bool,
+    seen: Arc<std::sync::Mutex<Vec<PreReceiveRequest>>>,
+}
+
+#[tonic::async_trait]
+impl HookService for FakeHook {
+    async fn get_auth_key(
+        &self,
+        _: Request<GetAuthKeyRequest>,
+    ) -> Result<Response<GetAuthKeyResponse>, Status> {
+        Err(Status::unimplemented("fake"))
+    }
+
+    async fn pre_receive(
+        &self,
+        request: Request<PreReceiveRequest>,
+    ) -> Result<Response<PreReceiveResponse>, Status> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.seen.lock().unwrap().push(request.into_inner());
+        Ok(Response::new(PreReceiveResponse {
+            allowed: self.allowed,
+            refusals: vec![Refusal {
+                ref_name: "refs/heads/main".into(),
+                reason: "unsigned commit".into(),
+            }],
+        }))
+    }
+
+    async fn post_receive(
+        &self,
+        _: Request<PostReceiveRequest>,
+    ) -> Result<Response<PostReceiveResponse>, Status> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Response::new(PostReceiveResponse {}))
+    }
+}
+
+const HOOK_INPUT: &str = "0000000000000000000000000000000000000000 1111111111111111111111111111111111111111 refs/heads/main\n";
+
+fn hook_env(var: &str) -> Option<String> {
+    match var {
+        "KAJIBA_USER" => Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".into()),
+        "KAJIBA_REPO" => Some("01BX5ZZKBKACTAV9WEVGEMMVRZ".into()),
+        "GIT_OBJECT_DIRECTORY" | "GIT_QUARANTINE_PATH" => {
+            Some("/srv/r.git/objects/incoming-x".into())
+        }
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES" => Some("/srv/r.git/objects".into()),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn hooks_make_one_call_per_invocation_and_send_nothing_when_malformed() {
+    use crate::hook::{Kind, run};
+    use std::process::ExitCode;
+    for allowed in [true, false] {
+        let dir = SocketDir::new();
+        let local = Local::bind(&dir.socket(), Arc::default()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::default();
+        let fake = FakeHook {
+            calls: calls.clone(),
+            allowed,
+            seen: Arc::clone(&seen),
+        };
+        let server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(HookServiceServer::new(fake))
+                .serve_with_incoming(local),
+        );
+        let socket = dir.socket();
+        let expected = if allowed {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+        assert_eq!(
+            run(&socket, Kind::PreReceive, HOOK_INPUT.as_bytes(), &hook_env).await,
+            expected
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        {
+            let seen = seen.lock().unwrap();
+            let request = &seen[0];
+            assert_eq!(request.user_public_id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+            assert_eq!(request.repo_public_id, "01BX5ZZKBKACTAV9WEVGEMMVRZ");
+            assert_eq!(request.updates.len(), 1);
+            assert_eq!(request.updates[0].ref_name, "refs/heads/main");
+            let quarantine = request.quarantine.as_ref().unwrap();
+            assert_eq!(quarantine.quarantine_path, "/srv/r.git/objects/incoming-x");
+            assert_eq!(
+                quarantine.alternate_object_directories,
+                "/srv/r.git/objects"
+            );
+        }
+        assert_eq!(
+            run(&socket, Kind::PostReceive, HOOK_INPUT.as_bytes(), &hook_env).await,
+            ExitCode::SUCCESS
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // Malformed stdin or context: refused before any call.
+        for kind in [Kind::PreReceive, Kind::PostReceive] {
+            assert_eq!(
+                run(&socket, kind, "garbage\n".as_bytes(), &hook_env).await,
+                ExitCode::FAILURE
+            );
+            assert_eq!(
+                run(&socket, kind, HOOK_INPUT.as_bytes(), &|_| None).await,
+                ExitCode::FAILURE
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn hooks_fail_explicitly_without_server_and_admission_stays_refused() {
+    use crate::hook::{Kind, run};
+    use std::process::ExitCode;
+    let dir = SocketDir::new();
+    // No socket: an explicit failure, never an allowed push.
+    for kind in [Kind::PreReceive, Kind::PostReceive] {
+        assert_eq!(
+            run(&dir.socket(), kind, HOOK_INPUT.as_bytes(), &hook_env).await,
+            ExitCode::FAILURE
+        );
+    }
+    let local = Local::bind(&dir.socket(), Arc::default()).unwrap();
+    let admin = admin(&dir.0, "[users.alice]").await;
+    let server = tokio::spawn(local.serve(admin, Arc::default(), std::future::pending()));
+    let response = pre_receive(
+        &dir.socket(),
+        PreReceiveRequest {
+            user_public_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            repo_public_id: "01BX5ZZKBKACTAV9WEVGEMMVRZ".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!response.allowed);
+    assert_eq!(response.refusals.len(), 1);
+    assert_eq!(
+        run(
+            &dir.socket(),
+            Kind::PreReceive,
+            HOOK_INPUT.as_bytes(),
+            &hook_env
+        )
+        .await,
+        ExitCode::FAILURE
+    );
+    // The admin service still answers on the same socket.
+    assert!(enroll(&dir.socket(), "alice".into()).await.is_ok());
+    server.abort();
+}

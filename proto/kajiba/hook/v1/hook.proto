@@ -9,6 +9,13 @@ service HookService {
   // fingerprint, a signing-only key or a disabled user is NOT_FOUND
   // (KEY_NOT_FOUND).
   rpc GetAuthKey(GetAuthKeyRequest) returns (GetAuthKeyResponse);
+  // `kajiba-server hook pre-receive`: check a push's ref updates before
+  // receive-pack applies them; allowed only once every check passed and the
+  // push is admitted (0003, 0014).
+  rpc PreReceive(PreReceiveRequest) returns (PreReceiveResponse);
+  // `kajiba-server hook post-receive`: receive-pack updated refs; wakes push
+  // reconciliation and returns without waiting for receive-pack (0003).
+  rpc PostReceive(PostReceiveRequest) returns (PostReceiveResponse);
 }
 
 message GetAuthKeyRequest {
@@ -21,3 +28,51 @@ message GetAuthKeyResponse {
   // The OpenSSH key without comment or options (`ssh_key.public_key`).
   string public_key = 2;
 }
+
+// One line of the hook's stdin, in receive order. A zero id (40 zeros) is an
+// absent ref: creation when old, deletion when new.
+message RefUpdate {
+  string ref_name = 1;
+  string old_id = 2;
+  string new_id = 3;
+}
+
+// Git's quarantine environment of the pre-receive hook, passed verbatim so the
+// server's Git checks see the pushed objects (0014). Empty when Git set none
+// (a push that only deletes refs).
+message Quarantine {
+  // GIT_OBJECT_DIRECTORY
+  string object_directory = 1;
+  // GIT_ALTERNATE_OBJECT_DIRECTORIES, in Git's own encoding
+  string alternate_object_directories = 2;
+  // GIT_QUARANTINE_PATH
+  string quarantine_path = 3;
+}
+
+message PreReceiveRequest {
+  // Transport context set by serve-ssh (KAJIBA_USER, KAJIBA_REPO).
+  string user_public_id = 1;
+  string repo_public_id = 2;
+  repeated RefUpdate updates = 3;
+  Quarantine quarantine = 4;
+}
+
+message PreReceiveResponse {
+  bool allowed = 1;
+  // Why the push is refused; shown to the pusher.
+  repeated Refusal refusals = 2;
+}
+
+message Refusal {
+  // Empty when the reason concerns the whole push.
+  string ref_name = 1;
+  string reason = 2;
+}
+
+message PostReceiveRequest {
+  string user_public_id = 1;
+  string repo_public_id = 2;
+  repeated RefUpdate updates = 3;
+}
+
+message PostReceiveResponse {}
