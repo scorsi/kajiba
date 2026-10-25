@@ -167,14 +167,26 @@ pkgs.testers.runNixOSTest {
           directory = inode(git_dir(public_id))
 
       with subtest("startup needing a new repository fails explicitly while the git side is unavailable"):
-          # Mask prevents the server's Wants from restarting the daemon for this start.
-          forge.succeed("systemctl mask --runtime --now kajiba-git.service")
+          # NixOS units in /etc override runtime masks; a drop-in blocks switch and Wants starts.
+          git_block = "/run/systemd/system/kajiba-git.service.d/unavailable.conf"
+          forge.succeed(
+              "mkdir -p /run/systemd/system/kajiba-git.service.d",
+              f"printf '[Unit]\\nConditionPathExists=!/\\n' > {git_block}",
+              "systemctl daemon-reload",
+              f"systemctl stop {unit} kajiba-git.service",
+          )
           switch("added", check=False)
+          # The switch may already have attempted a start; measure a fresh invocation.
+          forge.succeed(
+              f"systemctl stop {unit}",
+              f"systemctl reset-failed {unit}",
+              "test ! -S /run/kajiba-git/local.sock",
+          )
           status, out = forge.execute(f"timeout 60 systemctl start {unit}")
           assert status not in (0, 124), f"start without git: {status}, {out}"
           fatal = [e for e in invocation_events() if e["event"] == "fatal"]
           assert len(fatal) == 1 and "GIT_SIDE_UNAVAILABLE" in fatal[0]["err"], fatal
-          forge.succeed("systemctl unmask --runtime kajiba-git.service", "systemctl start kajiba-git.service")
+          forge.succeed(f"rm {git_block}", "systemctl daemon-reload", "systemctl start kajiba-git.service")
           start()
           assert get_repo(name="alice/extra")[1:] == ("alice/extra", False)
           assert clone("alice/demo", "/root/recovered.git") == original
