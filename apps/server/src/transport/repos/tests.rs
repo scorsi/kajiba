@@ -7,6 +7,40 @@ use std::{
 use tonic::Code;
 use tonic_types::StatusExt;
 
+#[tokio::test]
+async fn traversal_cancellation_signals_the_worker_and_keeps_its_permit() {
+    let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let permit = budget.clone().acquire_owned().await.unwrap();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let (observed, cancelled) = tokio::sync::oneshot::channel();
+    let handler = tokio::spawn(blocking::<()>(permit, move |flag| {
+        started.send(()).unwrap();
+        wait.recv().unwrap();
+        observed.send(flag.load(Ordering::Relaxed)).unwrap();
+        Err(Status::cancelled("request dropped"))
+    }));
+    ready.await.unwrap();
+    handler.abort();
+    assert!(handler.await.unwrap_err().is_cancelled());
+    assert_eq!(budget.available_permits(), 0);
+    release.send(()).unwrap();
+    assert!(cancelled.await.unwrap());
+    let _permit = tokio::time::timeout(Duration::from_secs(2), budget.acquire())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[test]
+fn traversal_limit_has_a_resource_exhausted_reason() {
+    let status = git_error("REVISION_NOT_FOUND")(kajiba_gitstore::Error::TooLarge(
+        kajiba_gitstore::Limit::Traversal,
+    ));
+    assert_eq!(status.code(), Code::ResourceExhausted);
+    assert_eq!(reason(&status), "TRAVERSAL_TOO_LARGE");
+}
+
 /// A started state directory whose repositories are reconciled from `repos.<key>` tables.
 pub(in crate::transport) struct Fixture {
     daemon: crate::transport::git_side::fake::Fake,

@@ -131,15 +131,25 @@ pub const MAX_COMMIT_SKIP: usize = 10_000;
 pub const MAX_COMMIT_PAGE_BYTES: usize = 1 << 20;
 
 /// A GitStore read, off the async runtime, holding a public-read permit; a cancelled
-/// handler keeps the permit with the running work. The response carries the permit
+/// handler signals cancellation and keeps the permit with the running work until
+/// it stops. The response carries the permit
 /// in its extensions for `stream::guarded`, which keeps it through the delivery of
 /// the encoded body (ADR 0050); a refusal releases it at once.
 async fn blocking<T: Send + 'static>(
     permit: tokio::sync::OwnedSemaphorePermit,
-    read: impl FnOnce() -> Result<Response<T>, Status> + Send + 'static,
+    read: impl FnOnce(&std::sync::atomic::AtomicBool) -> Result<Response<T>, Status> + Send + 'static,
 ) -> Result<Response<T>, Status> {
+    use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
+    struct CancelOnDrop(Arc<AtomicBool>);
+    impl Drop for CancelOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _cancel = CancelOnDrop(cancelled.clone());
     tokio::task::spawn_blocking(move || {
-        let mut response = read()?;
+        let mut response = read(&cancelled)?;
         response
             .extensions_mut()
             .insert(super::stream::ReadPermit::new(permit));
@@ -192,6 +202,10 @@ fn git_error(reason: &'static str) -> impl Fn(kajiba_gitstore::Error) -> Status 
                     format!(
                         "the diff exceeds {MAX_DIFF_CHANGES} changes or {MAX_DIFF_PATH_BYTES} bytes of paths"
                     ),
+                ),
+                Limit::Traversal => (
+                    "TRAVERSAL_TOO_LARGE",
+                    "repository traversal exceeded its work budget".into(),
                 ),
             };
             refused(tonic::Code::ResourceExhausted, reason, message)
@@ -404,8 +418,8 @@ impl RepoService for Repos {
         let dir = self.browse_dir(&request.repo).await?;
         let permit = self.browse_permit()?;
         let root = self.0.git_state_dir.join("repos");
-        blocking(permit, move || {
-            let store = Gix::shared(&root);
+        blocking(permit, move |cancelled| {
+            let store = Gix::shared(&root).cancellable(cancelled);
             let commit_id = revision(&store, &dir, &request.revision)?;
             let entries = store
                 .tree(&dir, &commit_id, &request.path, MAX_TREE_ENTRIES)
@@ -440,8 +454,8 @@ impl RepoService for Repos {
         let dir = self.browse_dir(&request.repo).await?;
         let permit = self.browse_permit()?;
         let root = self.0.git_state_dir.join("repos");
-        blocking(permit, move || {
-            let store = Gix::shared(&root);
+        blocking(permit, move |cancelled| {
+            let store = Gix::shared(&root).cancellable(cancelled);
             let commit_id = revision(&store, &dir, &request.revision)?;
             let content = store
                 .blob(&dir, &commit_id, &request.path, MAX_BLOB_BYTES as u64)
@@ -486,8 +500,8 @@ impl RepoService for Repos {
         let dir = self.browse_dir(&request.repo).await?;
         let permit = self.browse_permit()?;
         let root = self.0.git_state_dir.join("repos");
-        blocking(permit, move || {
-            let store = Gix::shared(&root);
+        blocking(permit, move |cancelled| {
+            let store = Gix::shared(&root).cancellable(cancelled);
             let (tip, skip) = match cursor {
                 Some(cursor) => cursor,
                 None => (revision(&store, &dir, &request.revision)?, 0),
@@ -524,8 +538,8 @@ impl RepoService for Repos {
         let dir = self.browse_dir(&request.repo).await?;
         let permit = self.browse_permit()?;
         let root = self.0.git_state_dir.join("repos");
-        blocking(permit, move || {
-            let store = Gix::shared(&root);
+        blocking(permit, move |cancelled| {
+            let store = Gix::shared(&root).cancellable(cancelled);
             let id = revision(&store, &dir, &request.revision)?;
             let found = store
                 .log(&dir, &id, 0, 1, MAX_COMMIT_PAGE_BYTES)

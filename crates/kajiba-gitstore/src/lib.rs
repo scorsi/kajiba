@@ -5,6 +5,9 @@
 
 pub mod import;
 pub mod push;
+mod traversal;
+
+use traversal::Traversal;
 
 use std::fmt;
 use std::os::unix::process::CommandExt;
@@ -30,6 +33,7 @@ pub enum Limit {
     Tree,
     Commit,
     Diff,
+    Traversal,
 }
 
 impl fmt::Display for Error {
@@ -45,6 +49,7 @@ impl fmt::Display for Error {
                     Limit::Tree => "tree",
                     Limit::Commit => "commit",
                     Limit::Diff => "diff",
+                    Limit::Traversal => "traversal",
                 }
             ),
             Self::Git(err) => f.write_str(err),
@@ -431,12 +436,14 @@ fn run_output(
 /// The gix + `git` binary implementation.
 pub struct Gix<'a> {
     trusted_repos: Option<&'a Path>,
+    cancelled: Option<&'a std::sync::atomic::AtomicBool>,
 }
 
 /// Ordinary ownership checks for callers reading repositories they own.
 #[allow(non_upper_case_globals)]
 pub const Gix: Gix<'static> = Gix {
     trusted_repos: None,
+    cancelled: None,
 };
 
 impl<'a> Gix<'a> {
@@ -444,7 +451,14 @@ impl<'a> Gix<'a> {
     pub fn shared(repos: &'a Path) -> Self {
         Self {
             trusted_repos: Some(repos),
+            cancelled: None,
         }
+    }
+
+    /// Stop browsing work cooperatively when its requesting handler is dropped.
+    pub fn cancellable(mut self, cancelled: &'a std::sync::atomic::AtomicBool) -> Self {
+        self.cancelled = Some(cancelled);
+        self
     }
 
     fn trusted(&self, repo: &Path) -> Option<std::path::PathBuf> {
@@ -504,13 +518,22 @@ fn peel_to_commit<'r>(repo: &'r gix::Repository, mut id: gix::ObjectId) -> Resul
 }
 
 /// The commit named by a full hex id (a tag id is not a commit, 0021).
-fn commit<'r>(repo: &'r gix::Repository, id: &str) -> Result<gix::Commit<'r>> {
+fn commit<'r>(
+    repo: &'r gix::Repository,
+    id: &str,
+    work: &mut Traversal<'_>,
+) -> Result<gix::Commit<'r>> {
     let id = gix::ObjectId::from_hex(id.as_bytes()).map_err(|_| Error::NotFound)?;
-    load_commit(repo, id)
+    load_commit(repo, id, work)
 }
 
 /// A commit object, its kind and size checked before it is loaded.
-fn load_commit(repo: &gix::Repository, id: gix::ObjectId) -> Result<gix::Commit<'_>> {
+fn load_commit<'r>(
+    repo: &'r gix::Repository,
+    id: gix::ObjectId,
+    work: &mut Traversal<'_>,
+) -> Result<gix::Commit<'r>> {
+    work.check()?;
     let header = header(repo, id)?;
     if header.kind() != gix::object::Kind::Commit {
         return Err(Error::NotFound);
@@ -518,11 +541,17 @@ fn load_commit(repo: &gix::Repository, id: gix::ObjectId) -> Result<gix::Commit<
     if header.size() > MAX_COMMIT_OBJECT_BYTES {
         return Err(Error::TooLarge(Limit::Commit));
     }
+    work.object(header.size())?;
     Ok(repo.find_object(id)?.into_commit())
 }
 
 /// A tree object, its kind and size checked before it is loaded.
-fn load_tree(repo: &gix::Repository, id: gix::ObjectId) -> Result<gix::Tree<'_>> {
+fn load_tree<'r>(
+    repo: &'r gix::Repository,
+    id: gix::ObjectId,
+    work: &mut Traversal<'_>,
+) -> Result<gix::Tree<'r>> {
+    work.check()?;
     let header = header(repo, id)?;
     if header.kind() != gix::object::Kind::Tree {
         return Err(Error::NotFound);
@@ -530,24 +559,38 @@ fn load_tree(repo: &gix::Repository, id: gix::ObjectId) -> Result<gix::Tree<'_>>
     if header.size() > MAX_TREE_OBJECT_BYTES {
         return Err(Error::TooLarge(Limit::Tree));
     }
-    Ok(repo.find_object(id)?.into_tree())
+    work.object(header.size())?;
+    let tree = repo.find_object(id)?.into_tree();
+    // Charge unchanged entries too, before gix can scan or enqueue this subtree.
+    for entry in tree.iter() {
+        work.entry()?;
+        entry?;
+    }
+    work.check()?;
+    Ok(tree)
 }
 
-fn tree_at<'r>(repo: &'r gix::Repository, commit_id: &str, path: &str) -> Result<gix::Tree<'r>> {
-    let mut id = commit(repo, commit_id)?
+fn tree_at<'r>(
+    repo: &'r gix::Repository,
+    commit_id: &str,
+    path: &str,
+    work: &mut Traversal<'_>,
+) -> Result<gix::Tree<'r>> {
+    work.path(path.as_bytes())?;
+    let mut id = commit(repo, commit_id, work)?
         .tree_id()
         .map_err(|err| Error::Git(err.to_string()))?
         .detach();
     // Segment by segment, so every tree on the way is checked before it is loaded.
     for segment in path.split('/').filter(|segment| !segment.is_empty()) {
-        let tree = load_tree(repo, id)?;
+        let tree = load_tree(repo, id, work)?;
         let entry = tree.find_entry(segment).ok_or(Error::NotFound)?;
         if !entry.mode().is_tree() {
             return Err(Error::NotFound);
         }
         id = entry.oid().to_owned();
     }
-    load_tree(repo, id)
+    load_tree(repo, id, work)
 }
 
 impl GitStore for Gix<'_> {
@@ -656,9 +699,11 @@ impl GitStore for Gix<'_> {
 
     fn tree(&self, repo: &Path, commit: &str, path: &str, limit: usize) -> Result<Vec<TreeEntry>> {
         let repo = self.open(repo)?;
-        let tree = tree_at(&repo, commit, path)?;
+        let mut work = Traversal::new(self.cancelled);
+        let tree = tree_at(&repo, commit, path, &mut work)?;
         let mut entries = Vec::new();
         for entry in tree.iter() {
+            work.check()?;
             let entry = entry?;
             if entries.len() == limit {
                 return Err(Error::TooLarge(Limit::Tree));
@@ -676,13 +721,15 @@ impl GitStore for Gix<'_> {
                 id: entry.oid().to_string(),
             });
         }
+        work.check()?;
         Ok(entries)
     }
 
     fn blob(&self, repo: &Path, commit: &str, path: &str, limit: u64) -> Result<Vec<u8>> {
         let repo = self.open(repo)?;
         let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
-        let tree = tree_at(&repo, commit, dir)?;
+        let mut work = Traversal::new(self.cancelled);
+        let tree = tree_at(&repo, commit, dir, &mut work)?;
         let entry = tree.find_entry(name).ok_or(Error::NotFound)?;
         if entry.mode().is_tree() || entry.mode().is_commit() {
             return Err(Error::NotFound);
@@ -691,6 +738,7 @@ impl GitStore for Gix<'_> {
             return Err(Error::TooLarge(Limit::Blob));
         }
         let data = entry.object()?.detach().data;
+        work.check()?;
         Ok(data)
     }
 
@@ -705,7 +753,8 @@ impl GitStore for Gix<'_> {
         use std::cmp::Reverse;
         use std::collections::{BinaryHeap, HashSet};
         let repo = self.open(repo)?;
-        let tip = commit(&repo, commit_id)?;
+        let mut work = Traversal::new(self.cancelled);
+        let tip = commit(&repo, commit_id, &mut work)?;
         // The product's own commit-time walk (ADR 0051): newest first, insertion order
         // among equal times; every ancestor's header is checked by `load_commit` before
         // it is read, the ones passed over by `skip` included, and the parents of the
@@ -716,8 +765,12 @@ impl GitStore for Gix<'_> {
         let mut bytes = 0;
         let mut skipped = 0;
         while let Some((_, _, id)) = queue.pop() {
-            let object = load_commit(&repo, id)?;
-            let parents: Vec<gix::ObjectId> = object.parent_ids().map(|id| id.detach()).collect();
+            let object = load_commit(&repo, id, &mut work)?;
+            let mut parents = Vec::new();
+            for parent in object.parent_ids() {
+                work.entry()?;
+                parents.push(parent.detach());
+            }
             if skipped < skip {
                 skipped += 1;
             } else {
@@ -738,12 +791,18 @@ impl GitStore for Gix<'_> {
             }
             // shortcut: a parent is decoded here for its time and again when popped; cache it if walks get slow.
             for parent in parents {
-                if seen.insert(parent) {
-                    let time = load_commit(&repo, parent)?.time()?.seconds;
+                work.check()?;
+                if !seen.contains(&parent) {
+                    if queue.len() == traversal::MAX_FRONTIER {
+                        return Err(Error::TooLarge(Limit::Traversal));
+                    }
+                    let time = load_commit(&repo, parent, &mut work)?.time()?.seconds;
+                    seen.insert(parent);
                     queue.push((time, Reverse(seen.len()), parent));
                 }
             }
         }
+        work.check()?;
         Ok(commits)
     }
 
@@ -756,11 +815,12 @@ impl GitStore for Gix<'_> {
         max_bytes: usize,
     ) -> Result<Vec<Change>> {
         let repo = self.open(repo)?;
+        let mut work = Traversal::new(self.cancelled);
         let old = match from {
-            Some(id) => tree_at(&repo, id, "")?,
+            Some(id) => tree_at(&repo, id, "", &mut work)?,
             None => repo.empty_tree(),
         };
-        let new = tree_at(&repo, to, "")?;
+        let new = tree_at(&repo, to, "", &mut work)?;
         let mut changes = Vec::new();
         let mut bytes = 0;
         let mut exceeded = None;
@@ -810,16 +870,18 @@ impl GitStore for Gix<'_> {
                 ),
                 C::Rewrite { .. } => unreachable!("rewrite tracking is disabled"),
             };
+            if let Err(err) = work.path(path) {
+                exceeded = Some(err);
+                return Ok(Action::Break(()));
+            }
             if tree {
-                // gix reports a changed subtree before loading it to descend: an
-                // oversized one is refused here, unread.
-                let oversized = |id: &gix::ObjectId| {
-                    repo.find_header(*id)
-                        .is_ok_and(|header| header.size() > MAX_TREE_OBJECT_BYTES)
-                };
-                if old_id.iter().chain(&new_id).any(oversized) {
-                    exceeded = Some(Limit::Tree);
-                    return Ok(Action::Break(()));
+                // gix reports subtrees before descent; account for each occurrence,
+                // even when the same object appears at many different paths.
+                for id in old_id.iter().chain(&new_id) {
+                    if let Err(err) = load_tree(&repo, *id, &mut work) {
+                        exceeded = Some(err);
+                        return Ok(Action::Break(()));
+                    }
                 }
                 return Ok(Action::Continue(()));
             }
@@ -831,15 +893,16 @@ impl GitStore for Gix<'_> {
                 new_id: new_id.map(|id| id.to_string()),
             });
             if changes.len() > max_changes || bytes > max_bytes {
-                exceeded = Some(Limit::Diff);
+                exceeded = Some(Error::TooLarge(Limit::Diff));
                 return Ok(Action::Break(()));
             }
             Ok(Action::Continue(()))
         });
-        if let Some(limit) = exceeded {
-            return Err(Error::TooLarge(limit));
+        if let Some(err) = exceeded {
+            return Err(err);
         }
         walked?;
+        work.check()?;
         Ok(changes)
     }
 
@@ -866,7 +929,9 @@ impl GitStore for Gix<'_> {
                 }
             }
         }
-        let id = commit(&repo, &spec[..ends[0]])?.id.to_string();
+        let id = commit(&repo, &spec[..ends[0]], &mut Traversal::new(self.cancelled))?
+            .id
+            .to_string();
         Ok((id, rest(ends[0])))
     }
 
