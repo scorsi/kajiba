@@ -3,6 +3,7 @@ use kajiba_git::Gix;
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
 };
 use tonic::Code;
 use tonic_types::StatusExt;
@@ -642,6 +643,54 @@ async fn browsing_shares_the_public_read_budget() {
         repos.0.public_reads.available_permits(),
         super::super::PUBLIC_READS
     );
+}
+
+#[tokio::test]
+async fn browsing_responses_keep_their_permit_until_the_body_is_delivered() {
+    use prost::Message;
+    use tonic::codegen::Service;
+    let fixture = Fixture::new(DEMO).await;
+    fixture
+        .fill("alice/demo", &[("flake.nix", "{ }\n")], &[])
+        .await;
+    let message = GetBlobRequest {
+        repo: "alice/demo".into(),
+        revision: "main".into(),
+        path: "flake.nix".into(),
+    }
+    .encode_to_vec();
+    let mut body = vec![0];
+    body.extend((message.len() as u32).to_be_bytes());
+    body.extend(message);
+    let response = super::super::router(fixture.repos.0.clone(), false, Default::default())
+        .unwrap()
+        .call(
+            axum::http::Request::post("/kajiba.v1.RepoService/GetBlob")
+                .header("content-type", "application/grpc")
+                .body(axum::body::Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    // Built but unread: the permit is still taken (ADR 0050).
+    let budget = &fixture.repos.0.public_reads;
+    assert_eq!(budget.available_permits(), super::super::PUBLIC_READS - 1);
+    let encoded = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let decoded = GetBlobResponse::decode(&encoded[5..]).unwrap();
+    assert_eq!(decoded.content, b"{ }\n");
+    // Delivered: every permit comes back once the sending task has released its own.
+    let mut held = Vec::new();
+    for _ in 0..super::super::PUBLIC_READS {
+        held.push(
+            tokio::time::timeout(Duration::from_secs(5), budget.clone().acquire_owned())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
 }
 
 #[tokio::test]

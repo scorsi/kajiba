@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use http_body::Frame;
 use kajiba_git::{Error, GitStore, Gix};
 use std::time::Duration;
 use tokio::sync::OwnedSemaphorePermit;
@@ -33,8 +34,11 @@ fn body(data: Vec<u8>, permit: OwnedSemaphorePermit, idle: Duration, lifetime: D
     stream::supervised(permit, |chunks| async move {
         let transfer = async {
             for chunk in data.chunks(CHUNK) {
-                tokio::time::timeout(idle, stream::send(&chunks, Bytes::copy_from_slice(chunk)))
-                    .await??;
+                tokio::time::timeout(
+                    idle,
+                    stream::send(&chunks, Frame::data(Bytes::copy_from_slice(chunk))),
+                )
+                .await??;
             }
             Ok(())
         };

@@ -1,11 +1,17 @@
-//! A bounded response channel supervises git and raw bodies even when HTTP stops
-//! polling them (ADR 0040, 0043).
-use axum::body::{Body, Bytes};
+//! A bounded response channel supervises git, raw and browsing bodies even when HTTP
+//! stops polling them (ADR 0040, 0043, 0050).
+use axum::{
+    body::{Body, Bytes},
+    extract::Request as HttpRequest,
+    middleware::Next,
+    response::Response as HttpResponse,
+};
 use http_body::{Body as HttpBody, Frame};
 use std::{
     future::Future,
     io,
     pin::Pin,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
     time::Duration,
 };
@@ -21,7 +27,7 @@ pub(super) const STREAM_IDLE: Duration = Duration::from_secs(60);
 /// Whatever its progress, a streaming body ends.
 pub(super) const STREAM_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
-type Chunk = (Bytes, oneshot::Sender<()>);
+type Chunk = (Frame<Bytes>, oneshot::Sender<()>);
 pub(super) type Sender = mpsc::Sender<Chunk>;
 
 struct Supervised {
@@ -41,9 +47,9 @@ impl HttpBody for Supervised {
         if self.finished {
             return Poll::Ready(None);
         }
-        if let Some((bytes, consumed)) = std::task::ready!(self.chunks.poll_recv(cx)) {
+        if let Some((frame, consumed)) = std::task::ready!(self.chunks.poll_recv(cx)) {
             let _ = consumed.send(());
-            return Poll::Ready(Some(Ok(Frame::data(bytes))));
+            return Poll::Ready(Some(Ok(frame)));
         }
         let result = std::task::ready!(Pin::new(&mut self.completion).poll(cx));
         self.finished = true;
@@ -56,10 +62,10 @@ impl HttpBody for Supervised {
     }
 }
 
-pub(super) async fn send(chunks: &Sender, bytes: Bytes) -> io::Result<()> {
+pub(super) async fn send(chunks: &Sender, frame: Frame<Bytes>) -> io::Result<()> {
     let (consumed, received) = oneshot::channel();
     chunks
-        .send((bytes, consumed))
+        .send((frame, consumed))
         .await
         .map_err(io::Error::other)?;
     // Progress means HTTP polled a chunk, not merely that git wrote into its pipe.
@@ -89,6 +95,58 @@ where
     })
 }
 
+/// The public-read permit of a browsing response, left in the response's extensions
+/// by the handler for `guarded` (ADR 0050); shared only because extensions clone.
+#[derive(Clone)]
+pub(super) struct ReadPermit(Arc<Mutex<Option<OwnedSemaphorePermit>>>);
+
+impl ReadPermit {
+    pub(super) fn new(permit: OwnedSemaphorePermit) -> Self {
+        Self(Arc::new(Mutex::new(Some(permit))))
+    }
+}
+
+/// Carries a browsing response's permit through its encoded body: the response is
+/// bounded like a `/raw/` body, and the permit ends with the delivery or a bound.
+pub(super) async fn guarded(request: HttpRequest, next: Next) -> HttpResponse {
+    let mut response = next.run(request).await;
+    let permit = response
+        .extensions_mut()
+        .remove::<ReadPermit>()
+        .and_then(|held| held.0.lock().unwrap_or_else(|e| e.into_inner()).take());
+    match permit {
+        Some(permit) => {
+            let (parts, body) = response.into_parts();
+            HttpResponse::from_parts(parts, carry(body, permit, STREAM_IDLE, STREAM_LIFETIME))
+        }
+        None => response,
+    }
+}
+
+/// `body`'s frames, data and trailers, relayed from a task that owns the body and
+/// `permit`, and drops both when the body ends or the first bound fires.
+pub(super) fn carry(
+    mut body: Body,
+    permit: OwnedSemaphorePermit,
+    idle: Duration,
+    lifetime: Duration,
+) -> Body {
+    supervised(permit, |chunks| async move {
+        let transfer = async {
+            while let Some(frame) =
+                std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await
+            {
+                let frame = frame.map_err(io::Error::other)?;
+                timeout(idle, send(&chunks, frame)).await??;
+            }
+            Ok(())
+        };
+        timeout(lifetime, transfer)
+            .await
+            .unwrap_or_else(|err| Err(err.into()))
+    })
+}
+
 pub(super) fn body(
     mut child: Child,
     input: Vec<u8>,
@@ -110,7 +168,11 @@ pub(super) fn body(
             let read = async {
                 let mut deadline = Instant::now() + idle;
                 if !prefix.is_empty() {
-                    timeout_at(deadline, send(&chunks, Bytes::from_static(prefix))).await??;
+                    timeout_at(
+                        deadline,
+                        send(&chunks, Frame::data(Bytes::from_static(prefix))),
+                    )
+                    .await??;
                     deadline = Instant::now() + idle;
                 }
                 let mut buffer = [0; 16 << 10];
@@ -118,7 +180,11 @@ pub(super) fn body(
                     let count = timeout_at(deadline, async {
                         let count = stdout.read(&mut buffer).await?;
                         if count != 0 {
-                            send(&chunks, Bytes::copy_from_slice(&buffer[..count])).await?;
+                            send(
+                                &chunks,
+                                Frame::data(Bytes::copy_from_slice(&buffer[..count])),
+                            )
+                            .await?;
                         }
                         Ok::<_, io::Error>(count)
                     })
@@ -151,7 +217,7 @@ pub(super) fn body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{process::Stdio, sync::Arc};
+    use std::process::Stdio;
     use tokio::sync::Semaphore;
 
     fn child(script: &str) -> Child {
@@ -243,6 +309,53 @@ mod tests {
             reaped(&budget, pid).await;
             assert!(axum::body::to_bytes(response, 32 << 10).await.is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn carried_bodies_deliver_every_frame_then_release_and_expire_unpolled() {
+        let budget = Arc::new(Semaphore::new(1));
+        let mut trailers = axum::http::HeaderMap::new();
+        trailers.insert("grpc-status", "0".parse().unwrap());
+        // A body of one data frame and one trailers frame, as tonic encodes a response.
+        let inner = |trailers: axum::http::HeaderMap| {
+            let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+            supervised(permit, |chunks| async move {
+                send(&chunks, Frame::data(Bytes::from_static(b"message"))).await?;
+                send(&chunks, Frame::trailers(trailers)).await
+            })
+        };
+        // Read whole: data, then trailers, then the permit.
+        let mut response = carry(
+            inner(trailers.clone()),
+            budget.clone().try_acquire_owned().unwrap(),
+            Duration::from_secs(5),
+            Duration::from_secs(20),
+        );
+        let mut frames = Vec::new();
+        while let Some(frame) =
+            std::future::poll_fn(|cx| Pin::new(&mut response).poll_frame(cx)).await
+        {
+            frames.push(frame.unwrap());
+        }
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert_eq!(frames[0].data_ref().unwrap(), "message");
+        assert_eq!(frames[1].trailers_ref().unwrap(), &trailers);
+        let permit = timeout(Duration::from_secs(5), budget.clone().acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        // Never polled: the idle bound frees the permit and the body ends in error.
+        let response = carry(
+            inner(trailers),
+            permit,
+            Duration::from_millis(100),
+            Duration::from_secs(20),
+        );
+        let _released = timeout(Duration::from_secs(5), budget.clone().acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(axum::body::to_bytes(response, 1024).await.is_err());
     }
 
     #[tokio::test]

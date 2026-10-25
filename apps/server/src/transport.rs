@@ -90,6 +90,8 @@ fn router(
     let mut app = Routes::new(HealthServiceServer::new(health.clone()))
         .add_service(RepoServiceServer::new(repos::Repos(health.clone())))
         .into_axum_router()
+        // Browsing responses keep their permit through delivery (ADR 0050).
+        .route_layer(middleware::from_fn(stream::guarded))
         .merge(git_http::routes(repos::Repos(health.clone())))
         .merge(raw::routes(repos::Repos(health.clone())))
         .route("/healthz", get(|| async { "OK" }))

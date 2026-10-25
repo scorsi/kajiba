@@ -119,7 +119,7 @@ impl Repos {
 }
 
 /// GetBlob refuses larger files (ADR 0047): a unary response is held in memory whole
-/// and outlives its permit; `/raw/` streams the larger ones.
+/// for as long as its permit; `/raw/` streams the larger ones.
 pub const MAX_BLOB_BYTES: usize = 1 << 20;
 /// Response bounds of ADR 0043 and 0047: larger trees and diffs are refused, deeper
 /// history is reached from an older revision, a commit page ends early past its bytes.
@@ -129,16 +129,20 @@ pub const MAX_DIFF_PATH_BYTES: usize = 4 << 20;
 pub const MAX_COMMIT_SKIP: usize = 10_000;
 pub const MAX_COMMIT_PAGE_BYTES: usize = 1 << 20;
 
-/// A GitStore read, off the async runtime, holding a public-read permit until the
-/// response is built; a cancelled handler keeps the permit with the running work.
-/// The bounds above keep every response small, so what outlives the permit is too.
+/// A GitStore read, off the async runtime, holding a public-read permit; a cancelled
+/// handler keeps the permit with the running work. The response carries the permit
+/// in its extensions for `stream::guarded`, which keeps it through the delivery of
+/// the encoded body (ADR 0050); a refusal releases it at once.
 async fn blocking<T: Send + 'static>(
     permit: tokio::sync::OwnedSemaphorePermit,
-    read: impl FnOnce() -> Result<T, Status> + Send + 'static,
-) -> Result<T, Status> {
+    read: impl FnOnce() -> Result<Response<T>, Status> + Send + 'static,
+) -> Result<Response<T>, Status> {
     tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        read()
+        let mut response = read()?;
+        response
+            .extensions_mut()
+            .insert(super::stream::ReadPermit::new(permit));
+        Ok(response)
     })
     .await
     .map_err(|err| Status::internal(format!("git: {err}")))?
