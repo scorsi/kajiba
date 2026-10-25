@@ -48,12 +48,17 @@ impl std::fmt::Display for Refused {
 /// Live daemon sessions supplement durable pending-row session identities (0053).
 #[derive(Default)]
 pub struct Gate {
+    wake: tokio::sync::Notify,
     running: std::sync::Mutex<HashSet<i64>>,
     sessions: std::sync::Mutex<BTreeMap<String, (i64, kajiba_proto::git::v1::Session)>>,
     generation: std::sync::Mutex<Option<String>>,
 }
 
 impl Gate {
+    pub fn wake_recovery(&self) {
+        self.wake.notify_one();
+    }
+
     pub fn running(&self, repo: i64) -> bool {
         self.running.lock().unwrap().contains(&repo)
     }
@@ -404,7 +409,10 @@ impl Gate {
         store: &impl GitStore,
     ) {
         loop {
-            clock.sleep(RECOVERY_INTERVAL).await;
+            tokio::select! {
+                () = clock.sleep(RECOVERY_INTERVAL) => {},
+                () = self.wake.notified() => {},
+            }
             self.recover_once(&mut *writer.lock().await, bus, state_dir, store)
                 .await;
         }

@@ -116,9 +116,17 @@ impl GateService for Gate {
 
     async fn post_receive(
         &self,
-        _: Request<PostReceiveRequest>,
+        request: Request<PostReceiveRequest>,
     ) -> Result<Response<PostReceiveResponse>, Status> {
-        // Task 22 wires the reconciliation wake-up.
+        if !kajiba_core::names::is_public_id(&request.into_inner().session_id) {
+            return Err(rpc_error(
+                tonic::Code::InvalidArgument,
+                "INVALID_FIELD",
+                "invalid session_id",
+            ));
+        }
+        // The hook runs inside receive-pack: only SessionExited proves completion.
+        self.admission.wake_recovery();
         Ok(Response::new(PostReceiveResponse {}))
     }
 

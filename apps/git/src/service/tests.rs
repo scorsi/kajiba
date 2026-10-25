@@ -278,6 +278,7 @@ async fn hook_service_forwards_keys_and_session_and_fails_when_server_stops() {
         hook::{Kind, run},
         local,
     };
+    use kajiba_gitstore::GitStore;
     use kajiba_proto::hook::v1::{self as hook, hook_service_server::HookServiceServer};
     use std::process::ExitCode;
     let temp = TempDir::new();
@@ -364,10 +365,30 @@ async fn hook_service_forwards_keys_and_session_and_fails_when_server_stops() {
         run(&hook_path, Kind::PreReceive, &input[..], &env).await,
         ExitCode::FAILURE
     );
-    assert_eq!(
-        run(&hook_path, Kind::PostReceive, &input[..], &env).await,
-        ExitCode::SUCCESS
-    );
+    let repo = temp.0.join("live.git");
+    kajiba_gitstore::Gix.init_bare(&repo, "main").unwrap();
+    let mut child = tokio::process::Command::new("git")
+        .arg("receive-pack")
+        .arg(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                run(&hook_path, Kind::PostReceive, &input[..], &env),
+            )
+            .await
+            .unwrap(),
+            ExitCode::SUCCESS
+        );
+        assert!(child.try_wait().unwrap().is_none());
+    }
+    child.kill().await.unwrap();
     let mut hooks =
         hook::hook_service_client::HookServiceClient::new(channel(&hook_path, None).await.unwrap());
     for invalid in ["", "not-a-session"] {

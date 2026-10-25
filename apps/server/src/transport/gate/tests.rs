@@ -183,7 +183,9 @@ async fn gate_auth_and_closed_hooks_leave_admin_socket_unchanged() {
             .allowed
     );
     client
-        .post_receive(PostReceiveRequest::default())
+        .post_receive(PostReceiveRequest {
+            session_id: kajiba_core::new_id().unwrap(),
+        })
         .await
         .unwrap();
     assert_eq!(
@@ -878,4 +880,286 @@ async fn open_session_signers_include_only_the_active_pushers_current_signing_ke
         .code(),
         Code::PermissionDenied
     );
+}
+
+#[tokio::test]
+async fn post_receive_returns_before_exit_and_converts_only_applied_refs_in_order() {
+    use crate::db::pushes::ZERO;
+    use kajiba_proto::git::v1::SessionKind;
+    use std::process::{Command, Stdio};
+
+    for outcome in ["partial", "failed", "unexpected", "archived"] {
+        let (_state, admin, gate, alice) = session_fixture().await;
+        let open = OpenSessionRequest {
+            user_public_id: alice.clone(),
+            kind: SessionKind::ReceivePack.into(),
+            repository: Some(open_session_request::Repository::RepoAddress(
+                "alice/demo".into(),
+            )),
+            correlation_id: "push-request".into(),
+            import_session_id: String::new(),
+        };
+        let session = gate
+            .open_session(Request::new(open.clone()))
+            .await
+            .unwrap()
+            .into_inner()
+            .session
+            .unwrap();
+        let path = admin
+            .state_dir
+            .join(format!("repos/{}.git", session.repo_public_id));
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("--git-dir")
+                .arg(&path)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.org")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.org")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let tree = git(&["mktree"]);
+        let old = git(&["commit-tree", &tree, "-m", "one"]);
+        let new = git(&["commit-tree", &tree, "-p", &old, "-m", "two"]);
+        for name in ["main", "gone", "failed-update", "failed-delete", "same"] {
+            git(&["update-ref", &format!("refs/heads/{name}"), &old]);
+        }
+        // Deliberately not ref-name order; post-receive's successful subset is
+        // not the durable source of truth for a partially applied push.
+        let updates: Vec<_> = [
+            ("main", old.as_str(), new.as_str()),
+            ("same", old.as_str(), old.as_str()),
+            ("gone", old.as_str(), ZERO),
+            ("failed-create", ZERO, new.as_str()),
+            ("new", ZERO, old.as_str()),
+            ("failed-update", old.as_str(), new.as_str()),
+            ("failed-delete", old.as_str(), ZERO),
+        ]
+        .into_iter()
+        .map(|(name, old, new)| RefUpdate {
+            ref_name: format!("refs/heads/{name}"),
+            old_id: old.into(),
+            new_id: new.into(),
+            fast_forward: Some(true),
+            signature: SignatureVerdict::Verified.into(),
+            signature_reason: String::new(),
+        })
+        .collect();
+        assert!(
+            gate.pre_receive(Request::new(PreReceiveRequest {
+                session_id: session.session_id.clone(),
+                updates: updates.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .allowed
+        );
+
+        // A real receive-pack blocked on its command input remains alive while
+        // the fixture applies deterministic partial results.
+        let mut child = tokio::process::Command::new("git")
+            .arg("receive-pack")
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        if outcome != "failed" {
+            git(&["update-ref", "refs/heads/main", &new]);
+            git(&["update-ref", "-d", "refs/heads/gone"]);
+            git(&["update-ref", "refs/heads/new", &old]);
+        }
+        if outcome == "unexpected" {
+            git(&["update-ref", "-d", "refs/heads/failed-update"]);
+        }
+        if outcome == "archived" {
+            sqlx::query("UPDATE repo SET archived_at = 1")
+                .execute(&mut *admin.writer.lock().await)
+                .await
+                .unwrap();
+        }
+        let post = PostReceiveRequest {
+            session_id: session.session_id.clone(),
+        };
+        // Neither the writer lock nor the live child may hold up this hook.
+        let mut writer = admin.writer.lock().await;
+        for _ in 0..2 {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                gate.post_receive(Request::new(post.clone())),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        assert!(child.try_wait().unwrap().is_none());
+        gate.admission
+            .recover_once(
+                &mut writer,
+                &admin.bus,
+                &admin.state_dir,
+                &kajiba_gitstore::Gix,
+            )
+            .await;
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM event WHERE kind = 'push'")
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        drop(writer);
+        assert!(gate.open_session(Request::new(open.clone())).await.is_err());
+        child.kill().await.unwrap();
+        let exit = SessionExitedRequest {
+            session_id: session.session_id.clone(),
+            exit_status: 1,
+        };
+        for _ in 0..2 {
+            gate.session_exited(Request::new(exit.clone()))
+                .await
+                .unwrap();
+            gate.post_receive(Request::new(post.clone())).await.unwrap();
+            gate.admission
+                .recover_once(
+                    &mut *admin.writer.lock().await,
+                    &admin.bus,
+                    &admin.state_dir,
+                    &kajiba_gitstore::Gix,
+                )
+                .await;
+        }
+        if matches!(outcome, "unexpected" | "archived") {
+            let mut writer = admin.writer.lock().await;
+            let pending: (String, String) =
+                sqlx::query_as("SELECT correlation_id, updates FROM pending_push")
+                    .fetch_one(&mut *writer)
+                    .await
+                    .unwrap();
+            assert_eq!(pending.0, "push-request");
+            assert_eq!(
+                serde_json::from_str::<Vec<serde_json::Value>>(&pending.1)
+                    .unwrap()
+                    .len(),
+                updates.len()
+            );
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM event WHERE kind = 'push'")
+                .fetch_one(&mut *writer)
+                .await
+                .unwrap();
+            assert_eq!(
+                count, 0,
+                "{outcome}: keep the entire row without partial events"
+            );
+            drop(writer);
+            assert!(gate.open_session(Request::new(open.clone())).await.is_err());
+            if outcome == "unexpected" {
+                git(&["update-ref", "refs/heads/failed-update", &old]);
+            } else {
+                sqlx::query("UPDATE repo SET archived_at = NULL")
+                    .execute(&mut *admin.writer.lock().await)
+                    .await
+                    .unwrap();
+            }
+            gate.admission
+                .recover_once(
+                    &mut *admin.writer.lock().await,
+                    &admin.bus,
+                    &admin.state_dir,
+                    &kajiba_gitstore::Gix,
+                )
+                .await;
+        }
+        let mut writer = admin.writer.lock().await;
+        let events: Vec<(String, i64, i64, String, String)> = sqlx::query_as(
+            "SELECT principal_kind, principal_id, repo_id, correlation_id, payload FROM event WHERE kind = 'push' ORDER BY id"
+        ).fetch_all(&mut *writer).await.unwrap();
+        let principal: i64 = sqlx::query_scalar("SELECT id FROM user WHERE public_id = ?")
+            .bind(&alice)
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap();
+        let expected: Vec<_> = if outcome == "failed" {
+            vec![]
+        } else {
+            [0, 2, 4].into_iter().map(|i| {
+                let update = &updates[i];
+                ("user".to_owned(), principal, 1, "push-request".to_owned(),
+                    serde_json::json!({"ref": update.ref_name, "old": update.old_id, "new": update.new_id}).to_string())
+            }).collect()
+        };
+        assert_eq!(events, expected, "{outcome}");
+        let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM pending_push")
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap();
+        assert_eq!(pending, 0);
+        drop(writer);
+        assert!(gate.open_session(Request::new(open)).await.is_ok());
+    }
+}
+
+#[tokio::test]
+async fn post_receive_validates_session_and_wakes_recovery_without_a_timer_tick() {
+    let (_state, admin, gate, _) = session_fixture().await;
+    for session_id in ["", "invalid", "../session"] {
+        assert_eq!(
+            gate.post_receive(Request::new(PostReceiveRequest {
+                session_id: session_id.into()
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            Code::InvalidArgument
+        );
+    }
+    // An eligible row proves that PostReceive wakes the production loop, even
+    // when the notification arrives before the loop starts waiting.
+    gate.admission
+        .admit(&mut *admin.writer.lock().await, 1, None, "wake", &[])
+        .await
+        .unwrap();
+    gate.admission.exited(1);
+    gate.post_receive(Request::new(PostReceiveRequest {
+        session_id: kajiba_core::new_id().unwrap(),
+    }))
+    .await
+    .unwrap();
+    let recovery = gate.admission.recover_periodically(
+        &crate::db::events::SystemClock,
+        &admin.writer,
+        &admin.bus,
+        &admin.state_dir,
+        &kajiba_gitstore::Gix,
+    );
+    tokio::pin!(recovery);
+    let converted = async {
+        loop {
+            let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM pending_push")
+                .fetch_one(&mut *admin.writer.lock().await)
+                .await
+                .unwrap();
+            if pending == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::select! {
+        () = &mut recovery => unreachable!("recovery runs until shutdown"),
+        result = tokio::time::timeout(Duration::from_secs(2), converted) => result.unwrap(),
+    }
 }
