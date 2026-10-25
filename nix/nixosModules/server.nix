@@ -59,8 +59,8 @@ let
     };
     users = lib.mapAttrs (_: user: {
       is_admin = user.isAdmin;
-      ssh_keys = user.sshKeys;
-      signing_keys = user.signingKeys;
+      ssh_keys = map lib.trim user.sshKeys;
+      signing_keys = map lib.trim user.signingKeys;
       inherit (user) tokens;
     }) cfg.users;
     runners = lib.mapAttrs (_: runner: { token_file = runner.tokenFile; }) cfg.runners;
@@ -273,12 +273,12 @@ in
             sshKeys = mkOption {
               type = types.listOf types.str;
               default = [ ];
-              description = "Authentication keys, OpenSSH public key lines.";
+              description = "Authentication keys, OpenSSH public key lines; surrounding whitespace, such as the trailing newline of `builtins.readFile`, is removed.";
             };
             signingKeys = mkOption {
               type = types.listOf types.str;
               default = [ ];
-              description = "Commit and tag signing keys, OpenSSH public key lines.";
+              description = "Commit and tag signing keys, OpenSSH public key lines; surrounding whitespace is removed.";
             };
             tokens = mkOption {
               type = types.attrsOf (
