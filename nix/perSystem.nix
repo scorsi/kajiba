@@ -216,6 +216,11 @@
             kajibaServerPackage = config.packages.kajiba-server;
             kajibaGitPackage = config.packages.kajiba-git;
           };
+          nixos-git-ssh = import ./tests/git-ssh.nix {
+            inherit pkgs testLib;
+            kajibaServerPackage = config.packages.kajiba-server;
+            kajibaGitPackage = config.packages.kajiba-git;
+          };
           nixos-git-http = import ./tests/git-http.nix {
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
