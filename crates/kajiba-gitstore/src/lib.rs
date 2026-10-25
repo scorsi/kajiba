@@ -182,6 +182,15 @@ pub trait GitStore {
         updates: &[push::Update<'_>],
         quarantine: &push::Quarantine<'_>,
     ) -> Result<push::Facts>;
+    /// Verify each selected commit once against this session's signing keys.
+    fn verify_commits(
+        &self,
+        repo: &Path,
+        updates: &[push::Update<'_>],
+        facts: &push::Facts,
+        quarantine: &push::Quarantine<'_>,
+        allowed_signers: &Path,
+    ) -> Result<Vec<push::CommitRefusal>>;
 }
 
 /// Deadline of one git child of an import (`ls-remote`, then `fetch`): a hung
@@ -513,6 +522,19 @@ fn tree_at<'r>(repo: &'r gix::Repository, commit_id: &str, path: &str) -> Result
 }
 
 impl GitStore for Gix<'_> {
+    fn verify_commits(
+        &self,
+        repo: &Path,
+        updates: &[push::Update<'_>],
+        facts: &push::Facts,
+        quarantine: &push::Quarantine<'_>,
+        allowed_signers: &Path,
+    ) -> Result<Vec<push::CommitRefusal>> {
+        push::verify_commits(repo, updates, facts, quarantine, |commit| {
+            push::verify_commit(repo, commit, quarantine, allowed_signers)
+        })
+    }
+
     fn push_facts(
         &self,
         repo: &Path,

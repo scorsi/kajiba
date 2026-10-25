@@ -125,7 +125,7 @@ impl git_service_server::GitService for Git {
         kajiba_gitstore::import::check_source(&request.source)
             .map_err(|err| rpc_error(tonic::Code::InvalidArgument, "INVALID_FIELD", err))?;
         let session = request.session.clone().unwrap();
-        self.repositories.register(session.clone())?;
+        self.repositories.register(session.clone(), String::new())?;
         let repositories = self.repositories.clone();
         let server_socket = self.server_socket.clone();
         // Admission, child wait and exit recording all survive a cancelled Fetch RPC.

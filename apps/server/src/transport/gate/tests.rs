@@ -806,3 +806,76 @@ async fn auth_key_lookup_resolves_only_active_users_auth_keys() {
     assert_eq!(lookup(AUTH_FP).await.unwrap(), None);
     server.abort();
 }
+
+#[tokio::test]
+async fn open_session_signers_include_only_the_active_pushers_current_signing_keys() {
+    use kajiba_proto::git::v1::SessionKind;
+    let (_state, admin, gate, alice) = session_fixture().await;
+    for (users, expected) in [
+        (
+            format!(
+                "[users.alice]\nssh_keys=['{AUTH} comment']\nsigning_keys=['{SIGNING} comment']\n[users.bob]\nsigning_keys=['{AUTH}']\n"
+            ),
+            format!("{alice} {SIGNING}\n"),
+        ),
+        // Removing the signing key, or moving it to another user, grants no signing authority.
+        (
+            format!("[users.alice]\nssh_keys=['{SIGNING}']\n[users.bob]\n"),
+            String::new(),
+        ),
+        (
+            format!(
+                "[users.alice]\nssh_keys=['{AUTH}']\n[users.bob]\nsigning_keys=['{SIGNING}']\n"
+            ),
+            String::new(),
+        ),
+    ] {
+        let config = kajiba_core::config::ServerConfig::parse(&format!(
+            "[http]\npublic_url='{PUBLIC_URL}'\n{users}"
+        ))
+        .unwrap();
+        crate::db::reconcile(&mut *admin.writer.lock().await, &config.users)
+            .await
+            .unwrap();
+        let opened = gate
+            .open_session(Request::new(OpenSessionRequest {
+                user_public_id: alice.clone(),
+                kind: SessionKind::ReceivePack.into(),
+                repository: Some(open_session_request::Repository::RepoAddress(
+                    "alice/demo".into(),
+                )),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(opened.allowed_signers, expected);
+        gate.session_exited(Request::new(SessionExitedRequest {
+            session_id: opened.session.unwrap().session_id,
+            exit_status: 0,
+        }))
+        .await
+        .unwrap();
+    }
+    let config = kajiba_core::config::ServerConfig::parse(&format!(
+        "[http]\npublic_url='{PUBLIC_URL}'\n[users.bob]\n"
+    ))
+    .unwrap();
+    crate::db::reconcile(&mut *admin.writer.lock().await, &config.users)
+        .await
+        .unwrap();
+    assert_eq!(
+        gate.open_session(Request::new(OpenSessionRequest {
+            user_public_id: alice,
+            kind: SessionKind::ReceivePack.into(),
+            repository: Some(open_session_request::Repository::RepoAddress(
+                "alice/demo".into()
+            )),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err()
+        .code(),
+        Code::PermissionDenied
+    );
+}

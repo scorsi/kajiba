@@ -216,7 +216,9 @@ async fn exit_facts_survive_disconnection_and_are_retried_until_acknowledged() {
         repo_public_id: kajiba_core::new_id().unwrap(),
         ..Default::default()
     };
-    repositories.register(session.clone()).unwrap();
+    repositories
+        .register(session.clone(), String::new())
+        .unwrap();
     let mut child = std::process::Command::new("cat")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -480,7 +482,22 @@ async fn pre_receive_reads_quarantined_objects_and_fails_closed_on_missing_objec
             quarantine_path: incoming.to_str().unwrap().into(),
         }),
     };
-    let facts = git.repositories.push_facts(&request).unwrap();
+    git.repositories
+        .register(
+            Session {
+                session_id: id.into(),
+                user_public_id: id.into(),
+                repo_public_id: id.into(),
+                kind: SessionKind::ReceivePack.into(),
+                generation: git.generation.clone(),
+                ..Default::default()
+            },
+            String::new(),
+        )
+        .unwrap();
+    let (facts, refusals) = git.repositories.check_commits(&request).unwrap();
+    assert_eq!(refusals[0].ref_name, "refs/heads/main");
+    assert!(refusals[0].reason.contains(&commit));
     assert_eq!(facts.commits, [commit]);
     assert_eq!(facts.fast_forward, [false]);
     let response = HookService::pre_receive(&git, Request::new(request.clone()))
@@ -488,7 +505,7 @@ async fn pre_receive_reads_quarantined_objects_and_fails_closed_on_missing_objec
         .unwrap()
         .into_inner();
     assert!(!response.allowed);
-    assert_eq!(response.refusals[0].reason, "pushes are not accepted yet");
+    assert_eq!(response.refusals, refusals);
     request.quarantine = None;
     assert!(
         HookService::pre_receive(&git, Request::new(request))
@@ -543,12 +560,13 @@ async fn hook_context_is_required_and_unreachable_server_fails_closed() {
         session_id: id.into(),
         ..Default::default()
     };
-    let response = HookService::pre_receive(&git, Request::new(pre))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(!response.allowed);
-    assert_eq!(response.refusals[0].reason, "pushes are not accepted yet");
+    assert_eq!(
+        HookService::pre_receive(&git, Request::new(pre))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::FailedPrecondition
+    );
     let post = hook::PostReceiveRequest {
         user_public_id: id.into(),
         repo_public_id: id.into(),
@@ -572,4 +590,124 @@ async fn hook_context_is_required_and_unreachable_server_fails_closed() {
     .unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unavailable);
     assert_eq!(error.message(), "server unavailable");
+}
+
+#[tokio::test]
+async fn commit_checks_use_session_signers_and_remove_the_temporary_file() {
+    use kajiba_proto::hook::v1::{self as hook, hook_service_server::HookService};
+    let temp = TempDir::new();
+    let _lock = crate::state::prepare(&temp.0).unwrap();
+    let git = Git {
+        generation: kajiba_core::new_id().unwrap(),
+        server_socket: temp.0.join("absent.sock"),
+        repositories: Arc::new(crate::repositories::Repositories::new(temp.0.clone())),
+    };
+    let id = kajiba_core::new_id().unwrap();
+    git.repositories.create(&id, "main").unwrap();
+    let repo = temp.0.join(format!("repos/{id}.git"));
+    let key = temp.0.join("signing-key");
+    let output = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let command = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Alice")
+            .env("GIT_AUTHOR_EMAIL", "alice@example.org")
+            .env("GIT_COMMITTER_NAME", "Alice")
+            .env("GIT_COMMITTER_EMAIL", "alice@example.org")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let tree = command(&["mktree"]);
+    let commit = command(&[
+        "-c",
+        "gpg.format=ssh",
+        "-c",
+        &format!("user.signingKey={}", key.display()),
+        "commit-tree",
+        &tree,
+        "-S",
+        "-m",
+        "signed",
+    ]);
+    let mut request = hook::PreReceiveRequest {
+        user_public_id: id.clone(),
+        repo_public_id: id.clone(),
+        session_id: id.clone(),
+        updates: vec![hook::RefUpdate {
+            ref_name: "refs/heads/main".into(),
+            old_id: "0000000000000000000000000000000000000000".into(),
+            new_id: commit.clone(),
+        }],
+        ..Default::default()
+    };
+    let session = Session {
+        session_id: id.clone(),
+        user_public_id: id.clone(),
+        repo_public_id: id.clone(),
+        kind: SessionKind::ReceivePack.into(),
+        generation: git.generation.clone(),
+        ..Default::default()
+    };
+    let signers = format!(
+        "{id} {}",
+        std::fs::read_to_string(key.with_extension("pub")).unwrap()
+    );
+    git.repositories.register(session.clone(), signers).unwrap();
+    let (facts, refusals) = git.repositories.check_commits(&request).unwrap();
+    assert_eq!(facts.commits, std::slice::from_ref(&commit));
+    assert!(refusals.is_empty());
+    let response = HookService::pre_receive(&git, Request::new(request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!response.allowed);
+    assert_eq!(response.refusals[0].reason, "pushes are not accepted yet");
+    let mut wrong = request.clone();
+    wrong.user_public_id = kajiba_core::new_id().unwrap();
+    assert_eq!(
+        git.repositories.check_commits(&wrong).unwrap_err().code(),
+        tonic::Code::FailedPrecondition
+    );
+    wrong = request.clone();
+    wrong.repo_public_id = kajiba_core::new_id().unwrap();
+    assert_eq!(
+        git.repositories.check_commits(&wrong).unwrap_err().code(),
+        tonic::Code::FailedPrecondition
+    );
+    git.repositories.finished(&id, 0);
+    assert_eq!(
+        git.repositories.check_commits(&request).unwrap_err().code(),
+        tonic::Code::FailedPrecondition
+    );
+    request.session_id = kajiba_core::new_id().unwrap();
+    git.repositories
+        .register(
+            Session {
+                session_id: request.session_id.clone(),
+                ..session
+            },
+            String::new(),
+        )
+        .unwrap();
+    let response = HookService::pre_receive(&git, Request::new(request))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!response.allowed);
+    assert_eq!(response.refusals[0].ref_name, "refs/heads/main");
+    assert!(response.refusals[0].reason.contains(&commit));
+    assert!(response.refusals[0].reason.contains("SSH signature"));
+    assert_eq!(std::fs::read_dir(temp.0.join("tmp")).unwrap().count(), 1); // orphans/ only
 }

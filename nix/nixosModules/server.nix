@@ -482,7 +482,10 @@ in
         gitConfigFile
         gitCfg.package
       ];
-      path = [ pkgs.git ];
+      path = [
+        pkgs.git
+        pkgs.openssh
+      ];
       serviceConfig = hardening // {
         ExecStart = "${lib.getExe gitCfg.package} serve --config ${gitConfigFile}";
         Type = "notify";

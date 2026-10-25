@@ -40,8 +40,14 @@ fn sessions_count_once_and_totals_survive_acknowledgement() {
                 correlation_id: "private-correlation".into(),
                 generation: "private-generation".into(),
             };
-            repositories.register(session.clone()).unwrap();
-            assert!(repositories.register(session.clone()).is_err());
+            repositories
+                .register(session.clone(), String::new())
+                .unwrap();
+            assert!(
+                repositories
+                    .register(session.clone(), String::new())
+                    .is_err()
+            );
             let mut active = [0; 4];
             active[index] = 1;
             assert_eq!(

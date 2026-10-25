@@ -174,3 +174,183 @@ fn invalid_or_missing_objects_and_bad_context_fail_checks() {
         );
     }
 }
+
+fn signing_key(dir: &Path, name: &str) -> (String, String) {
+    let key = dir.join(name);
+    let output = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "fixture", "-f"])
+        .arg(&key)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let public = fs::read_to_string(key.with_extension("pub")).unwrap();
+    (key.to_str().unwrap().into(), public)
+}
+
+#[test]
+fn commit_signatures_require_the_pushers_ssh_signing_key() {
+    let dir = scratch("commit-signatures");
+    let repo = dir.join("repo.git");
+    Gix.init_bare(&repo, "main").unwrap();
+    let (alice, public) = signing_key(&dir, "alice");
+    let (bob, bob_public) = signing_key(&dir, "bob");
+    let signers = dir.join("allowed_signers");
+    fs::write(&signers, format!("alice {public}")).unwrap();
+    let tree = git(&repo, &["mktree"], DATE);
+    let signed = |key: &str, parent: Option<&str>| {
+        let config = format!("user.signingKey={key}");
+        let mut args = vec![
+            "-c",
+            "gpg.format=ssh",
+            "-c",
+            &config,
+            "commit-tree",
+            &tree,
+            "-S",
+            "-m",
+            "signed",
+        ];
+        if let Some(parent) = parent {
+            args.extend(["-p", parent]);
+        }
+        git(&repo, &args, DATE)
+    };
+    let valid = signed(&alice, None);
+    let wrong = signed(&bob, None);
+    let unsigned = git(&repo, &["commit-tree", &tree, "-m", "unsigned"], DATE);
+    let signed_tip = signed(&alice, Some(&unsigned));
+    let raw = git(&repo, &["cat-file", "commit", &valid], DATE);
+    let tampered_file = dir.join("tampered");
+    fs::write(
+        &tampered_file,
+        format!("{}\n", raw.replace("\n\nsigned", "\n\ntampered")),
+    )
+    .unwrap();
+    let tampered = git(
+        &repo,
+        &[
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            tampered_file.to_str().unwrap(),
+        ],
+        DATE,
+    );
+    let other_signers = dir.join("other_signers");
+    fs::write(&other_signers, format!("bob {bob_public}")).unwrap();
+    // Repository configuration must not replace the session's authority or verifier.
+    git(
+        &repo,
+        &[
+            "config",
+            "gpg.ssh.allowedSignersFile",
+            other_signers.to_str().unwrap(),
+        ],
+        DATE,
+    );
+    git(&repo, &["config", "gpg.ssh.program", "false"], DATE);
+    git(&repo, &["config", "gpg.minTrustLevel", "undefined"], DATE);
+
+    for (tip, bad) in [
+        (&valid, None),
+        (&wrong, Some(&wrong)),
+        (&unsigned, Some(&unsigned)),
+        (&tampered, Some(&tampered)),
+        (&signed_tip, Some(&unsigned)),
+    ] {
+        let updates = updates(&[(ZERO, tip)]);
+        let facts = Gix
+            .push_facts(&repo, &updates, &Quarantine::default())
+            .unwrap();
+        let refusals = Gix
+            .verify_commits(&repo, &updates, &facts, &Quarantine::default(), &signers)
+            .unwrap();
+        match bad {
+            None => assert!(refusals.is_empty(), "{refusals:?}"),
+            Some(commit) => {
+                assert_eq!(refusals.len(), 1, "{refusals:?}");
+                assert_eq!(refusals[0].commit, *commit);
+                assert_eq!(refusals[0].update_index, 0);
+                assert!(refusals[0].reason.contains("SSH signature"));
+            }
+        }
+    }
+    // Auth-only and removed signing keys produce no entry in OpenSession's text.
+    fs::write(&signers, "").unwrap();
+    let updates = updates(&[(ZERO, &valid)]);
+    let facts = Gix
+        .push_facts(&repo, &updates, &Quarantine::default())
+        .unwrap();
+    assert_eq!(
+        Gix.verify_commits(&repo, &updates, &facts, &Quarantine::default(), &signers)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn shared_commits_are_verified_once_in_quarantine_and_refusals_name_each_ref() {
+    let dir = scratch("shared-signatures");
+    let repo = dir.join("repo.git");
+    Gix.init_bare(&repo, "main").unwrap();
+    let (key, public) = signing_key(&dir, "alice");
+    let signers = dir.join("allowed_signers");
+    fs::write(&signers, format!("alice {public}")).unwrap();
+    let tree = git(&repo, &["mktree"], DATE);
+    let commit = git(
+        &repo,
+        &[
+            "-c",
+            "gpg.format=ssh",
+            "-c",
+            &format!("user.signingKey={key}"),
+            "commit-tree",
+            &tree,
+            "-S",
+            "-m",
+            "shared",
+        ],
+        DATE,
+    );
+    let incoming = repo.join("objects/incoming");
+    fs::create_dir_all(incoming.join(&commit[..2])).unwrap();
+    fs::rename(
+        repo.join("objects").join(&commit[..2]).join(&commit[2..]),
+        incoming.join(&commit[..2]).join(&commit[2..]),
+    )
+    .unwrap();
+    let objects = repo.join("objects");
+    let quarantine = Quarantine {
+        object_directory: incoming.to_str().unwrap(),
+        alternate_object_directories: objects.to_str().unwrap(),
+        quarantine_path: incoming.to_str().unwrap(),
+    };
+    let updates = updates(&[(ZERO, &commit), (ZERO, &commit)]);
+    let facts = Gix.push_facts(&repo, &updates, &quarantine).unwrap();
+    assert_eq!(facts.commits, std::slice::from_ref(&commit));
+    let mut verified = Vec::new();
+    let refusals = crate::push::verify_commits(&repo, &updates, &facts, &quarantine, |id| {
+        verified.push(id.to_owned());
+        crate::push::verify_commit(&repo, id, &quarantine, &signers)
+    })
+    .unwrap();
+    assert!(refusals.is_empty());
+    assert_eq!(verified, std::slice::from_ref(&commit));
+    fs::write(&signers, "").unwrap();
+    let refusals = Gix
+        .verify_commits(&repo, &updates, &facts, &quarantine, &signers)
+        .unwrap();
+    assert_eq!(
+        refusals
+            .iter()
+            .map(|r| (r.update_index, r.commit.as_str()))
+            .collect::<Vec<_>>(),
+        [(0, commit.as_str()), (1, commit.as_str())]
+    );
+    assert!(
+        Gix.verify_commits(&repo, &updates, &facts, &Quarantine::default(), &signers)
+            .is_err()
+    );
+}

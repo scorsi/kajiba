@@ -4,6 +4,7 @@
   commonCargoArgs,
   cargoArtifacts,
   git,
+  openssh,
 }:
 craneLib.buildPackage (
   commonCargoArgs
@@ -11,7 +12,10 @@ craneLib.buildPackage (
     inherit cargoArtifacts;
     pname = "kajiba-git";
     cargoExtraArgs = "--locked -p kajiba-git";
-    nativeCheckInputs = [ git ];
+    nativeCheckInputs = [
+      git
+      openssh
+    ];
     meta.mainProgram = "kajiba-git";
   }
 )

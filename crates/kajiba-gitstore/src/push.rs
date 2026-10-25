@@ -37,28 +37,7 @@ pub(crate) fn facts(
             }
         }
     }
-    for path in [quarantine.object_directory, quarantine.quarantine_path] {
-        if !path.is_empty() && (!Path::new(path).is_absolute() || path.contains('\0')) {
-            return Err(Error::Git("invalid quarantine path".into()));
-        }
-    }
-    let command = || {
-        let mut command = git();
-        command.arg("--git-dir").arg(repo);
-        for (name, value) in [
-            ("GIT_OBJECT_DIRECTORY", quarantine.object_directory),
-            (
-                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                quarantine.alternate_object_directories,
-            ),
-            ("GIT_QUARANTINE_PATH", quarantine.quarantine_path),
-        ] {
-            if !value.is_empty() {
-                command.env(name, value);
-            }
-        }
-        command
-    };
+    quarantine.command(repo)?;
     let tips: String = updates
         .iter()
         .filter(|u| u.new_id != ZERO)
@@ -67,7 +46,7 @@ pub(crate) fn facts(
     let commits = if tips.is_empty() {
         Vec::new()
     } else {
-        let mut cmd = command();
+        let mut cmd = quarantine.command(repo)?;
         // --all is evaluated before receive-pack changes any ref; stdin avoids ARG_MAX.
         cmd.args(["rev-list", "--stdin"]);
         run(cmd, &format!("{tips}--not\n--all\n"), TIMEOUT)?
@@ -81,7 +60,7 @@ pub(crate) fn facts(
             if u.old_id == ZERO || u.new_id == ZERO {
                 return Ok(false);
             }
-            ancestor(command(), u.old_id, u.new_id)
+            ancestor(quarantine.command(repo)?, u.old_id, u.new_id)
         })
         .collect::<Result<_>>()?;
     Ok(Facts {
@@ -100,4 +79,92 @@ fn ancestor(mut command: Command, old: &str, new: &str) -> Result<bool> {
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         )),
     }
+}
+
+impl Quarantine<'_> {
+    fn command(&self, repo: &Path) -> Result<Command> {
+        for path in [self.object_directory, self.quarantine_path] {
+            if !path.is_empty() && (!Path::new(path).is_absolute() || path.contains('\0')) {
+                return Err(Error::Git("invalid quarantine path".into()));
+            }
+        }
+        let mut command = git();
+        command.arg("--git-dir").arg(repo);
+        for (name, value) in [
+            ("GIT_OBJECT_DIRECTORY", self.object_directory),
+            (
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                self.alternate_object_directories,
+            ),
+            ("GIT_QUARANTINE_PATH", self.quarantine_path),
+        ] {
+            if !value.is_empty() {
+                command.env(name, value);
+            }
+        }
+        Ok(command)
+    }
+}
+
+#[derive(Debug)]
+pub struct CommitRefusal {
+    pub update_index: usize,
+    pub commit: String,
+    pub reason: &'static str,
+}
+
+pub(crate) fn verify_commits(
+    repo: &Path,
+    updates: &[Update<'_>],
+    facts: &Facts,
+    quarantine: &Quarantine<'_>,
+    mut verify: impl FnMut(&str) -> Result<bool>,
+) -> Result<Vec<CommitRefusal>> {
+    let mut refusals = Vec::new();
+    for commit in &facts.commits {
+        if verify(commit)? {
+            continue;
+        }
+        for (update_index, update) in updates.iter().enumerate() {
+            if update.new_id != ZERO && ancestor(quarantine.command(repo)?, commit, update.new_id)?
+            {
+                refusals.push(CommitRefusal {
+                    update_index,
+                    commit: commit.clone(),
+                    reason: "missing or invalid SSH signature by a signing key of the pusher",
+                });
+            }
+        }
+    }
+    Ok(refusals)
+}
+
+pub(crate) fn verify_commit(
+    repo: &Path,
+    commit: &str,
+    quarantine: &Quarantine<'_>,
+    allowed_signers: &Path,
+) -> Result<bool> {
+    let mut command = quarantine.command(repo)?;
+    command.args([
+        "-c",
+        "gpg.format=ssh",
+        "-c",
+        "gpg.ssh.program=ssh-keygen",
+        "-c",
+        "gpg.minTrustLevel=fully",
+        // verify-commit detects the signature format independently of gpg.format.
+        "-c",
+        "gpg.openpgp.program=false",
+        "-c",
+        "gpg.x509.program=false",
+        "-c",
+        "gpg.ssh.revocationFile=",
+    ]);
+    command.arg("-c").arg(format!(
+        "gpg.ssh.allowedSignersFile={}",
+        allowed_signers.display()
+    ));
+    command.args(["verify-commit", "--", commit]);
+    Ok(run_output(command, "", TIMEOUT)?.status.success())
 }

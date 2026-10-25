@@ -22,7 +22,7 @@ pub struct Repositories {
 
 #[derive(Default)]
 struct Sessions {
-    running: std::collections::BTreeMap<String, Session>,
+    running: std::collections::BTreeMap<String, (Session, String)>,
     exited: std::collections::BTreeMap<String, (Session, i32)>,
     completed: [[u64; 2]; 4],
 }
@@ -95,11 +95,37 @@ impl Repositories {
         Gix.set_head(&path, branch).map_err(internal)
     }
 
-    pub fn push_facts(
+    pub fn check_commits(
         &self,
         request: &kajiba_proto::hook::v1::PreReceiveRequest,
-    ) -> Result<kajiba_gitstore::push::Facts, Status> {
+    ) -> Result<
+        (
+            kajiba_gitstore::push::Facts,
+            Vec<kajiba_proto::hook::v1::Refusal>,
+        ),
+        Status,
+    > {
         use kajiba_gitstore::push::{Quarantine, Update};
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        let allowed_signers = {
+            let sessions = self.sessions.lock().unwrap();
+            let (_, signers) = sessions
+                .running
+                .get(&request.session_id)
+                .filter(|(s, _)| {
+                    s.kind == kajiba_proto::git::v1::SessionKind::ReceivePack as i32
+                        && s.user_public_id == request.user_public_id
+                        && s.repo_public_id == request.repo_public_id
+                })
+                .ok_or_else(|| {
+                    rpc_error(
+                        Code::FailedPrecondition,
+                        "INVALID_STATE",
+                        "active receive-pack session required",
+                    )
+                })?;
+            signers.clone()
+        };
         let path = self.present(&request.repo_public_id)?;
         let updates: Vec<_> = request
             .updates
@@ -110,16 +136,46 @@ impl Repositories {
             })
             .collect();
         let context = request.quarantine.clone().unwrap_or_default();
-        Gix.push_facts(
-            &path,
-            &updates,
-            &Quarantine {
-                object_directory: &context.object_directory,
-                alternate_object_directories: &context.alternate_object_directories,
-                quarantine_path: &context.quarantine_path,
-            },
-        )
-        .map_err(internal)
+        let quarantine = Quarantine {
+            object_directory: &context.object_directory,
+            alternate_object_directories: &context.alternate_object_directories,
+            quarantine_path: &context.quarantine_path,
+        };
+        let facts = Gix
+            .push_facts(&path, &updates, &quarantine)
+            .map_err(internal)?;
+        if facts.commits.is_empty() {
+            return Ok((facts, Vec::new()));
+        }
+        let signers_path = self
+            .root
+            .join("tmp")
+            .join(kajiba_core::new_id().map_err(internal)?);
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&signers_path)
+            .map_err(internal)?;
+        let result = (|| {
+            file.write_all(allowed_signers.as_bytes())
+                .map_err(internal)?;
+            Gix.verify_commits(&path, &updates, &facts, &quarantine, &signers_path)
+                .map_err(internal)
+        })();
+        let cleanup = fs::remove_file(&signers_path).map_err(internal);
+        let refusals = result?;
+        cleanup?;
+        Ok((
+            facts,
+            refusals
+                .into_iter()
+                .map(|r| kajiba_proto::hook::v1::Refusal {
+                    ref_name: request.updates[r.update_index].ref_name.clone(),
+                    reason: format!("commit {}: {}", r.commit, r.reason),
+                })
+                .collect(),
+        ))
     }
 
     pub fn sessions(&self) -> Vec<Session> {
@@ -128,11 +184,12 @@ impl Repositories {
             .unwrap()
             .running
             .values()
-            .cloned()
+            .map(|(session, _)| session.clone())
             .collect()
     }
 
-    pub fn register(&self, session: Session) -> Result<(), Status> {
+    /// `allowed_signers` is the OpenSession response, valid only for this session (0053).
+    pub fn register(&self, session: Session, allowed_signers: String) -> Result<(), Status> {
         let mut sessions = self.sessions.lock().unwrap();
         if sessions.running.contains_key(&session.session_id)
             || sessions.exited.contains_key(&session.session_id)
@@ -143,13 +200,15 @@ impl Repositories {
                 "session already used",
             ));
         }
-        sessions.running.insert(session.session_id.clone(), session);
+        sessions
+            .running
+            .insert(session.session_id.clone(), (session, allowed_signers));
         Ok(())
     }
 
     pub fn finished(&self, session_id: &str, status: i32) {
         let mut sessions = self.sessions.lock().unwrap();
-        if let Some(session) = sessions.running.remove(session_id) {
+        if let Some((session, _)) = sessions.running.remove(session_id) {
             if let Some(kind) = crate::metrics::kind_index(session.kind) {
                 let count = &mut sessions.completed[kind][usize::from(status != 0)];
                 *count = count.saturating_add(1);
@@ -182,7 +241,7 @@ impl Repositories {
     pub fn metrics(&self) -> String {
         let sessions = self.sessions.lock().unwrap();
         let mut active = [0; 4];
-        for session in sessions.running.values() {
+        for (session, _) in sessions.running.values() {
             if let Some(kind) = crate::metrics::kind_index(session.kind) {
                 active[kind] += 1;
             }

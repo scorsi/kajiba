@@ -90,7 +90,10 @@
           // {
             inherit cargoArtifacts;
             # kajiba-gitstore tests build their fixture repositories with the git binary.
-            nativeBuildInputs = commonCargoArgs.nativeBuildInputs ++ [ pkgs.git ];
+            nativeBuildInputs = commonCargoArgs.nativeBuildInputs ++ [
+              pkgs.git
+              pkgs.openssh
+            ];
           }
         );
         cargo-clippy = craneLib.cargoClippy (

@@ -10,11 +10,14 @@ fn completed_session_counters_saturate() {
     let index = crate::metrics::kind_index(SessionKind::Import.into()).unwrap();
     repositories.sessions.lock().unwrap().completed[index][0] = u64::MAX;
     repositories
-        .register(Session {
-            session_id: "one".into(),
-            kind: SessionKind::Import.into(),
-            ..Default::default()
-        })
+        .register(
+            Session {
+                session_id: "one".into(),
+                kind: SessionKind::Import.into(),
+                ..Default::default()
+            },
+            String::new(),
+        )
         .unwrap();
     repositories.finished("one", 0);
     assert_eq!(
@@ -249,8 +252,8 @@ fn session_facts_remain_until_the_child_exits_and_the_server_acknowledges() {
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    repos.register(session.clone()).unwrap();
-    assert!(repos.register(session.clone()).is_err());
+    repos.register(session.clone(), String::new()).unwrap();
+    assert!(repos.register(session.clone(), String::new()).is_err());
     assert_eq!(repos.sessions(), std::slice::from_ref(&session));
     assert!(repos.exits().is_empty());
     assert!(child.try_wait().unwrap().is_none());
@@ -259,7 +262,7 @@ fn session_facts_remain_until_the_child_exits_and_the_server_acknowledges() {
     repos.finished(&session.session_id, status);
     assert!(repos.sessions().is_empty());
     assert_eq!(repos.exits(), [(session.clone(), status)]);
-    assert!(repos.register(session.clone()).is_err());
+    assert!(repos.register(session.clone(), String::new()).is_err());
     repos.finished(&session.session_id, 1);
     assert_eq!(repos.exits(), [(session.clone(), status)]);
     repos.acknowledged(&session.session_id);
