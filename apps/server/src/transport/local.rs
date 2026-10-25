@@ -8,6 +8,11 @@ use kajiba_proto::admin::v1::{
     admin_service_client::AdminServiceClient,
     admin_service_server::{AdminService, AdminServiceServer},
 };
+use kajiba_proto::hook::v1::{
+    GetAuthKeyRequest, GetAuthKeyResponse,
+    hook_service_client::HookServiceClient,
+    hook_service_server::{HookService, HookServiceServer},
+};
 use std::{
     fs,
     future::Future,
@@ -215,6 +220,36 @@ impl AdminService for Admin {
     }
 }
 
+/// The SSH integration and the hooks share the admin service's state (ADR 0003).
+#[tonic::async_trait]
+impl HookService for Admin {
+    async fn get_auth_key(
+        &self,
+        request: Request<GetAuthKeyRequest>,
+    ) -> Result<Response<GetAuthKeyResponse>, Status> {
+        let found: Option<(String, String)> = sqlx::query_as(
+            "SELECT user.public_id, ssh_key.public_key FROM ssh_key
+             JOIN user ON user.id = ssh_key.user_id
+             WHERE ssh_key.fingerprint = ? AND ssh_key.usage = 'auth' AND user.disabled_at IS NULL",
+        )
+        .bind(request.into_inner().fingerprint)
+        .fetch_optional(&mut *self.writer.lock().await)
+        .await
+        .map_err(|err| Status::internal(format!("auth key lookup: {err}")))?;
+        let (user_public_id, public_key) = found.ok_or_else(|| {
+            refused(
+                tonic::Code::NotFound,
+                "KEY_NOT_FOUND",
+                "no active auth key".into(),
+            )
+        })?;
+        Ok(Response::new(GetAuthKeyResponse {
+            user_public_id,
+            public_key,
+        }))
+    }
+}
+
 pub(super) struct Local {
     listener: UnixListener,
     path: PathBuf,
@@ -278,13 +313,17 @@ impl Local {
         registry: Arc<Registry>,
         shutdown: impl std::future::Future<Output = ()>,
     ) -> io::Result<()> {
+        let admin = Arc::new(admin);
         // An enroll request is a user name: a few bytes, never tonic's 4 MiB default.
-        let routes = Routes::new(AdminServiceServer::new(admin).max_decoding_message_size(4096))
-            .into_axum_router()
-            .layer(middleware::from_fn_with_state(
-                registry,
-                correlation::request,
-            ));
+        let routes = Routes::new(
+            AdminServiceServer::from_arc(admin.clone()).max_decoding_message_size(4096),
+        )
+        .add_service(HookServiceServer::from_arc(admin).max_decoding_message_size(4096))
+        .into_axum_router()
+        .layer(middleware::from_fn_with_state(
+            registry,
+            correlation::request,
+        ));
         self.serving.on.store(true, Ordering::Release);
         let serving = self.serving.clone();
         tonic::transport::Server::builder()
@@ -357,19 +396,42 @@ impl Service<axum::http::Uri> for Connector {
     }
 }
 
-async fn client(
+async fn channel(
     path: &Path,
     timeout: Option<Duration>,
-) -> Result<AdminServiceClient<tonic::transport::Channel>, Box<dyn std::error::Error>> {
+) -> Result<tonic::transport::Channel, Box<dyn std::error::Error>> {
     let mut endpoint = tonic::transport::Endpoint::from_static("http://localhost")
         .connect_timeout(Duration::from_secs(5));
     if let Some(timeout) = timeout {
         endpoint = endpoint.timeout(timeout);
     }
-    let channel = endpoint
+    Ok(endpoint
         .connect_with_connector(Connector(path.into()))
-        .await?;
-    Ok(AdminServiceClient::new(channel))
+        .await?)
+}
+
+async fn client(
+    path: &Path,
+    timeout: Option<Duration>,
+) -> Result<AdminServiceClient<tonic::transport::Channel>, Box<dyn std::error::Error>> {
+    Ok(AdminServiceClient::new(channel(path, timeout).await?))
+}
+
+/// The user public id and canonical key of an active user's auth key; `None` when the
+/// fingerprint names no such key.
+pub async fn auth_key(
+    path: &Path,
+    fingerprint: String,
+) -> Result<Option<(String, String)>, Box<dyn std::error::Error>> {
+    let mut client = HookServiceClient::new(channel(path, Some(Duration::from_secs(5))).await?);
+    match client.get_auth_key(GetAuthKeyRequest { fingerprint }).await {
+        Ok(response) => {
+            let response = response.into_inner();
+            Ok(Some((response.user_public_id, response.public_key)))
+        }
+        Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+        Err(status) => Err(status.into()),
+    }
 }
 
 pub async fn enroll(path: &Path, user: String) -> Result<String, Box<dyn std::error::Error>> {

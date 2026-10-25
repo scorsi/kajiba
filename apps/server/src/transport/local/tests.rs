@@ -456,3 +456,81 @@ async fn import_never_returns_or_logs_source_credentials() {
     assert_eq!(import_file().await, std::process::ExitCode::FAILURE);
     server.abort();
 }
+
+const AUTH: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea";
+const AUTH_FP: &str = "SHA256:bbXpuKG6zhzdmnxq256TlqzFBzRl2f6OOg722cYNbU8";
+const SIGNING: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1AF8PoQ4lakrcKp00bfrycmCzPLsSWjMDNVfEq9GYM";
+const SIGNING_FP: &str = "SHA256:F34nin7tcaYH6WR5LSWSfj6weFBPfBpuyUUoPFP9YjA";
+
+#[tokio::test]
+async fn auth_key_lookup_resolves_only_active_users_auth_keys() {
+    let dir = SocketDir::new();
+    let local = Local::bind(&dir.socket(), Arc::default()).unwrap();
+    // The comment tries to smuggle options into the authorized_keys line.
+    let alice = format!(
+        "[users.alice]\nssh_keys=['{AUTH} x\",command=\"sh\" restrict']\nsigning_keys=['{SIGNING}']\n[users.bob]\n"
+    );
+    let admin = admin(&dir.0, &alice).await;
+    let writer = admin.writer.clone();
+    let server = tokio::spawn(local.serve(admin, Arc::default(), std::future::pending()));
+    let public_id = |name: &'static str| {
+        let writer = writer.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT public_id FROM user WHERE name = ?")
+                .bind(name)
+                .fetch_one(&mut *writer.lock().await)
+                .await
+                .unwrap()
+        }
+    };
+    let reconcile = |users: String| {
+        let writer = writer.clone();
+        async move {
+            let users = kajiba_core::config::ServerConfig::parse(&format!(
+                "[http]\npublic_url='{PUBLIC_URL}'\n{users}"
+            ))
+            .unwrap()
+            .users;
+            crate::db::reconcile(&mut *writer.lock().await, &users)
+                .await
+                .unwrap();
+        }
+    };
+    let socket = dir.socket();
+    let lookup = |fingerprint: &str| auth_key(&socket, fingerprint.into());
+
+    assert_eq!(
+        lookup(AUTH_FP).await.unwrap(),
+        Some((public_id("alice").await, AUTH.into()))
+    );
+    for unknown in [SIGNING_FP, "SHA256:unknown", ""] {
+        assert_eq!(lookup(unknown).await.unwrap(), None, "{unknown}");
+    }
+    // Reassigned to bob: resolves to him.
+    reconcile(format!("[users.alice]\n[users.bob]\nssh_keys=['{AUTH}']\n")).await;
+    assert_eq!(
+        lookup(AUTH_FP).await.unwrap(),
+        Some((public_id("bob").await, AUTH.into()))
+    );
+    // Removed key, then a disabled user still holding a key row.
+    reconcile("[users.alice]\n[users.bob]\n".into()).await;
+    assert_eq!(lookup(AUTH_FP).await.unwrap(), None);
+    reconcile(format!("[users.bob]\nssh_keys=['{AUTH}']\n")).await;
+    sqlx::query("UPDATE user SET disabled_at = 1 WHERE name = 'bob'")
+        .execute(&mut *writer.lock().await)
+        .await
+        .unwrap();
+    assert_eq!(lookup(AUTH_FP).await.unwrap(), None);
+    assert_eq!(
+        crate::ssh_keys(&dir.socket(), AUTH_FP.into()).await,
+        std::process::ExitCode::SUCCESS
+    );
+    server.abort();
+    // No server: an explicit failure, never an empty success.
+    assert_eq!(
+        crate::ssh_keys(&dir.0.join("absent.sock"), AUTH_FP.into()).await,
+        std::process::ExitCode::FAILURE
+    );
+}

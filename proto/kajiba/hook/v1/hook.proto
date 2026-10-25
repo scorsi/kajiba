@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package kajiba.hook.v1;
+
+// The SSH integration and the Git hooks, over the local socket (0003, 0004).
+service HookService {
+  // Resolve an SSH auth key fingerprint to an active user and the canonical
+  // stored key, for sshd's AuthorizedKeysCommand (0004, 0014). An unknown
+  // fingerprint, a signing-only key or a disabled user is NOT_FOUND
+  // (KEY_NOT_FOUND).
+  rpc GetAuthKey(GetAuthKeyRequest) returns (GetAuthKeyResponse);
+}
+
+message GetAuthKeyRequest {
+  // `SHA256:` followed by the unpadded base64 digest, as sshd's %f prints it.
+  string fingerprint = 1;
+}
+
+message GetAuthKeyResponse {
+  string user_public_id = 1;
+  // The OpenSSH key without comment or options (`ssh_key.public_key`).
+  string public_key = 2;
+}

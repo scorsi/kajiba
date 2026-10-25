@@ -38,6 +38,12 @@ enum Command {
         #[command(subcommand)]
         command: AdminCommand,
     },
+    /// sshd's AuthorizedKeysCommand: print the forced-command line of an active user's
+    /// auth key, or nothing for an unknown key (ADR 0004).
+    SshKeys {
+        /// `SHA256:…`, as sshd's `%f` gives it.
+        fingerprint: String,
+    },
     /// Forward a Git hook to the running server.
     Hook {
         #[command(subcommand)]
@@ -220,6 +226,13 @@ async fn main() -> ExitCode {
                 return admin_repo_list(std::path::Path::new(transport::local::SOCKET_PATH)).await;
             }
         },
+        Command::SshKeys { fingerprint } => {
+            return ssh_keys(
+                std::path::Path::new(transport::local::SOCKET_PATH),
+                fingerprint,
+            )
+            .await;
+        }
         Command::Hook { command } => match command {
             HookCommand::PreReceive => "hook pre-receive",
             HookCommand::PostReceive => "hook post-receive",
@@ -227,6 +240,30 @@ async fn main() -> ExitCode {
     };
     log::error("fatal", &format!("{name}: not implemented yet"));
     ExitCode::from(NOT_IMPLEMENTED)
+}
+
+async fn ssh_keys(path: &std::path::Path, fingerprint: String) -> ExitCode {
+    match transport::local::auth_key(path, fingerprint).await {
+        Ok(Some((user, key))) => {
+            println!("{}", authorized_key(&user, &key));
+            ExitCode::SUCCESS
+        }
+        // sshd then refuses the key; it logs the failed authentication itself.
+        Ok(None) => ExitCode::SUCCESS,
+        Err(err) => {
+            let message = match err.downcast_ref::<tonic::Status>() {
+                Some(status) => status.message().to_owned(),
+                None => err.to_string(),
+            };
+            log::error("fatal", &format!("ssh-keys: {message}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// ADR 0004's line: the canonical stored key (no comment, no configured options).
+fn authorized_key(user_public_id: &str, public_key: &str) -> String {
+    format!("command=\"kajiba-server serve-ssh --user {user_public_id}\",restrict {public_key}")
 }
 
 async fn admin_enroll(path: &std::path::Path, user: String) -> ExitCode {
@@ -442,6 +479,22 @@ mod tests {
         assert_eq!(
             repo_line(&repo),
             "01ARZ3NDEKTSV4RRFFQ69G5FAV\talice/demo\tarchived"
+        );
+    }
+
+    #[test]
+    fn parses_ssh_keys_and_prints_adr_0004_line() {
+        assert_eq!(
+            Args::try_parse_from(["kajiba-server", "ssh-keys", "SHA256:abc"])
+                .unwrap()
+                .command,
+            Command::SshKeys {
+                fingerprint: "SHA256:abc".into()
+            }
+        );
+        assert_eq!(
+            authorized_key("01ARZ3NDEKTSV4RRFFQ69G5FAV", "ssh-ed25519 AAAA"),
+            "command=\"kajiba-server serve-ssh --user 01ARZ3NDEKTSV4RRFFQ69G5FAV\",restrict ssh-ed25519 AAAA"
         );
     }
 

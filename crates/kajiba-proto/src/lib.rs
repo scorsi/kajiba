@@ -21,3 +21,9 @@ pub mod admin {
         tonic::include_proto!("kajiba.admin.v1");
     }
 }
+
+pub mod hook {
+    pub mod v1 {
+        tonic::include_proto!("kajiba.hook.v1");
+    }
+}

@@ -16,7 +16,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &["../../proto"],
         )?;
     tonic_build::configure().compile_protos(
-        &["../../proto/kajiba/admin/v1/admin.proto"],
+        &[
+            "../../proto/kajiba/admin/v1/admin.proto",
+            "../../proto/kajiba/hook/v1/hook.proto",
+        ],
         &["../../proto"],
     )?;
     Ok(())
