@@ -33,6 +33,7 @@ pub struct Admin {
     pub gate: Arc<crate::db::pushes::Gate>,
     pub bus: Arc<crate::db::events::EventBus>,
     pub state_dir: PathBuf,
+    pub git_socket: PathBuf,
 }
 
 pub(super) fn refused(code: tonic::Code, reason: &str, message: String) -> Status {
@@ -159,6 +160,7 @@ impl AdminService for Admin {
             &self.gate,
             &self.bus,
             &self.state_dir,
+            &mut super::git_side::Repositories::new(&self.git_socket),
             &repo,
             &source,
             &credentials,
@@ -185,6 +187,7 @@ impl AdminService for Admin {
                 "INVALID_STATE",
                 format!("the source cannot be read: {message}"),
             ),
+            Error::Unavailable(message) => super::git_side::unavailable(message),
             Error::Internal(message) => Status::internal(format!("import: {message}")),
         })?;
         Ok(Response::new(ImportResponse { refs: refs as u32 }))

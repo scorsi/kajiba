@@ -6,7 +6,10 @@ use crate::db::{
     events::EventBus,
     pushes::{Gate, RefUpdate, Refused, ZERO, checkpoint},
 };
+use crate::transport::git_side::Repositories;
+pub use kajiba_gitstore::import::{check_source, reason};
 use kajiba_gitstore::{GitStore, Gix};
+use kajiba_proto::git::v1::{FetchRequest, ListRemoteRefsRequest, Session, SessionKind};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -24,6 +27,7 @@ pub enum Error {
     /// refused source broke (`check_source`).
     Source(String),
     Internal(String),
+    Unavailable(String),
 }
 
 /// Returns the number of imported refs. Refusals write nothing.
@@ -33,6 +37,7 @@ pub async fn import(
     gate: &Arc<Gate>,
     bus: &Arc<EventBus>,
     state_dir: &Path,
+    daemon: &mut Repositories,
     repo: &str,
     source: &str,
     credentials: &str,
@@ -55,88 +60,96 @@ pub async fn import(
     .ok_or(Error::NotFound)?;
     let path = state_dir.join(format!("repos/{public_id}.git"));
 
-    let (owned, secret) = (source.to_owned(), credentials.to_owned());
-    let refs = tokio::task::spawn_blocking(move || Gix.remote_refs(&owned, &secret))
-        .await
+    if !Gix::shared(&state_dir.join("repos"))
+        .refs(&path)
         .map_err(|err| Error::Internal(err.to_string()))?
-        .map_err(|err| Error::Source(reason(&err.to_string()).into()))?;
+        .is_empty()
+    {
+        return Err(Error::NotEmpty(format!("{repo} already has refs")));
+    }
+    let mut client = daemon
+        .client()
+        .await
+        .map_err(|err| Error::Unavailable(err.to_string()))?
+        .clone();
+    let refs = client
+        .list_remote_refs(ListRemoteRefsRequest {
+            source: source.into(),
+            credentials: credentials.into(),
+        })
+        .await
+        .map_err(remote_error)?
+        .into_inner()
+        .refs;
     let head = format!("refs/heads/{default_branch}");
-    if !refs.iter().any(|r| r.name == head) {
+    if !refs.iter().any(|r| r.ref_name == head) {
         return Err(Error::NoDefaultBranch(head));
     }
 
-    {
-        // Emptiness and admission under one writer hold: two imports cannot both pass.
-        let mut connection = writer.lock().await;
-        let existing = Gix::shared(&state_dir.join("repos"))
-            .refs(&path)
-            .map_err(|err| Error::Internal(err.to_string()))?;
-        if !existing.is_empty() {
-            return Err(Error::NotEmpty(format!("{repo} already has refs")));
-        }
-        let updates: Vec<RefUpdate> = refs
-            .iter()
-            .map(|r| RefUpdate {
-                name: r.name.clone(),
-                old: ZERO.into(),
-                new: r.target.clone(),
-            })
-            .collect();
-        gate.admit(&mut connection, repo_id, None, correlation_id, &updates)
-            .await
-            .map_err(|err| match err {
-                Refused::Database(err) => Error::Internal(err.to_string()),
-                err => Error::NotEmpty(err.to_string()),
-            })?;
-    }
-    checkpoint("admitted");
-
-    let (target, owned, secret, wanted) = (
-        path.clone(),
-        source.to_owned(),
-        credentials.to_owned(),
-        refs.clone(),
-    );
-    let fetched = supervise(
+    let session_id = kajiba_core::new_id().map_err(|err| Error::Internal(err.to_string()))?;
+    let generation = daemon.generation.clone();
+    let (source, credentials, wanted) = (source.to_owned(), credentials.to_owned(), refs.clone());
+    let updates: Vec<RefUpdate> = refs
+        .iter()
+        .map(|r| RefUpdate {
+            name: r.ref_name.clone(),
+            old: ZERO.into(),
+            new: r.object_id.clone(),
+        })
+        .collect();
+    let (writer, gate, bus, state_dir, repo_name, correlation_id) = (
         writer.clone(),
         gate.clone(),
         bus.clone(),
         state_dir.to_owned(),
-        repo_id,
-        move || Gix.fetch(&target, &owned, &secret, &wanted),
-    )
+        repo.to_owned(),
+        correlation_id.to_owned(),
+    );
+    // Own admission and completion independently of the admin RPC's lifetime.
+    tokio::spawn(async move {
+        {
+            let mut connection = writer.lock().await;
+            if !Gix::shared(&state_dir.join("repos"))
+                .refs(&path)
+                .map_err(|err| Error::Internal(err.to_string()))?
+                .is_empty()
+            {
+                return Err(Error::NotEmpty(format!("{repo_name} already has refs")));
+            }
+            gate.admit(&mut connection, repo_id, None, &correlation_id, &updates)
+                .await
+                .map_err(|err| match err {
+                    Refused::Database(err) => Error::Internal(err.to_string()),
+                    err => Error::NotEmpty(err.to_string()),
+                })?;
+        }
+        checkpoint("admitted");
+        let request = FetchRequest {
+            session: Some(Session {
+                session_id,
+                kind: SessionKind::Import.into(),
+                repo_public_id: public_id.clone(),
+                user_public_id: String::new(),
+                correlation_id,
+                generation,
+            }),
+            repo_public_id: public_id,
+            source,
+            credentials,
+            refs: wanted,
+        };
+        supervise(writer, gate, bus, state_dir, repo_id, async move {
+            client.fetch(request).await.map(|_| ())
+        })
+        .await
+        .map_err(|err| Error::Internal(err.to_string()))?
+        .map_err(Error::Internal)?
+        .map_err(remote_error)
+    })
     .await
-    .map_err(|err| Error::Internal(err.to_string()))?
-    .map_err(Error::Internal)?;
-    fetched.map_err(|err| Error::Source(reason(&err.to_string()).into()))?;
+    .map_err(|err| Error::Internal(err.to_string()))??;
     tracing::info!(event = "repo-imported", repo, refs = refs.len());
     Ok(refs.len())
-}
-
-/// An absolute path, or a URL that cannot carry a credential: no userinfo (an ssh
-/// user name excepted), query or fragment (ADR 0041, 0044). A token in the path is
-/// indistinguishable from a path segment and is not protected: `--source-file` keeps
-/// it out of the CLI's arguments (ADR 0048), but git's transport helper receives the
-/// full source as an argument (ADR 0049).
-pub fn check_source(source: &str) -> Result<(), &'static str> {
-    let Some((scheme, rest)) = source.split_once("://") else {
-        // The server would resolve a relative path from its own working directory.
-        return if Path::new(source).is_absolute() {
-            Ok(())
-        } else {
-            Err("not an absolute path or a URL")
-        };
-    };
-    if rest.contains(['?', '#']) {
-        return Err("a query or fragment in the source is refused; use --credentials-file");
-    }
-    let authority = rest.split('/').next().unwrap_or(rest);
-    match authority.rsplit_once('@') {
-        Some((user, _)) if scheme != "ssh" || user.contains(':') => {
-            Err("credentials in the source are refused; use --credentials-file")
-        }
-        _ => Ok(()),
-    }
 }
 
 /// Runs the admitted mutation in a task of its own, then releases the gate and
@@ -149,12 +162,21 @@ pub(crate) fn supervise(
     bus: Arc<EventBus>,
     state_dir: PathBuf,
     repo_id: i64,
-    mutate: impl FnOnce() -> kajiba_gitstore::Result<()> + Send + 'static,
-) -> tokio::task::JoinHandle<Result<kajiba_gitstore::Result<()>, String>> {
+    mutate: impl std::future::Future<Output = Result<(), tonic::Status>> + Send + 'static,
+) -> tokio::task::JoinHandle<Result<Result<(), tonic::Status>, String>> {
     tokio::spawn(async move {
-        let mutated = tokio::task::spawn_blocking(mutate)
-            .await
-            .map_err(|err| err.to_string());
+        let mutated = mutate.await;
+        // A transport failure is not evidence of child exit (0053).
+        if mutated.as_ref().is_err_and(|err| {
+            !matches!(
+                err.code(),
+                tonic::Code::InvalidArgument
+                    | tonic::Code::FailedPrecondition
+                    | tonic::Code::NotFound
+            )
+        }) {
+            return Ok(mutated);
+        }
         checkpoint("fetched");
         gate.exited(repo_id);
         gate.reconcile_repo(
@@ -165,57 +187,20 @@ pub(crate) fn supervise(
             repo_id,
         )
         .await?;
-        mutated
+        Ok(mutated)
     })
 }
 
-/// Classifies a git failure from its stderr. Git echoes the source, remote banners
-/// and sometimes a credential: none of that text ever leaves the server, only one
-/// of these fixed classes does (ADR 0022, 0041).
-pub fn reason(stderr: &str) -> &'static str {
-    let text = stderr.to_ascii_lowercase();
-    let any = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
-    if any(&["did not finish within", "timed out", "operation too slow"]) {
-        "timed out"
-    } else if any(&[
-        "authentication failed",
-        "error: 401",
-        "error: 403",
-        "could not read username",
-        "could not read password",
-        "terminal prompts disabled",
-        "permission denied",
-        "host key verification failed",
-        "access denied",
-    ]) {
-        "authentication failed"
-    } else if any(&[
-        "not found",
-        "error: 404",
-        "no such file or directory",
-        "does not exist",
-    ]) {
-        "source not found"
-    } else if any(&[
-        "not appear to be a git repository",
-        "not a git repository",
-        "bundle file",
-    ]) {
-        "not a git repository"
-    } else if any(&[
-        "could not resolve host",
-        "failed to connect",
-        "connection refused",
-        "connection reset",
-        "unable to look up",
-        "unable to access",
-        "unable to connect",
-        "could not read from remote repository",
-        "remote end hung up",
-        "early eof",
-    ]) {
-        "network error"
+fn remote_error(err: tonic::Status) -> Error {
+    if matches!(
+        err.code(),
+        tonic::Code::Unavailable
+            | tonic::Code::DeadlineExceeded
+            | tonic::Code::Cancelled
+            | tonic::Code::Unknown
+    ) {
+        Error::Unavailable("import completion unavailable".into())
     } else {
-        "other error"
+        Error::Source(reason(err.message()).into())
     }
 }

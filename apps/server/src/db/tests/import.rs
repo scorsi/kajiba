@@ -54,6 +54,7 @@ impl Import {
             &self.gate,
             &self.bus,
             &self.state_dir,
+            &mut self._state.daemon.client.clone(),
             repo,
             source,
             "",
@@ -400,7 +401,12 @@ async fn a_dropped_import_future_still_releases_the_gate_and_reconciles() {
         import.bus.clone(),
         import.state_dir.clone(),
         1,
-        fetch,
+        async move {
+            tokio::task::spawn_blocking(fetch)
+                .await
+                .unwrap()
+                .map_err(|err| tonic::Status::failed_precondition(err.to_string()))
+        },
     ));
     let refused = import
         .gate
@@ -492,6 +498,9 @@ async fn crash_child() {
         &Arc::default(),
         &Arc::default(),
         &state_dir,
+        &mut crate::transport::git_side::fake::Fake::start(&state_dir)
+            .await
+            .client,
         "alice/demo",
         &source,
         "",
@@ -565,6 +574,7 @@ async fn a_killed_import_converts_once_after_restart() {
                     &gate,
                     &bus,
                     &state.dir.0,
+                    &mut state.daemon.client,
                     "alice/demo",
                     source.to_str().unwrap(),
                     "",
@@ -599,5 +609,102 @@ async fn a_killed_import_converts_once_after_restart() {
             .unwrap();
         state.writer = Arc::try_unwrap(writer).unwrap().into_inner();
         state.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_completed_deadline_reconciles_but_a_lost_response_keeps_the_gate_closed() {
+    for completed in [true, false] {
+        let import = Import::new().await;
+        import
+            .gate
+            .admit(
+                &mut *import.writer.lock().await,
+                1,
+                None,
+                "deadline",
+                &[crate::db::pushes::RefUpdate {
+                    name: "refs/heads/main".into(),
+                    old: crate::db::pushes::ZERO.into(),
+                    new: "1".repeat(40),
+                }],
+            )
+            .await
+            .unwrap();
+        let result = supervise(
+            import.writer.clone(),
+            import.gate.clone(),
+            import.bus.clone(),
+            import.state_dir.clone(),
+            1,
+            async move {
+                Err(if completed {
+                    tonic::Status::failed_precondition("timed out")
+                } else {
+                    tonic::Status::unavailable("connection lost")
+                })
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(result.is_err());
+        let pending = import
+            .strings("SELECT correlation_id FROM pending_push")
+            .await;
+        assert_eq!(pending.is_empty(), completed);
+        assert!(import.strings("SELECT payload FROM event").await.is_empty());
+        let next = import
+            .gate
+            .admit(&mut *import.writer.lock().await, 1, None, "next", &[])
+            .await;
+        if completed {
+            next.unwrap();
+        } else {
+            assert!(matches!(next, Err(Refused::InProgress)));
+        }
+    }
+}
+
+#[tokio::test]
+async fn target_refusals_precede_the_daemon_and_unavailable_is_explicit() {
+    let import = Import::new().await;
+    let mut unavailable =
+        crate::transport::git_side::Repositories::new(&import.state_dir.join("absent.sock"));
+    let source = source(&import.state_dir, "main");
+    import
+        .run("alice/demo", source.to_str().unwrap())
+        .await
+        .unwrap();
+    let before = import.changes().await;
+    for (repo, expected) in [
+        ("alice/missing", "missing"),
+        ("bob/gone", "missing"),
+        ("alice/demo", "full"),
+        ("alice/other", "unavailable"),
+    ] {
+        let err = crate::import::import(
+            &import.writer,
+            &import.gate,
+            &import.bus,
+            &import.state_dir,
+            &mut unavailable,
+            repo,
+            source.to_str().unwrap(),
+            "",
+            "request-2",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                (&err, expected),
+                (Error::NotFound, "missing")
+                    | (Error::NotEmpty(_), "full")
+                    | (Error::Unavailable(_), "unavailable")
+            ),
+            "{err:?}"
+        );
+        assert_eq!(import.changes().await, before);
     }
 }

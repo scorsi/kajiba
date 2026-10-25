@@ -3,6 +3,8 @@
 //! Object ids cross the boundary as lowercase hex strings so that callers never
 //! depend on gix types and pieces can be replaced one by one.
 
+pub mod import;
+
 use std::fmt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -788,6 +790,7 @@ impl GitStore for Gix<'_> {
     }
 
     fn remote_refs(&self, source: &str, credentials: &str) -> Result<Vec<Ref>> {
+        import::check_source(source).map_err(|err| Error::Git(err.into()))?;
         let mut refs = Vec::new();
         for line in run(ls_remote_command(source, credentials), "", IMPORT_TIMEOUT)?.lines() {
             let (target, name) = line
@@ -807,6 +810,7 @@ impl GitStore for Gix<'_> {
     }
 
     fn fetch(&self, repo: &Path, source: &str, credentials: &str, refs: &[Ref]) -> Result<()> {
+        import::check_source(source).map_err(|err| Error::Git(err.into()))?;
         let refspecs: String = refs
             .iter()
             .map(|r| format!("{}:{}\n", r.target, r.name))

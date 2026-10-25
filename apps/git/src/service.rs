@@ -22,8 +22,7 @@ impl git_service_server::GitService for Git {
         Ok(Response::new(HelloResponse {
             version: env!("CARGO_PKG_VERSION").into(),
             generation: self.generation.clone(),
-            // No children can start until session accounting is implemented (J3 task 13).
-            sessions: vec![],
+            sessions: self.repositories.sessions(),
         }))
     }
 
@@ -33,7 +32,7 @@ impl git_service_server::GitService for Git {
     ) -> Result<Response<ListSessionsResponse>, Status> {
         Ok(Response::new(ListSessionsResponse {
             generation: self.generation.clone(),
-            sessions: vec![],
+            sessions: self.repositories.sessions(),
         }))
     }
 
@@ -79,12 +78,56 @@ impl git_service_server::GitService for Git {
     }
     async fn list_remote_refs(
         &self,
-        _: Request<ListRemoteRefsRequest>,
+        request: Request<ListRemoteRefsRequest>,
     ) -> Result<Response<ListRemoteRefsResponse>, Status> {
-        Err(not_implemented())
+        use kajiba_gitstore::GitStore;
+        let request = request.into_inner();
+        kajiba_gitstore::import::check_source(&request.source)
+            .map_err(|err| rpc_error(tonic::Code::InvalidArgument, "INVALID_FIELD", err))?;
+        let refs = tokio::task::spawn_blocking(move || {
+            kajiba_gitstore::Gix
+                .remote_refs(&request.source, &request.credentials)
+                .map_err(crate::repositories::source_error)
+        })
+        .await
+        .map_err(|_| Status::internal("import worker failed"))??;
+        Ok(Response::new(ListRemoteRefsResponse {
+            refs: refs
+                .into_iter()
+                .map(|r| RemoteRef {
+                    ref_name: r.name,
+                    object_id: r.target,
+                })
+                .collect(),
+        }))
     }
-    async fn fetch(&self, _: Request<FetchRequest>) -> Result<Response<FetchResponse>, Status> {
-        Err(not_implemented())
+    async fn fetch(
+        &self,
+        request: Request<FetchRequest>,
+    ) -> Result<Response<FetchResponse>, Status> {
+        let request = request.into_inner();
+        let valid = request.session.as_ref().is_some_and(|s| {
+            kajiba_core::names::is_public_id(&s.session_id)
+                && s.kind == SessionKind::Import as i32
+                && s.repo_public_id == request.repo_public_id
+                && s.user_public_id.is_empty()
+                && s.generation == self.generation
+        });
+        if !valid {
+            return Err(rpc_error(
+                tonic::Code::InvalidArgument,
+                "INVALID_FIELD",
+                "invalid import session",
+            ));
+        }
+        kajiba_gitstore::import::check_source(&request.source)
+            .map_err(|err| rpc_error(tonic::Code::InvalidArgument, "INVALID_FIELD", err))?;
+        let repositories = self.repositories.clone();
+        // Blocking work and its session survive a cancelled RPC.
+        tokio::task::spawn_blocking(move || repositories.fetch(request))
+            .await
+            .map_err(|_| Status::internal("import worker failed"))??;
+        Ok(Response::new(FetchResponse {}))
     }
     async fn spawn(&self, _: Request<SpawnRequest>) -> Result<Response<SpawnResponse>, Status> {
         Err(not_implemented())
@@ -152,3 +195,6 @@ pub async fn connect_server(path: &Path, generation: &str) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod import_tests;

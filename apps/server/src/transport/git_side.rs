@@ -5,8 +5,10 @@ use tonic::{Status, transport::Channel};
 use tonic_types::StatusExt;
 
 /// Startup mutations connect on demand; a read-only startup needs no daemon.
+#[cfg_attr(test, derive(Clone))]
 pub struct Repositories {
     socket: std::path::PathBuf,
+    pub generation: String,
     client: Option<GitServiceClient<Channel>>,
 }
 
@@ -14,6 +16,7 @@ impl Repositories {
     pub fn new(socket: &Path) -> Self {
         Self {
             socket: socket.into(),
+            generation: String::new(),
             client: None,
         }
     }
@@ -21,22 +24,26 @@ impl Repositories {
     pub async fn client(&mut self) -> Result<&mut GitServiceClient<Channel>, Status> {
         if self.client.is_none() {
             self.client = Some(GitServiceClient::new(
-                channel(&self.socket, Some(Duration::from_secs(5)))
-                    .await
-                    .map_err(unavailable)?,
+                channel(&self.socket, None).await.map_err(unavailable)?,
             ));
         }
         let client = self.client.as_mut().unwrap();
+        let mut request = tonic::Request::new(HelloRequest {
+            version: env!("CARGO_PKG_VERSION").into(),
+        });
+        request.set_timeout(Duration::from_secs(5));
         let hello = client
-            .hello(HelloRequest {
-                version: env!("CARGO_PKG_VERSION").into(),
-            })
+            .hello(request)
             .await
             .map_err(unavailable)?
             .into_inner();
         if let Some(err) = version_error(env!("CARGO_PKG_VERSION"), &hello.version) {
             return Err(unavailable(err));
         }
+        if !kajiba_core::names::is_public_id(&hello.generation) {
+            return Err(unavailable("invalid git-side generation"));
+        }
+        self.generation = hello.generation;
         Ok(client)
     }
 }

@@ -9,6 +9,22 @@ pub(crate) struct Fake {
     pub client: Repositories,
 }
 impl Fake {
+    pub fn serve(root: &Path, socket: &Path) -> tokio::task::JoinHandle<()> {
+        let local = kajiba_core::local::Local::bind(
+            socket,
+            Default::default(),
+            0o600,
+            vec![kajiba_core::local::effective_uid()],
+        )
+        .unwrap();
+        let routes = Routes::new(git_service_server::GitServiceServer::new(Daemon(
+            root.into(),
+        )));
+        tokio::spawn(async move {
+            local.serve(routes, std::future::pending()).await.unwrap();
+        })
+    }
+
     pub async fn start(root: &Path) -> Self {
         fs::create_dir_all(root.join("repos")).unwrap();
         fs::create_dir_all(root.join("tmp")).unwrap();
@@ -17,6 +33,7 @@ impl Fake {
         Self {
             client: Repositories {
                 socket: root.join("absent.sock"),
+                generation: String::new(),
                 client: Some(GitServiceClient::new(channel)),
             },
         }
@@ -115,12 +132,71 @@ impl git_service_server::GitService for Daemon {
     }
     async fn list_remote_refs(
         &self,
-        _: Request<ListRemoteRefsRequest>,
+        request: Request<ListRemoteRefsRequest>,
     ) -> Result<Response<ListRemoteRefsResponse>, Status> {
-        Err(Status::unimplemented("test"))
+        let r = request.into_inner();
+        let refs = tokio::task::spawn_blocking(move || Gix.remote_refs(&r.source, &r.credentials))
+            .await
+            .unwrap()
+            .map_err(|err| {
+                Status::failed_precondition(kajiba_gitstore::import::reason(&err.to_string()))
+            })?;
+        Ok(Response::new(ListRemoteRefsResponse {
+            refs: refs
+                .into_iter()
+                .map(|r| RemoteRef {
+                    ref_name: r.name,
+                    object_id: r.target,
+                })
+                .collect(),
+        }))
     }
-    async fn fetch(&self, _: Request<FetchRequest>) -> Result<Response<FetchResponse>, Status> {
-        Err(Status::unimplemented("test"))
+    async fn fetch(
+        &self,
+        request: Request<FetchRequest>,
+    ) -> Result<Response<FetchResponse>, Status> {
+        let r = request.into_inner();
+        let session = r.session.unwrap();
+        assert_eq!(session.kind, SessionKind::Import as i32);
+        assert_eq!(session.repo_public_id, r.repo_public_id);
+        assert_eq!(session.generation, "00000000000000000000000001");
+        use sqlx::Connection;
+        let mut reader = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(self.0.join("db/kajiba.sqlite"))
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+        let (principal, correlation, updates): (Option<i64>, String, String) = sqlx::query_as(
+            "SELECT principal_id, correlation_id, updates FROM pending_push WHERE repo_id = (SELECT id FROM repo WHERE public_id = ?)"
+        ).bind(&r.repo_public_id).fetch_one(&mut reader).await.unwrap();
+        assert_eq!(principal, None);
+        assert_eq!(correlation, session.correlation_id);
+        let updates: serde_json::Value = serde_json::from_str(&updates).unwrap();
+        assert_eq!(updates.as_array().unwrap().len(), r.refs.len());
+        for (u, r) in updates.as_array().unwrap().iter().zip(&r.refs) {
+            assert_eq!(u["ref"], r.ref_name);
+            assert_eq!(u["new"], r.object_id);
+            assert_eq!(u["old"], crate::db::pushes::ZERO);
+        }
+        let path = self.0.join(format!("repos/{}.git", r.repo_public_id));
+        assert!(Gix.refs(&path).unwrap().is_empty());
+        let refs: Vec<_> = r
+            .refs
+            .into_iter()
+            .map(|r| kajiba_gitstore::Ref {
+                name: r.ref_name,
+                target: r.object_id,
+            })
+            .collect();
+        tokio::task::spawn_blocking(move || Gix.fetch(&path, &r.source, &r.credentials, &refs))
+            .await
+            .unwrap()
+            .map_err(|err| {
+                Status::failed_precondition(kajiba_gitstore::import::reason(&err.to_string()))
+            })?;
+        Ok(Response::new(FetchResponse {}))
     }
     async fn spawn(&self, _: Request<SpawnRequest>) -> Result<Response<SpawnResponse>, Status> {
         Err(Status::unimplemented("test"))

@@ -33,6 +33,7 @@ pub(in crate::transport) async fn admin(dir: &Path, users: &str) -> Admin {
     .users;
     crate::db::reconcile(&mut writer, &users).await.unwrap();
     Admin {
+        git_socket: dir.join("absent.sock"),
         writer: crate::db::Writer::new(writer.into()),
         public_url: PUBLIC_URL.into(),
         enrollment_ttl: Duration::from_secs(15 * 60),
@@ -389,12 +390,14 @@ async fn import_never_returns_or_logs_source_credentials() {
     let dir = SocketDir::new();
     let _lock = crate::state::prepare(&dir.0).unwrap();
     let local = bind(&dir.socket(), Arc::default()).unwrap();
-    let admin = admin(&dir.0, "[users.alice]").await;
+    let mut admin = admin(&dir.0, "[users.alice]").await;
     let config = kajiba_core::config::ServerConfig::parse(&format!(
         "[http]\npublic_url='{PUBLIC_URL}'\n[users.alice]\n[repos.demo]\nowner='alice'\ndescription=''\n"
     ))
     .unwrap();
     let mut daemon = crate::transport::git_side::fake::Fake::start(&dir.0).await;
+    admin.git_socket = dir.0.join("git.sock");
+    let git_server = crate::transport::git_side::fake::Fake::serve(&dir.0, &admin.git_socket);
     crate::db::repos::reconcile_repos(
         &mut *admin.writer.lock().await,
         &dir.0,
@@ -448,6 +451,7 @@ async fn import_never_returns_or_logs_source_credentials() {
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(import_file().await, std::process::ExitCode::FAILURE);
     server.abort();
+    git_server.abort();
 }
 
 const AUTH: &str =

@@ -182,6 +182,7 @@ async fn main() -> ExitCode {
             // CI and mirror register here when their handlers are implemented.
             let mut dispatcher = db::events::Dispatcher::default();
             let admin = transport::local::Admin {
+                git_socket: config.git.socket.clone(),
                 writer: writer.clone(),
                 public_url: config.http.public_url.clone(),
                 enrollment_ttl: config.auth.enrollment_ttl,

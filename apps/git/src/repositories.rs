@@ -6,6 +6,7 @@ use kajiba_core::{
     state::{real_dir, sync_dir},
 };
 use kajiba_gitstore::{GitStore, Gix};
+use kajiba_proto::git::v1::{FetchRequest, Session};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -16,6 +17,7 @@ use tonic::{Code, Status};
 pub struct Repositories {
     root: PathBuf,
     mutation: Mutex<()>,
+    sessions: Mutex<std::collections::BTreeMap<String, Session>>,
 }
 
 impl Repositories {
@@ -23,6 +25,7 @@ impl Repositories {
         Self {
             root,
             mutation: Mutex::new(()),
+            sessions: Mutex::default(),
         }
     }
 
@@ -83,6 +86,65 @@ impl Repositories {
         let path = self.present(id)?;
         branch_valid(branch)?;
         Gix.set_head(&path, branch).map_err(internal)
+    }
+
+    pub fn sessions(&self) -> Vec<Session> {
+        self.sessions.lock().unwrap().values().cloned().collect()
+    }
+
+    pub fn fetch(&self, request: FetchRequest) -> Result<(), Status> {
+        // Keep the empty-target check and the fetch atomic against other mutations.
+        let _guard = self.mutation.lock().unwrap();
+        let path = self.present(&request.repo_public_id)?;
+        if !Gix.refs(&path).map_err(internal)?.is_empty() {
+            return Err(rpc_error(
+                Code::FailedPrecondition,
+                "INVALID_STATE",
+                "repository already has refs",
+            ));
+        }
+        let mut names = std::collections::HashSet::new();
+        let mut refs = Vec::new();
+        for r in request.refs {
+            if !(r.ref_name.starts_with("refs/heads/") || r.ref_name.starts_with("refs/tags/"))
+                || validate_ref(&r.ref_name).is_err()
+                || !names.insert(r.ref_name.clone())
+                || r.object_id.len() != 40
+                || !r.object_id.bytes().all(|b| b.is_ascii_hexdigit())
+                || r.object_id.bytes().all(|b| b == b'0')
+            {
+                return Err(rpc_error(
+                    Code::InvalidArgument,
+                    "INVALID_FIELD",
+                    "invalid import ref or object id",
+                ));
+            }
+            refs.push(kajiba_gitstore::Ref {
+                name: r.ref_name,
+                target: r.object_id,
+            });
+        }
+        if refs.is_empty() {
+            return Err(rpc_error(
+                Code::InvalidArgument,
+                "INVALID_FIELD",
+                "import refs are empty",
+            ));
+        }
+        let session = request.session.expect("validated by the service");
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session.session_id.clone(), session.clone());
+        struct Running<'a>(&'a Repositories, String);
+        impl Drop for Running<'_> {
+            fn drop(&mut self) {
+                self.0.sessions.lock().unwrap().remove(&self.1);
+            }
+        }
+        let _running = Running(self, session.session_id);
+        Gix.fetch(&path, &request.source, &request.credentials, &refs)
+            .map_err(source_error)
     }
 
     pub fn quarantine(&self, id: &str) -> Result<PathBuf, Status> {
@@ -148,3 +210,11 @@ fn sync_tree(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) fn source_error(err: kajiba_gitstore::Error) -> Status {
+    rpc_error(
+        Code::FailedPrecondition,
+        "INVALID_STATE",
+        kajiba_gitstore::import::reason(&err.to_string()),
+    )
+}

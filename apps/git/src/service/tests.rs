@@ -54,7 +54,7 @@ async fn hello_requires_exact_version_and_returns_this_process_generation() {
             .await
             .unwrap_err()
             .code(),
-        tonic::Code::Unimplemented
+        tonic::Code::InvalidArgument
     );
 }
 
