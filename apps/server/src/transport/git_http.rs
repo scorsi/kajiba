@@ -58,6 +58,7 @@ fn command(
         Service::UploadPack,
         path,
         options,
+        None,
     ));
     command
         .stdout(Stdio::piped())

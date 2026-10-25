@@ -167,7 +167,13 @@ pub trait GitStore {
     fn resolve<'a>(&self, repo: &Path, spec: &'a str) -> Result<(String, &'a str)>;
     /// `git <service> <options> <repo>`, to be spawned by the transport (SSH, HTTP
     /// with `--stateless-rpc`).
-    fn transport(&self, service: Service, repo: &Path, options: &[&str]) -> Command;
+    fn transport(
+        &self,
+        service: Service,
+        repo: &Path,
+        options: &[&str],
+        hooks: Option<&Path>,
+    ) -> Command;
     /// The branches and tags (`refs/heads/*`, `refs/tags/*`) of a path, bundle or
     /// URL, sorted by name; blocking. `credentials` is `user:token` or a token alone
     /// for an http(s) source, empty otherwise (ADR 0044).
@@ -847,12 +853,23 @@ impl GitStore for Gix<'_> {
         Ok((id, rest(ends[0])))
     }
 
-    fn transport(&self, service: Service, repo: &Path, options: &[&str]) -> Command {
+    fn transport(
+        &self,
+        service: Service,
+        repo: &Path,
+        options: &[&str],
+        hooks: Option<&Path>,
+    ) -> Command {
         let mut command = git();
         if let Some(path) = self.trusted(repo) {
             command
                 .arg("-c")
                 .arg(format!("safe.directory={}", path.display()));
+        }
+        if let Some(hooks) = hooks {
+            command
+                .arg("-c")
+                .arg(format!("core.hooksPath={}", hooks.display()));
         }
         command
             .arg(match service {

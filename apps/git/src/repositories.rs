@@ -48,7 +48,7 @@ impl Repositories {
         Ok(self.root.join("repos").join(format!("{id}.git")))
     }
 
-    fn present(&self, id: &str) -> Result<PathBuf, Status> {
+    pub(crate) fn present(&self, id: &str) -> Result<PathBuf, Status> {
         let path = self.path(id)?;
         real_dir(&path).map_err(|err| {
             if err.kind() == io::ErrorKind::NotFound {
@@ -237,7 +237,7 @@ impl Repositories {
             tracing::info!(
                 event = "session-exited",
                 session = session.session_id,
-                kind = "import",
+                kind = crate::metrics::kind_name(session.kind),
                 repo = session.repo_public_id,
                 status
             );

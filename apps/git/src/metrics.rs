@@ -12,6 +12,12 @@ const KINDS: [(SessionKind, &str); 4] = [
     (SessionKind::Maintenance, "maintenance"),
 ];
 
+pub fn kind_name(kind: i32) -> &'static str {
+    kind_index(kind)
+        .map(|i| KINDS[i].1)
+        .unwrap_or("unspecified")
+}
+
 pub fn kind_index(kind: i32) -> Option<usize> {
     KINDS.iter().position(|(value, _)| *value as i32 == kind)
 }

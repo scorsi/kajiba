@@ -692,6 +692,7 @@ async fn read_only_repositories_need_no_daemon_for_reconciliation_or_browsing() 
             kajiba_gitstore::Service::UploadPack,
             &path,
             &["--stateless-rpc", "--advertise-refs"],
+            None,
         )
         .output()
         .unwrap();

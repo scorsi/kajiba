@@ -257,7 +257,7 @@ mod tests;
 #[cfg(test)]
 mod import_tests;
 
-async fn server_client(
+pub(crate) async fn server_client(
     path: &Path,
     generation: &str,
 ) -> Result<gate::gate_service_client::GateServiceClient<tonic::transport::Channel>, Status> {

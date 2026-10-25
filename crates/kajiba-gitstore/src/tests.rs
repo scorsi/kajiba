@@ -472,6 +472,7 @@ fn transport_spawns_git_upload_pack() {
             Service::UploadPack,
             &f.bare,
             &["--stateless-rpc", "--advertise-refs"],
+            None,
         )
         .output()
         .unwrap();
@@ -482,7 +483,7 @@ fn transport_spawns_git_upload_pack() {
         "{advertised}"
     );
     assert!(advertised.contains("refs/heads/feature/x"), "{advertised}");
-    let command = Gix.transport(Service::ReceivePack, &f.bare, &[]);
+    let command = Gix.transport(Service::ReceivePack, &f.bare, &[], None);
     assert_eq!(
         command.get_args().collect::<Vec<_>>(),
         [std::ffi::OsStr::new("receive-pack"), f.bare.as_os_str()]
@@ -892,6 +893,7 @@ fn shared_repository_trust_is_scoped_to_configured_canonical_ulid_paths() {
             Service::UploadPack,
             path,
             &["--stateless-rpc", "--advertise-refs"],
+            None,
         );
         let args: Vec<_> = command
             .get_args()

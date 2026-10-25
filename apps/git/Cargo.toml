@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 axum.workspace = true
 clap.workspace = true
+libc.workspace = true
 kajiba-proto = { path = "../../crates/kajiba-proto" }
 kajiba-core = { path = "../../crates/kajiba-core" }
 kajiba-gitstore = { path = "../../crates/kajiba-gitstore" }

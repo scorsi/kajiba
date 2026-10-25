@@ -43,7 +43,7 @@ enum Command {
         #[command(subcommand)]
         command: HookCommand,
     },
-    /// Validate an SSH Git command (transport hand-off is not implemented yet).
+    /// Hand an SSH Git command and its descriptors to the daemon.
     ServeSsh {
         #[arg(long)]
         user: String,
@@ -105,16 +105,12 @@ async fn main() -> ExitCode {
             .await;
         }
         Command::ServeSsh { user } => {
-            let command = std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
-            let message = if !kajiba_core::names::is_public_id(user) {
-                "serve-ssh: invalid user public id"
-            } else if ssh::parse(&command).is_none() {
-                "serve-ssh: invalid SSH command"
-            } else {
-                "serve-ssh: SSH transport is not implemented yet"
-            };
-            log::error("fatal", message);
-            return ExitCode::FAILURE;
+            return ssh::run(
+                std::path::Path::new(ssh::SOCKET_PATH),
+                user,
+                &std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default(),
+            )
+            .await;
         }
     };
     let config =

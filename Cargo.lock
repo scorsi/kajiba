@@ -2005,6 +2005,7 @@ dependencies = [
  "kajiba-core",
  "kajiba-gitstore",
  "kajiba-proto",
+ "libc",
  "serde_json",
  "tokio",
  "tonic",

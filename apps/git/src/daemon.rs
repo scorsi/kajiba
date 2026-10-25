@@ -19,9 +19,9 @@ pub async fn serve(config: GitConfig) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     let notify = std::env::var_os("NOTIFY_SOCKET");
     run(
-        &config.state_dir,
-        &config.server_socket,
+        &config,
         Path::new(SOCKET_PATH),
+        peers[1],
         peers,
         notify.as_deref(),
         crate::metrics::bind(config.metrics.listen),
@@ -37,17 +37,26 @@ pub async fn serve(config: GitConfig) -> Result<(), String> {
 }
 
 async fn run(
-    state_dir: &Path,
-    server_socket: &Path,
+    config: &GitConfig,
     socket: &Path,
+    ssh_uid: u32,
     peers: Vec<u32>,
     notify: Option<&OsStr>,
     metrics: impl std::future::Future<Output = io::Result<Option<tokio::net::TcpListener>>>,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), String> {
+    let state_dir = &config.state_dir;
+    let server_socket = &config.server_socket;
     let _lock = crate::state::prepare(state_dir)?;
     let local = Local::bind(socket, Default::default(), 0o660, peers)
         .map_err(|err| format!("{}: {err}", socket.display()))?;
+    let ssh = Local::bind(
+        &socket.with_file_name("ssh.sock"),
+        Default::default(),
+        0o600,
+        vec![ssh_uid],
+    )
+    .map_err(|err| format!("ssh.sock: {err}"))?;
     let generation = kajiba_core::new_id().map_err(|err| err.to_string())?;
     let metrics = metrics
         .await
@@ -62,17 +71,26 @@ async fn run(
     let git = std::sync::Arc::new(crate::service::Git {
         generation: generation.clone(),
         repositories: repositories.clone(),
-        server_socket: server_socket.into(),
+        server_socket: server_socket.clone(),
     });
     let routes = Routes::new(
         kajiba_proto::git::v1::git_service_server::GitServiceServer::from_arc(git.clone()),
     )
-    .add_service(kajiba_proto::hook::v1::hook_service_server::HookServiceServer::from_arc(git));
+    .add_service(
+        kajiba_proto::hook::v1::hook_service_server::HookServiceServer::from_arc(git.clone()),
+    );
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let mut metrics_stopped = stopped.clone();
+    let mut ssh_stopped = stopped.clone();
     let app = crate::metrics::router(repositories.clone());
     let servers = async move {
         tokio::try_join!(
+            async {
+                tokio::select! {
+                    result = crate::ssh::serve(ssh, git, &config.hooks_path) => result,
+                    _ = ssh_stopped.changed() => Ok(()),
+                }
+            },
             local.serve(routes, async move {
                 let _ = stopped.changed().await;
             }),

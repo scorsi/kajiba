@@ -3,6 +3,16 @@ use crate::state::tests::TempDir;
 use std::{fs, os::unix::fs::MetadataExt, time::Duration};
 use tokio::net::{UnixDatagram, UnixStream};
 
+fn config(state: &Path, server: &Path) -> GitConfig {
+    GitConfig {
+        state_dir: state.into(),
+        server_socket: server.into(),
+        hooks_path: state.join("hooks"),
+        log: Default::default(),
+        metrics: Default::default(),
+    }
+}
+
 #[tokio::test]
 async fn readiness_arrives_only_after_listening_and_shutdown_removes_socket() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,6 +34,9 @@ async fn readiness_arrives_only_after_listening_and_shutdown_removes_socket() {
                 .contains("another instance holds")
         );
         assert_eq!(fs::metadata(&socket).unwrap().mode() & 0o777, 0o660);
+        let ssh = socket.with_file_name("ssh.sock");
+        assert_eq!(fs::metadata(&ssh).unwrap().mode() & 0o777, 0o600);
+        drop(UnixStream::connect(&ssh).await.unwrap());
         let stream = UnixStream::connect(&socket).await.unwrap();
         drop(stream);
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -40,9 +53,9 @@ async fn readiness_arrives_only_after_listening_and_shutdown_removes_socket() {
     tokio::time::timeout(
         Duration::from_secs(3),
         run(
-            &state,
-            &temp.0.join("git.sock"),
+            &config(&state, &temp.0.join("git.sock")),
             &socket,
+            kajiba_core::local::effective_uid(),
             vec![kajiba_core::local::effective_uid()],
             Some(notify_path.as_os_str()),
             async { Ok(Some(metrics)) },
@@ -53,6 +66,7 @@ async fn readiness_arrives_only_after_listening_and_shutdown_removes_socket() {
     .unwrap()
     .unwrap();
     assert!(!socket.exists());
+    assert!(!socket.with_file_name("ssh.sock").exists());
     let _lock = crate::state::prepare(&state).unwrap();
 }
 
@@ -65,9 +79,9 @@ async fn failed_metrics_bind_never_notifies_ready() {
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let socket = temp.0.join("local.sock");
     let err = run(
-        &temp.0.join("state"),
-        &temp.0.join("git.sock"),
+        &config(&temp.0.join("state"), &temp.0.join("git.sock")),
         &socket,
+        kajiba_core::local::effective_uid(),
         vec![kajiba_core::local::effective_uid()],
         Some(notify_path.as_os_str()),
         crate::metrics::bind(Some(occupied.local_addr().unwrap())),
@@ -77,6 +91,7 @@ async fn failed_metrics_bind_never_notifies_ready() {
     .unwrap_err();
     assert!(err.contains("metrics.listen"), "{err}");
     assert!(!socket.exists());
+    assert!(!socket.with_file_name("ssh.sock").exists());
     assert_eq!(
         notify.recv(&mut [0; 64]).unwrap_err().kind(),
         io::ErrorKind::WouldBlock
@@ -96,9 +111,9 @@ async fn failed_startup_never_notifies_ready() {
     let peers = vec![kajiba_core::local::effective_uid()];
     assert!(
         run(
-            &state,
-            &temp.0.join("git.sock"),
+            &config(&state, &temp.0.join("git.sock")),
             &socket,
+            kajiba_core::local::effective_uid(),
             peers.clone(),
             Some(notify_path.as_os_str()),
             crate::metrics::bind(None),
@@ -111,9 +126,9 @@ async fn failed_startup_never_notifies_ready() {
     let lock = crate::state::prepare(&state).unwrap();
     assert!(
         run(
-            &state,
-            &temp.0.join("git.sock"),
+            &config(&state, &temp.0.join("git.sock")),
             &socket,
+            kajiba_core::local::effective_uid(),
             peers.clone(),
             Some(notify_path.as_os_str()),
             crate::metrics::bind(None),
@@ -127,9 +142,9 @@ async fn failed_startup_never_notifies_ready() {
     fs::write(&socket, "preserve").unwrap();
     assert!(
         run(
-            &state,
-            &temp.0.join("git.sock"),
+            &config(&state, &temp.0.join("git.sock")),
             &socket,
+            kajiba_core::local::effective_uid(),
             peers,
             Some(notify_path.as_os_str()),
             crate::metrics::bind(None),
@@ -156,9 +171,9 @@ async fn notification_failure_cleans_up_and_missing_notify_socket_is_optional() 
     let missing = temp.0.join("missing");
     assert!(
         run(
-            &state,
-            &temp.0.join("git.sock"),
+            &config(&state, &temp.0.join("git.sock")),
             &socket,
+            kajiba_core::local::effective_uid(),
             peers.clone(),
             Some(missing.as_os_str()),
             crate::metrics::bind(None),
@@ -169,10 +184,11 @@ async fn notification_failure_cleans_up_and_missing_notify_socket_is_optional() 
         .contains("notify readiness")
     );
     assert!(!socket.exists());
+    assert!(!socket.with_file_name("ssh.sock").exists());
     run(
-        &state,
-        &temp.0.join("git.sock"),
+        &config(&state, &temp.0.join("git.sock")),
         &socket,
+        kajiba_core::local::effective_uid(),
         peers,
         None,
         crate::metrics::bind(None),
@@ -181,6 +197,7 @@ async fn notification_failure_cleans_up_and_missing_notify_socket_is_optional() 
     .await
     .unwrap();
     assert!(!socket.exists());
+    assert!(!socket.with_file_name("ssh.sock").exists());
 }
 
 #[cfg(target_os = "linux")]
@@ -207,9 +224,9 @@ async fn daemon_emits_shared_json_logs_on_stderr() {
         kajiba_core::log::init("info").unwrap();
         let temp = TempDir::new();
         run(
-            &temp.0.join("state"),
-            &temp.0.join("git.sock"),
+            &config(&temp.0.join("state"), &temp.0.join("git.sock")),
             &temp.0.join("local.sock"),
+            kajiba_core::local::effective_uid(),
             vec![kajiba_core::local::effective_uid()],
             None,
             crate::metrics::bind(None),
@@ -257,9 +274,9 @@ async fn repository_rpcs_run_in_the_real_daemon() {
         let server = temp.0.join("absent.sock");
         async move {
             run(
-                &root,
-                &server,
+                &config(&root, &server),
                 &socket,
+                kajiba_core::local::effective_uid(),
                 vec![kajiba_core::local::effective_uid()],
                 None,
                 crate::metrics::bind(None),

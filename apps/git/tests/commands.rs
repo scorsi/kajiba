@@ -153,7 +153,7 @@ fn hooks_require_session_even_when_user_and_repository_are_set() {
 }
 
 #[test]
-fn serve_ssh_validates_context_but_never_starts_transport_yet() {
+fn serve_ssh_validates_context_and_refuses_missing_daemon() {
     for (user, command, message) in [
         (
             "alice",
@@ -168,12 +168,12 @@ fn serve_ssh_validates_context_but_never_starts_transport_yet() {
         (
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "git-upload-pack 'alice/demo'",
-            "SSH transport is not implemented yet",
+            "git daemon is unavailable",
         ),
         (
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "git-receive-pack 'alice/demo'",
-            "SSH transport is not implemented yet",
+            "git daemon is unavailable",
         ),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_kajiba-git"))
