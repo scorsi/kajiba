@@ -66,8 +66,10 @@ enum AdminCommand {
         /// visible to every local user like any command argument.
         #[arg(required_unless_present = "source_file")]
         source: Option<String>,
-        /// File holding the complete source instead of the argument, for a source that
-        /// itself carries a secret (a token in its path); not readable by others.
+        /// File holding the complete source instead of the argument; not readable by
+        /// others. A secret in the source's path still reaches git's transport helper
+        /// as an argument (ADR 0049): prefer a credential-free source with
+        /// --credentials-file.
         #[arg(long, conflicts_with = "source")]
         source_file: Option<PathBuf>,
         /// File holding `user:token` or a token for an http(s) source; not readable by others.
@@ -252,8 +254,8 @@ async fn admin_import(
     source_file: Option<PathBuf>,
     credentials_file: Option<PathBuf>,
 ) -> ExitCode {
-    // Read here, sent in the request: a secret-bearing source or a credential never
-    // appears in any command line (ADR 0048).
+    // Read here, sent in the request: neither appears in a command line of the product
+    // (ADR 0048); git's transport helper still receives the source (ADR 0049).
     let secret = |file: &Option<PathBuf>, flag| match file {
         Some(file) => kajiba_core::config::read_secret(file, flag),
         None => Ok(String::new()),

@@ -186,11 +186,15 @@ fn git() -> Command {
 }
 
 /// Name under which the import source is configured in the child's environment:
-/// the command line (readable by every local user) only ever names the remote.
+/// the child's command line only ever names the remote. The transport helper git
+/// starts from it (`git-remote-https`, `ssh`) gets the full source as an argument
+/// (ADR 0049), so a secret in the source's path is not hidden from local users.
 const IMPORT_REMOTE: &str = "kajiba-import";
 
 /// A git child reading an import source: the source and the credentials travel in
-/// the environment, never on the command line (readable by every local user), and
+/// the environment, never on the child's own command line (readable by every local
+/// user; the credentials never reach any command line, the source reaches the
+/// transport helper's, ADR 0049), and
 /// the source cannot steer the protocol or run hooks. `credentials` is `user:token`
 /// or a token alone (then the user name is `token`, which every forge accepts with
 /// a token).

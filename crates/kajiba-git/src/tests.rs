@@ -173,8 +173,9 @@ fn import_commands_keep_credentials_out_of_the_command_line() {
     assert!(env["GIT_CONFIG_VALUE_4"].starts_with("!f() { printf 'username=%s"));
     assert_eq!(env["GIT_CONFIG_KEY_0"], "core.hooksPath");
     assert!(env.contains_key("PATH"), "{env:?}");
-    // The source itself may carry a secret (a token in its path): it is configured
-    // as a named remote in the environment and never appears in argv.
+    // The source is configured as a named remote in the environment and never
+    // appears in the child's own argv (ADR 0048; git's transport helper still gets
+    // it, ADR 0049).
     let source = "https://example.org/s3cret-token/demo.git";
     for command in [
         ls_remote_command(source, ""),
