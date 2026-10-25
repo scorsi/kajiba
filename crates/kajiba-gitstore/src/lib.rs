@@ -326,6 +326,10 @@ fn ls_remote_command(source: &str, credentials: &str) -> Command {
 fn fetch_command(repo: &Path, source: &str, credentials: &str) -> Command {
     let mut command = import_command(source, credentials);
     command.arg("--git-dir").arg(repo).args([
+        "-c",
+        "transfer.fsckObjects=true",
+        "-c",
+        "fetch.fsckObjects=true",
         "fetch",
         "--atomic",
         "--no-tags",
@@ -699,12 +703,18 @@ impl GitStore for Gix<'_> {
             .arg(format!("--initial-branch={default_branch}"))
             .arg(path);
         run(command, "", IMPORT_TIMEOUT)?;
-        let mut command = git();
-        command
-            .arg("--git-dir")
-            .arg(path)
-            .args(["config", "core.fsync", "all"]);
-        run(command, "", IMPORT_TIMEOUT)?;
+        for (key, value) in [
+            ("core.fsync", "all"),
+            ("receive.fsckObjects", "true"),
+            ("transfer.fsckObjects", "true"),
+        ] {
+            let mut command = git();
+            command
+                .arg("--git-dir")
+                .arg(path)
+                .args(["config", key, value]);
+            run(command, "", IMPORT_TIMEOUT)?;
+        }
         Ok(())
     }
 
@@ -1019,6 +1029,7 @@ impl GitStore for Gix<'_> {
         }
         if service == Service::ReceivePack {
             command
+                .args(["-c", "receive.fsckObjects=true"])
                 .arg("-c")
                 .arg(format!("receive.maxInputSize={}", push::MAX_INPUT_BYTES))
                 // Keep deltas packed; loose objects can amplify a small input.

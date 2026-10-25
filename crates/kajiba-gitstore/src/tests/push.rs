@@ -22,6 +22,8 @@ fn receive_limits_are_applied_only_to_receive_pack() {
             "-c",
             "core.hooksPath=/hooks",
             "-c",
+            "receive.fsckObjects=true",
+            "-c",
             "receive.maxInputSize=67108864",
             "-c",
             "receive.unpackLimit=0",

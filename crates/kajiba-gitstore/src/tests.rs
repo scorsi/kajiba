@@ -108,9 +108,81 @@ fn init_bare_puts_head_on_the_default_branch() {
     );
     // Writes are durable before the database records them (ADR 0003).
     assert_eq!(git(&bare, &["config", "core.fsync"], "0 +0000"), "all");
+    for key in ["receive.fsckObjects", "transfer.fsckObjects"] {
+        assert_eq!(git(&bare, &["config", key], "0 +0000"), "true");
+    }
     assert_eq!(Gix.refs(&bare).unwrap(), []);
     assert!(Gix.init_bare(&dir.join("bad.git"), "a..b").is_err());
     assert!(!dir.join("bad.git").exists());
+}
+
+#[test]
+fn incoming_objects_are_checked_for_push_and_import() {
+    let dir = scratch("incoming-fsck");
+    let date = "1700000000 +0000";
+    for (name, valid) in [("file", true), (".git", false)] {
+        let source = dir.join(format!("source-{valid}.git"));
+        Gix.init_bare(&source, "main").unwrap();
+        fs::write(source.join("content"), "hello\n").unwrap();
+        let blob = git(&source, &["hash-object", "-w", "content"], date);
+        let tree = mktree(&source, &format!("100644 blob {blob}\t{name}\n"));
+        let commit = git(&source, &["commit-tree", &tree, "-m", "fixture"], date);
+        git(&source, &["update-ref", "refs/heads/main", &commit], date);
+        let refs = Gix.refs(&source).unwrap();
+
+        for import in [false, true] {
+            let target = dir.join(format!("target-{valid}-{import}.git"));
+            Gix.init_bare(&target, "main").unwrap();
+            // Existing repositories may explicitly disable checks in local config.
+            for key in [
+                "receive.fsckObjects",
+                "transfer.fsckObjects",
+                "fetch.fsckObjects",
+            ] {
+                git(&target, &["config", key, "false"], date);
+            }
+            let (success, error) = if import {
+                let result = Gix.fetch(&target, source.to_str().unwrap(), "", &refs);
+                (result.is_ok(), format!("{result:?}"))
+            } else {
+                let receive = Gix.transport(Service::ReceivePack, &target, &[], None);
+                let args: Vec<_> = receive
+                    .get_args()
+                    .map(|arg| arg.to_str().unwrap())
+                    .collect();
+                let receive = format!("git {}", args[..args.len() - 1].join(" "));
+                let output = super::git()
+                    .current_dir(&source)
+                    .args([
+                        "push",
+                        "--receive-pack",
+                        &receive,
+                        target.to_str().unwrap(),
+                        "refs/heads/main",
+                    ])
+                    .output()
+                    .unwrap();
+                (
+                    output.status.success(),
+                    String::from_utf8(output.stderr).unwrap(),
+                )
+            };
+            assert_eq!(success, valid, "import={import}: {error}");
+            if valid {
+                assert_eq!(Gix.refs(&target).unwrap(), refs);
+            } else {
+                assert!(error.contains("hasDotgit"), "import={import}: {error}");
+                assert!(Gix.refs(&target).unwrap().is_empty());
+                assert!(
+                    Gix.open(&target)
+                        .unwrap()
+                        .find_object(gix::ObjectId::from_hex(tree.as_bytes()).unwrap())
+                        .is_err()
+                );
+            }
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
