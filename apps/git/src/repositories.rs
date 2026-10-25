@@ -246,6 +246,15 @@ impl Repositories {
         }
     }
 
+    /// No child was started; retain the cancellation until SessionExited is acknowledged.
+    pub fn cancelled(&self, session: Session) {
+        self.sessions
+            .lock()
+            .unwrap()
+            .exited
+            .insert(session.session_id.clone(), (session, 1));
+    }
+
     pub fn exits(&self) -> Vec<(Session, i32)> {
         self.sessions
             .lock()

@@ -165,24 +165,49 @@ async fn spawn(
     use kajiba_gitstore::{GitStore, Gix};
     use std::os::unix::process::ExitStatusExt;
     let mut server = crate::service::server_client(&git.server_socket, &git.generation).await?;
-    let opened = server
-        .open_session(gate::OpenSessionRequest {
-            user_public_id: user,
-            kind: command.service.kind().into(),
-            repository: Some(gate::open_session_request::Repository::RepoAddress(
-                format!("{}/{}", command.owner, command.name),
-            )),
-            correlation_id: kajiba_core::new_id()
-                .map_err(|e| tonic::Status::internal(e.to_string()))?,
-            import_session_id: String::new(),
-        })
-        .await?
-        .into_inner();
-    let session = opened
-        .session
-        .ok_or_else(|| tonic::Status::internal("server returned no session"))?;
-    git.repositories
-        .register(session.clone(), opened.allowed_signers)?;
+    let pending = kajiba_proto::git::v1::Session {
+        session_id: kajiba_core::new_id().map_err(|e| tonic::Status::internal(e.to_string()))?,
+        kind: command.service.kind().into(),
+        user_public_id: user,
+        correlation_id: kajiba_core::new_id()
+            .map_err(|e| tonic::Status::internal(e.to_string()))?,
+        generation: git.generation.clone(),
+        ..Default::default()
+    };
+    let opened = async {
+        let opened = server
+            .open_session(gate::OpenSessionRequest {
+                user_public_id: pending.user_public_id.clone(),
+                kind: pending.kind,
+                repository: Some(gate::open_session_request::Repository::RepoAddress(
+                    format!("{}/{}", command.owner, command.name),
+                )),
+                correlation_id: pending.correlation_id.clone(),
+                session_id: pending.session_id.clone(),
+                generation: pending.generation.clone(),
+            })
+            .await?
+            .into_inner();
+        let session = opened
+            .session
+            .ok_or_else(|| tonic::Status::internal("server returned no session"))?;
+        if session.session_id != pending.session_id {
+            return Err(tonic::Status::internal(
+                "server returned a different session",
+            ));
+        }
+        git.repositories
+            .register(session.clone(), opened.allowed_signers)?;
+        Ok::<_, tonic::Status>(session)
+    }
+    .await;
+    let session = match opened {
+        Ok(session) => session,
+        Err(err) => {
+            git.repositories.cancelled(pending);
+            return Err(err);
+        }
+    };
     let mut exited = true;
     let result = async {
         if session.generation != git.generation
@@ -399,5 +424,142 @@ mod tests {
         ] {
             assert_eq!(parse(refused), None, "{refused:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod opening_tests {
+    use super::*;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tonic::{Request, Response, Status};
+
+    #[derive(Default)]
+    struct LostReply {
+        opened: Mutex<Option<String>>,
+        exits: AtomicUsize,
+    }
+
+    #[tonic::async_trait]
+    impl gate::gate_service_server::GateService for LostReply {
+        async fn hello(
+            &self,
+            _: Request<gate::HelloRequest>,
+        ) -> Result<Response<gate::HelloResponse>, Status> {
+            Ok(Response::new(gate::HelloResponse {
+                version: env!("CARGO_PKG_VERSION").into(),
+            }))
+        }
+        async fn open_session(
+            &self,
+            request: Request<gate::OpenSessionRequest>,
+        ) -> Result<Response<gate::OpenSessionResponse>, Status> {
+            let request = request.into_inner();
+            assert!(kajiba_core::names::is_public_id(&request.session_id));
+            assert!(kajiba_core::names::is_public_id(&request.generation));
+            *self.opened.lock().unwrap() = Some(request.session_id);
+            Err(Status::unavailable("reply lost after registration"))
+        }
+        async fn session_exited(
+            &self,
+            request: Request<gate::SessionExitedRequest>,
+        ) -> Result<Response<gate::SessionExitedResponse>, Status> {
+            let mut opened = self.opened.lock().unwrap();
+            assert_eq!(opened.as_ref(), Some(&request.into_inner().session_id));
+            if self.exits.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(Status::unavailable("cancellation reply lost"));
+            }
+            *opened = None;
+            Ok(Response::new(gate::SessionExitedResponse {}))
+        }
+        async fn get_auth_key(
+            &self,
+            _: Request<gate::GetAuthKeyRequest>,
+        ) -> Result<Response<gate::GetAuthKeyResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+        async fn pre_receive(
+            &self,
+            _: Request<gate::PreReceiveRequest>,
+        ) -> Result<Response<gate::PreReceiveResponse>, Status> {
+            panic!("no child may start without an open response")
+        }
+        async fn post_receive(
+            &self,
+            _: Request<gate::PostReceiveRequest>,
+        ) -> Result<Response<gate::PostReceiveResponse>, Status> {
+            panic!("no child may start without an open response")
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_open_reply_queues_cancellation_until_acknowledged() {
+        let dir = crate::state::tests::TempDir::new();
+        let git = Arc::new(crate::service::Git {
+            repositories: Arc::new(crate::repositories::Repositories::new(dir.0.clone())),
+            generation: kajiba_core::new_id().unwrap(),
+            server_socket: dir.0.join("gate.sock"),
+        });
+        let local = Local::bind(
+            &git.server_socket,
+            Arc::default(),
+            0o600,
+            vec![kajiba_core::local::effective_uid()],
+        )
+        .unwrap();
+        let gate = Arc::new(LostReply::default());
+        let server = tokio::spawn(local.serve(
+            tonic::service::Routes::new(gate::gate_service_server::GateServiceServer::from_arc(
+                gate.clone(),
+            )),
+            std::future::pending(),
+        ));
+        let fds = std::array::from_fn(|_| std::fs::File::open("/dev/null").unwrap().into());
+        let result = spawn(
+            &git,
+            &dir.0,
+            fds,
+            kajiba_core::new_id().unwrap(),
+            GitCommand {
+                service: Service::ReceivePack,
+                owner: "alice".into(),
+                name: "demo".into(),
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Unavailable);
+        assert!(git.repositories.sessions().is_empty());
+        let exits = git.repositories.exits();
+        assert_eq!(exits.len(), 1);
+        assert_eq!(
+            Some(&exits[0].0.session_id),
+            gate.opened.lock().unwrap().as_ref()
+        );
+        let monitor = tokio::spawn({
+            let git = git.clone();
+            async move {
+                crate::service::connect_server(
+                    &git.server_socket,
+                    &git.generation,
+                    &git.repositories,
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !git.repositories.exits().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(gate.opened.lock().unwrap().is_none());
+        assert_eq!(gate.exits.load(Ordering::SeqCst), 2);
+        monitor.abort();
+        server.abort();
+        let _ = monitor.await;
+        let _ = server.await;
     }
 }

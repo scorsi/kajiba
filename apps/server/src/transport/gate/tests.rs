@@ -288,13 +288,14 @@ async fn sessions_resolve_redirects_check_roles_and_refuse_archives() {
     use kajiba_proto::git::v1::SessionKind;
     let (_state, admin, gate, alice) = session_fixture().await;
     let request = OpenSessionRequest {
+        generation: gate.admission.generation().unwrap(),
         user_public_id: alice,
         kind: SessionKind::ReceivePack.into(),
         repository: Some(open_session_request::Repository::RepoAddress(
             "/alice/old.git".into(),
         )),
         correlation_id: "session-request".into(),
-        import_session_id: String::new(),
+        session_id: kajiba_core::new_id().unwrap(),
     };
     let opened = gate
         .open_session(Request::new(request.clone()))
@@ -307,9 +308,10 @@ async fn sessions_resolve_redirects_check_roles_and_refuse_archives() {
     assert_eq!(
         gate.open_session(Request::new(request.clone()))
             .await
-            .unwrap_err()
-            .code(),
-        Code::FailedPrecondition
+            .unwrap()
+            .into_inner()
+            .session,
+        opened.session.clone()
     );
     let exit = SessionExitedRequest {
         session_id: opened.session.unwrap().session_id,
@@ -326,6 +328,7 @@ async fn sessions_resolve_redirects_check_roles_and_refuse_archives() {
         .await
         .unwrap();
     let mut read_only = request.clone();
+    read_only.session_id = kajiba_core::new_id().unwrap();
     read_only.user_public_id = bob;
     assert_eq!(
         gate.open_session(Request::new(read_only.clone()))
@@ -351,7 +354,8 @@ async fn sessions_resolve_redirects_check_roles_and_refuse_archives() {
         .execute(&mut *admin.writer.lock().await)
         .await
         .unwrap();
-    for r in [request, read_only] {
+    for mut r in [request, read_only] {
+        r.session_id = kajiba_core::new_id().unwrap();
         let err = gate.open_session(Request::new(r)).await.unwrap_err();
         assert_eq!(err.code(), Code::FailedPrecondition);
         assert!(err.message().contains("archived"));
@@ -379,14 +383,15 @@ async fn import_open_requires_the_exact_durable_reservation() {
         .unwrap();
     drop(writer);
     let request = OpenSessionRequest {
+        generation: gate.admission.generation().unwrap(),
         user_public_id: String::new(),
         kind: SessionKind::Import.into(),
         repository: Some(open_session_request::Repository::RepoPublicId(id)),
         correlation_id: "request".into(),
-        import_session_id: session.clone(),
+        session_id: session.clone(),
     };
     let mut stale = request.clone();
-    stale.import_session_id = kajiba_core::new_id().unwrap();
+    stale.session_id = kajiba_core::new_id().unwrap();
     assert_eq!(
         gate.open_session(Request::new(stale))
             .await
@@ -410,9 +415,10 @@ async fn import_open_requires_the_exact_durable_reservation() {
     assert_eq!(
         gate.open_session(Request::new(request.clone()))
             .await
-            .unwrap_err()
-            .code(),
-        Code::FailedPrecondition
+            .unwrap()
+            .into_inner()
+            .session,
+        Some(opened.clone())
     );
     gate.session_exited(Request::new(SessionExitedRequest {
         session_id: session,
@@ -697,13 +703,14 @@ async fn an_unstarted_reservation_is_recovered_and_a_late_fetch_is_refused() {
     .unwrap();
     let err = gate
         .open_session(Request::new(OpenSessionRequest {
+            generation: gate.admission.generation().unwrap(),
             user_public_id: String::new(),
             kind: SessionKind::Import.into(),
             repository: Some(open_session_request::Repository::RepoAddress(
                 "alice/demo".into(),
             )),
             correlation_id: "not-sent".into(),
-            import_session_id: session_id,
+            session_id,
         }))
         .await
         .unwrap_err();
@@ -841,6 +848,8 @@ async fn open_session_signers_include_only_the_active_pushers_current_signing_ke
             .unwrap();
         let opened = gate
             .open_session(Request::new(OpenSessionRequest {
+                generation: gate.admission.generation().unwrap(),
+                session_id: kajiba_core::new_id().unwrap(),
                 user_public_id: alice.clone(),
                 kind: SessionKind::ReceivePack.into(),
                 repository: Some(open_session_request::Repository::RepoAddress(
@@ -868,6 +877,8 @@ async fn open_session_signers_include_only_the_active_pushers_current_signing_ke
         .unwrap();
     assert_eq!(
         gate.open_session(Request::new(OpenSessionRequest {
+            generation: gate.admission.generation().unwrap(),
+            session_id: kajiba_core::new_id().unwrap(),
             user_public_id: alice,
             kind: SessionKind::ReceivePack.into(),
             repository: Some(open_session_request::Repository::RepoAddress(
@@ -923,14 +934,15 @@ async fn post_receive_returns_before_exit_and_converts_only_applied_refs_in_orde
     kajiba_core::log::init("info").unwrap();
     for outcome in ["partial", "failed", "unexpected", "archived"] {
         let (_state, admin, gate, alice) = session_fixture().await;
-        let open = OpenSessionRequest {
+        let mut open = OpenSessionRequest {
+            generation: gate.admission.generation().unwrap(),
             user_public_id: alice.clone(),
             kind: SessionKind::ReceivePack.into(),
             repository: Some(open_session_request::Repository::RepoAddress(
                 "alice/demo".into(),
             )),
             correlation_id: format!("push-request-{outcome}"),
-            import_session_id: String::new(),
+            session_id: kajiba_core::new_id().unwrap(),
         };
         let session = gate
             .open_session(Request::new(open.clone()))
@@ -1055,6 +1067,7 @@ async fn post_receive_returns_before_exit_and_converts_only_applied_refs_in_orde
             .unwrap();
         assert_eq!(count, 0);
         drop(writer);
+        open.session_id = kajiba_core::new_id().unwrap();
         assert!(gate.open_session(Request::new(open.clone())).await.is_err());
         child.kill().await.unwrap();
         let exit = SessionExitedRequest {
@@ -1274,12 +1287,13 @@ async fn push_refusals_have_correlated_logs_and_count_once() {
         .unwrap();
     async {
         let mut open = OpenSessionRequest {
+            generation: gate.admission.generation().unwrap(),
+            session_id: kajiba_core::new_id().unwrap(),
             user_public_id: sqlx::query_scalar("SELECT public_id FROM user WHERE name = 'bob'")
                 .fetch_one(&mut *admin.writer.lock().await).await.unwrap(),
             kind: SessionKind::ReceivePack.into(),
             repository: Some(open_session_request::Repository::RepoAddress("alice/demo".into())),
             correlation_id: "admission-request".into(),
-            ..Default::default()
         };
         assert_eq!(gate.open_session(Request::new(open.clone())).await.unwrap_err().code(), Code::PermissionDenied);
         // A failed read session must not count as a refused push.
@@ -1316,4 +1330,92 @@ async fn push_refusals_have_correlated_logs_and_count_once() {
         assert!(metrics.contains("kajiba_pushes_total{result=\"accepted\"} 1\n"));
         assert!(metrics.contains("kajiba_pushes_total{result=\"refused\"} 4\n"));
     }.instrument(tracing::info_span!("request", request_id = "current-rpc")).await;
+}
+
+#[tokio::test]
+async fn lost_open_response_can_be_retried_or_cancelled_without_leaking_admission() {
+    use kajiba_proto::git::v1::SessionKind;
+    let (_state, _admin, gate, alice) = session_fixture().await;
+    let mut open = OpenSessionRequest {
+        generation: gate.admission.generation().unwrap(),
+        user_public_id: alice,
+        kind: SessionKind::ReceivePack.into(),
+        repository: Some(open_session_request::Repository::RepoAddress(
+            "alice/demo".into(),
+        )),
+        session_id: kajiba_core::new_id().unwrap(),
+        correlation_id: "lost-response".into(),
+    };
+    let mut invalid = open.clone();
+    invalid.session_id.clear();
+    assert_eq!(
+        gate.open_session(Request::new(invalid))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::InvalidArgument
+    );
+    let mut stale = open.clone();
+    stale.generation = kajiba_core::new_id().unwrap();
+    assert_eq!(
+        gate.open_session(Request::new(stale))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Unavailable
+    );
+    // The reply is lost after the server has recorded admission.
+    drop(gate.open_session(Request::new(open.clone())).await.unwrap());
+    assert!(gate.admission.running(1));
+    let retry = gate
+        .open_session(Request::new(open.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(retry.session.unwrap().session_id, open.session_id);
+    let mut changed = open.clone();
+    changed.kind = SessionKind::UploadPack.into();
+    assert_eq!(
+        gate.open_session(Request::new(changed))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
+    let mut competing = open.clone();
+    competing.session_id = kajiba_core::new_id().unwrap();
+    assert!(
+        gate.open_session(Request::new(competing.clone()))
+            .await
+            .is_err()
+    );
+    let exit = SessionExitedRequest {
+        session_id: open.session_id.clone(),
+        exit_status: 1,
+    };
+    for _ in 0..2 {
+        gate.session_exited(Request::new(exit.clone()))
+            .await
+            .unwrap();
+    }
+    assert!(!gate.admission.running(1));
+    gate.hello(Request::new(HelloRequest {
+        version: env!("CARGO_PKG_VERSION").into(),
+        generation: open.generation.clone(),
+    }))
+    .await
+    .unwrap();
+    assert!(gate.open_session(Request::new(open.clone())).await.is_err());
+    // Cancellation can beat a delayed OpenSession to the writer lock.
+    open.session_id = kajiba_core::new_id().unwrap();
+    gate.session_exited(Request::new(SessionExitedRequest {
+        session_id: open.session_id.clone(),
+        exit_status: 1,
+    }))
+    .await
+    .unwrap();
+    assert!(gate.open_session(Request::new(open)).await.is_err());
+    assert!(!gate.admission.running(1));
+    gate.open_session(Request::new(competing)).await.unwrap();
+    assert!(gate.admission.running(1));
 }

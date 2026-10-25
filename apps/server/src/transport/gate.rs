@@ -20,6 +20,8 @@ mod policy;
 pub struct Gate {
     pub writer: Writer,
     pub generation: Mutex<Option<String>>,
+    // shortcut: retain closed IDs per generation; use an acknowledgment watermark if volume requires a bound.
+    closed: Mutex<std::collections::HashSet<String>>,
     pub admission: Arc<crate::db::pushes::Gate>,
     pub bus: Arc<crate::db::events::EventBus>,
     pub state_dir: std::path::PathBuf,
@@ -46,7 +48,12 @@ impl GateService for Gate {
                 details,
             ));
         }
-        *self.generation.lock().unwrap() = Some(request.generation);
+        let _writer = self.writer.lock().await;
+        let mut generation = self.generation.lock().unwrap();
+        if generation.as_ref() != Some(&request.generation) {
+            self.closed.lock().unwrap().clear();
+        }
+        *generation = Some(request.generation);
         Ok(Response::new(HelloResponse {
             version: env!("CARGO_PKG_VERSION").into(),
         }))
@@ -146,6 +153,11 @@ impl GateService for Gate {
             ));
         }
         let mut writer = self.writer.lock().await;
+        // Also cancel an OpenSession still waiting for the writer lock (0061).
+        self.closed
+            .lock()
+            .unwrap()
+            .insert(request.session_id.clone());
         if let Some(repo) = self
             .admission
             .session_exited(&mut writer, &request.session_id)
@@ -215,6 +227,7 @@ impl Gate {
         Self {
             writer: admin.writer.clone(),
             generation: Mutex::default(),
+            closed: Mutex::default(),
             admission: admin.gate.clone(),
             bus: admin.bus.clone(),
             state_dir: admin.state_dir.clone(),
@@ -235,14 +248,11 @@ impl Gate {
                     "invalid session kind",
                 )
             })?;
-        if (kind == SessionKind::Import
-            && !kajiba_core::names::is_public_id(&request.import_session_id))
-            || (kind != SessionKind::Import && !request.import_session_id.is_empty())
-        {
+        if !kajiba_core::names::is_public_id(&request.session_id) {
             return Err(rpc_error(
                 tonic::Code::InvalidArgument,
                 "INVALID_FIELD",
-                "invalid import_session_id",
+                "invalid session_id",
             ));
         }
         let mut writer = self.writer.lock().await;
@@ -252,8 +262,18 @@ impl Gate {
             .unwrap()
             .clone()
             .ok_or_else(|| super::git_side::unavailable("Hello required"))?;
+        if request.generation != generation {
+            return Err(super::git_side::unavailable("session generation changed"));
+        }
         if self.admission.generation().as_ref() != Some(&generation) {
             return Err(super::git_side::unavailable("session snapshot required"));
+        }
+        if self.closed.lock().unwrap().contains(&request.session_id) {
+            return Err(rpc_error(
+                tonic::Code::FailedPrecondition,
+                "INVALID_STATE",
+                "session already closed",
+            ));
         }
         let public_id = match &request.repository {
             Some(open_session_request::Repository::RepoPublicId(id))
@@ -361,7 +381,23 @@ impl Gate {
                 admin,
             )
         };
-        let session_id = if kind == SessionKind::Import {
+        let session = Session {
+            session_id: request.session_id.clone(),
+            kind: kind.into(),
+            repo_public_id: public_id.clone(),
+            user_public_id: request.user_public_id.clone(),
+            correlation_id: request.correlation_id.clone(),
+            generation: generation.clone(),
+        };
+        let existing = self.admission.session(&request.session_id);
+        if existing.as_ref().is_some_and(|(_, live)| live != &session) {
+            return Err(rpc_error(
+                tonic::Code::FailedPrecondition,
+                "INVALID_STATE",
+                "session identity changed",
+            ));
+        }
+        if existing.is_none() && kind == SessionKind::Import {
             // The reservation must still exist: a delayed Fetch after recovery cannot write.
             sqlx::query_scalar::<_, String>(
                 "UPDATE pending_push SET git_generation = ?
@@ -371,7 +407,7 @@ impl Gate {
             .bind(&generation)
             .bind(repo)
             .bind(&request.correlation_id)
-            .bind(&request.import_session_id)
+            .bind(&request.session_id)
             .fetch_optional(&mut *writer)
             .await
             .map_err(|err| Status::internal(err.to_string()))?
@@ -381,34 +417,22 @@ impl Gate {
                     "INVALID_STATE",
                     "import reservation is absent or already started",
                 )
-            })?
-        } else {
-            if kind != SessionKind::UploadPack {
-                let pending: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM pending_push WHERE repo_id = ?)",
-                )
-                .bind(repo)
-                .fetch_one(&mut *writer)
-                .await
-                .map_err(|err| Status::internal(err.to_string()))?;
-                if pending || self.admission.running(repo) {
-                    return Err(rpc_error(
-                        tonic::Code::FailedPrecondition,
-                        "INVALID_STATE",
-                        "repository has an unfinished session; retry",
-                    ));
-                }
+            })?;
+        } else if existing.is_none() && kind != SessionKind::UploadPack {
+            let pending: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_push WHERE repo_id = ?)")
+                    .bind(repo)
+                    .fetch_one(&mut *writer)
+                    .await
+                    .map_err(|err| Status::internal(err.to_string()))?;
+            if pending || self.admission.running(repo) {
+                return Err(rpc_error(
+                    tonic::Code::FailedPrecondition,
+                    "INVALID_STATE",
+                    "repository has an unfinished session; retry",
+                ));
             }
-            kajiba_core::new_id().map_err(|err| Status::internal(err.to_string()))?
-        };
-        let session = Session {
-            session_id,
-            kind: kind.into(),
-            repo_public_id: public_id.clone(),
-            user_public_id: request.user_public_id.clone(),
-            correlation_id: request.correlation_id.clone(),
-            generation,
-        };
+        }
         self.admission.opened(repo, session.clone());
         Ok(OpenSessionResponse {
             session: Some(session),

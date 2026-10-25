@@ -36,8 +36,10 @@ message OpenSessionRequest {
     string repo_public_id = 4;
   }
   string correlation_id = 5;
-  // Import only: the server's durable reservation, echoed from Fetch.session.
-  string import_session_id = 6;
+  // Daemon-chosen ULID; imports echo the durable reservation from Fetch.session.
+  string session_id = 6;
+  // Binds delayed opens to the daemon that issued them.
+  string generation = 7;
 }
 message OpenSessionResponse {
   kajiba.git.v1.Session session = 1;

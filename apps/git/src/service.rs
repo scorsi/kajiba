@@ -140,7 +140,8 @@ impl git_service_server::GitService for Git {
                             session.repo_public_id.clone(),
                         )),
                         correlation_id: session.correlation_id.clone(),
-                        import_session_id: session.session_id.clone(),
+                        session_id: session.session_id.clone(),
+                        generation: session.generation.clone(),
                     })
                     .await?
                     .into_inner();
