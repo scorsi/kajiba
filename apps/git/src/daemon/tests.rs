@@ -334,7 +334,7 @@ async fn repository_rpcs_run_in_the_real_daemon() {
     );
     let destination = client
         .quarantine_repository(QuarantineRepositoryRequest {
-            repo_public_id: id.into(),
+            directory_name: format!("{id}.git").into_bytes(),
         })
         .await
         .unwrap()

@@ -1,4 +1,4 @@
-use std::{collections::HashSet, ffi::OsString, fs, io, path::Path};
+use std::{collections::HashSet, ffi::OsString, fs, io, os::unix::ffi::OsStrExt, path::Path};
 
 // Keep the returned lock for the server lifetime; never unlink the lock file.
 pub fn prepare(state_dir: &Path) -> Result<StateLock, String> {
@@ -71,24 +71,18 @@ pub async fn cleanup(
             continue;
         }
         let name = entry.file_name();
-        let id = name
-            .to_str()
-            .and_then(|name| name.strip_suffix(".git"))
-            .filter(|id| kajiba_core::names::is_public_id(id))
-            .ok_or_else(|| {
-                format!(
-                    "unregistered repository has no valid public id: {}",
-                    entry.path().display()
-                )
-            })?;
-        git.client()
+        let destination = git
+            .client()
             .await
             .map_err(mutation_error)?
             .quarantine_repository(QuarantineRepositoryRequest {
-                repo_public_id: id.into(),
+                directory_name: name.as_bytes().to_vec(),
             })
             .await
-            .map_err(mutation_error)?;
+            .map_err(mutation_error)?
+            .into_inner()
+            .destination;
+        tracing::warn!(event = "repo-orphaned", path = %entry.path().display(), destination = %destination);
     }
     Ok(())
 }
@@ -391,19 +385,87 @@ mod tests {
         writer.close().await.unwrap();
     }
     #[tokio::test]
-    async fn malformed_orphan_names_are_preserved_without_widening_the_ulid_rpc() {
+    async fn cleanup_quarantines_non_public_id_names_and_logs_destinations() {
+        if std::env::var_os("KAJIBA_TEST_ORPHAN_LOG").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "state::tests::cleanup_quarantines_non_public_id_names_and_logs_destinations",
+                    "--nocapture",
+                ])
+                .env("KAJIBA_TEST_ORPHAN_LOG", "1")
+                .env_remove("RUST_LOG")
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(output.status.success(), "{stderr}");
+            let events: Vec<serde_json::Value> = stderr
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|line| line["event"] == "repo-orphaned")
+                .collect();
+            assert_eq!(
+                events.len(),
+                if cfg!(target_os = "linux") { 3 } else { 2 },
+                "{stderr}"
+            );
+            for event in events {
+                assert_eq!(event["level"], "warn");
+                let path = event["path"].as_str().unwrap();
+                let destination = event["destination"].as_str().unwrap();
+                let mut expected = path.replace("/repos/", "/tmp/orphans/");
+                if path.ends_with("/orphan.git") {
+                    expected.push_str(".1");
+                }
+                assert_eq!(destination, expected);
+            }
+            return;
+        }
+        kajiba_core::log::init("info").unwrap();
         let temp = TempDir::new();
         let _lock = prepare(&temp.0).unwrap();
         let (mut writer, readers) = crate::db::open(&temp.0.join("db/kajiba.sqlite"))
             .await
             .unwrap();
         let mut daemon = crate::transport::git_side::fake::Fake::start(&temp.0).await;
-        fs::create_dir(temp.0.join("repos/not-an-id.git")).unwrap();
-        let err = cleanup(&temp.0, &temp.0, &mut daemon.client, &mut writer)
+        let names: &[&[u8]] = &[
+            b"orphan.git",
+            b"no-suffix",
+            // APFS refuses non-UTF-8 filenames; Linux filesystems preserve them.
+            #[cfg(target_os = "linux")]
+            b"non-utf8-\xff.git",
+        ];
+        for name in names {
+            let name = std::ffi::OsStr::from_bytes(name);
+            let path = temp.0.join("repos").join(name);
+            fs::create_dir(&path).unwrap();
+            fs::write(path.join("evidence"), "preserve").unwrap();
+        }
+        fs::create_dir_all(temp.0.join("tmp/orphans/orphan.git")).unwrap();
+        fs::write(temp.0.join("tmp/orphans/orphan.git/evidence"), "earlier").unwrap();
+        cleanup(&temp.0, &temp.0, &mut daemon.client, &mut writer)
             .await
-            .unwrap_err();
-        assert!(err.contains("no valid public id"));
-        assert!(temp.0.join("repos/not-an-id.git").is_dir());
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(temp.0.join("tmp/orphans/orphan.git/evidence")).unwrap(),
+            "earlier"
+        );
+        for name in names {
+            let name = std::ffi::OsStr::from_bytes(name);
+            assert!(!temp.0.join("repos").join(name).exists());
+            let mut destination = temp.0.join("tmp/orphans").join(name);
+            if name == "orphan.git" {
+                destination = temp.0.join("tmp/orphans/orphan.git.1");
+            }
+            assert_eq!(
+                fs::read_to_string(destination.join("evidence")).unwrap(),
+                "preserve"
+            );
+        }
+        // A second sweep preserves the quarantine and emits no duplicate event.
+        cleanup(&temp.0, &temp.0, &mut daemon.client, &mut writer)
+            .await
+            .unwrap();
         readers.close().await;
         writer.close().await.unwrap();
     }

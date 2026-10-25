@@ -58,7 +58,10 @@ message SetHeadRequest {
 }
 message SetHeadResponse {}
 message QuarantineRepositoryRequest {
-  string repo_public_id = 1;
+  reserved 1;
+  reserved "repo_public_id";
+  // One immediate directory name under repos/, as Unix filename bytes (0069).
+  bytes directory_name = 2;
 }
 message QuarantineRepositoryResponse {
   string destination = 1;

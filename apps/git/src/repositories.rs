@@ -9,7 +9,9 @@ use kajiba_gitstore::{GitStore, Gix};
 use kajiba_proto::git::v1::{FetchRequest, Session};
 use std::{
     collections::BTreeMap,
+    ffi::OsStr,
     fs, io,
+    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
 };
@@ -381,18 +383,42 @@ impl Repositories {
         fetch(&path, &request.source, &request.credentials, &refs).map_err(source_error)
     }
 
-    pub fn quarantine(&self, id: &str) -> Result<PathBuf, Status> {
-        self.quarantine_with_sync(id, &mut sync_dir)
+    pub fn quarantine(&self, name: &[u8]) -> Result<PathBuf, Status> {
+        self.quarantine_with_sync(name, &mut sync_dir)
     }
 
     fn quarantine_with_sync(
         &self,
-        id: &str,
+        name: &[u8],
         sync: &mut impl FnMut(&Path) -> io::Result<()>,
     ) -> Result<PathBuf, Status> {
-        let mutation = self.mutation(id);
+        // Share the id's lock when the entry is `<id>.git`, so it serializes with other mutations.
+        let key = String::from_utf8_lossy(name.strip_suffix(b".git").unwrap_or(name)).into_owned();
+        let mutation = self.mutation(&key);
         let _guard = mutation.lock().unwrap();
-        let path = self.present(id)?;
+        if name.is_empty()
+            || name == b"."
+            || name == b".."
+            || name.contains(&b'/')
+            || name.contains(&0)
+        {
+            return Err(rpc_error(
+                Code::InvalidArgument,
+                "INVALID_FIELD",
+                "invalid directory_name",
+            ));
+        }
+        let bytes = name;
+        let name = OsStr::from_bytes(name);
+        real_dir(&self.root.join("repos")).map_err(internal)?;
+        let path = self.root.join("repos").join(name);
+        real_dir(&path).map_err(|err| {
+            if err.kind() == io::ErrorKind::NotFound {
+                rpc_error(Code::NotFound, "REPO_NOT_FOUND", "repository not found")
+            } else {
+                internal(err)
+            }
+        })?;
         real_dir(&self.root.join("tmp")).map_err(internal)?;
         let orphans = self.root.join("tmp/orphans");
         real_dir(&orphans).map_err(internal)?;
@@ -409,7 +435,7 @@ impl Repositories {
         if sessions
             .running
             .values()
-            .any(|(session, _)| session.repo_public_id == id)
+            .any(|(session, _)| session.repo_public_id.as_bytes() == bytes.strip_suffix(b".git").unwrap_or(&[]))
             || !Gix.refs(&path).map_err(internal)?.is_empty()
         {
             return Err(ineligible());
@@ -431,14 +457,15 @@ impl Repositories {
             }
             return Err(ineligible());
         }
-        let name = format!("{id}.git");
-        let mut destination = orphans.join(&name);
+        let mut destination = orphans.join(name);
         let mut suffix = 0_u64;
         loop {
             match fs::symlink_metadata(&destination) {
                 Ok(_) => {
                     suffix += 1;
-                    destination = orphans.join(format!("{name}.{suffix}"));
+                    let mut suffixed = name.to_os_string();
+                    suffixed.push(format!(".{suffix}"));
+                    destination = orphans.join(suffixed);
                 }
                 Err(err) if err.kind() == io::ErrorKind::NotFound => break,
                 Err(err) => return Err(internal(err)),

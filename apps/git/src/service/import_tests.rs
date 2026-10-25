@@ -184,7 +184,7 @@ async fn quarantine_cannot_replace_history_or_reuse_an_identity() {
     assert_eq!(
         daemon
             .quarantine_repository(Request::new(QuarantineRepositoryRequest {
-                repo_public_id: ID.into(),
+                directory_name: format!("{ID}.git").into_bytes(),
             }))
             .await
             .unwrap_err()
@@ -217,7 +217,7 @@ async fn quarantine_cannot_replace_history_or_reuse_an_identity() {
     assert_eq!(
         daemon
             .quarantine_repository(Request::new(QuarantineRepositoryRequest {
-                repo_public_id: ID.into()
+                directory_name: format!("{ID}.git").into_bytes()
             }))
             .await
             .unwrap_err()
@@ -235,7 +235,7 @@ async fn quarantine_cannot_replace_history_or_reuse_an_identity() {
     assert_eq!(
         daemon
             .quarantine_repository(Request::new(QuarantineRepositoryRequest {
-                repo_public_id: ID.into()
+                directory_name: format!("{ID}.git").into_bytes()
             }))
             .await
             .unwrap_err()
@@ -245,7 +245,7 @@ async fn quarantine_cannot_replace_history_or_reuse_an_identity() {
     daemon.repositories.finished(&session.session_id, 1);
     let destination = daemon
         .quarantine_repository(Request::new(QuarantineRepositoryRequest {
-            repo_public_id: ID.into(),
+            directory_name: format!("{ID}.git").into_bytes(),
         }))
         .await
         .unwrap()

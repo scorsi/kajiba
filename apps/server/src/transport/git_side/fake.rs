@@ -2,7 +2,7 @@
 use super::*;
 use kajiba_gitstore::{GitStore, Gix};
 use kajiba_proto::git::v1::*;
-use std::{fs, path::PathBuf};
+use std::{fs, os::unix::ffi::OsStringExt, path::PathBuf};
 use tonic::{Request, Response, service::Routes};
 
 pub(crate) struct Fake {
@@ -109,14 +109,16 @@ impl git_service_server::GitService for Daemon {
         &self,
         request: Request<QuarantineRepositoryRequest>,
     ) -> Result<Response<QuarantineRepositoryResponse>, Status> {
-        let name = format!("{}.git", request.into_inner().repo_public_id);
+        let name = std::ffi::OsString::from_vec(request.into_inner().directory_name);
         let orphans = self.0.join("tmp/orphans");
         fs::create_dir_all(&orphans).map_err(|err| Status::internal(err.to_string()))?;
         let mut destination = orphans.join(&name);
         let mut suffix = 0;
         while fs::symlink_metadata(&destination).is_ok() {
             suffix += 1;
-            destination = orphans.join(format!("{name}.{suffix}"));
+            let mut suffixed = name.clone();
+            suffixed.push(format!(".{suffix}"));
+            destination = orphans.join(suffixed);
         }
         fs::rename(self.0.join("repos").join(name), &destination)
             .map_err(|err| Status::internal(err.to_string()))?;

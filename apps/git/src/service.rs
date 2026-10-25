@@ -77,7 +77,7 @@ impl git_service_server::GitService for Git {
         let repositories = self.repositories.clone();
         let span = tracing::Span::current();
         let result = tokio::task::spawn_blocking(move || {
-            span.in_scope(|| repositories.quarantine(&request.repo_public_id))
+            span.in_scope(|| repositories.quarantine(&request.directory_name))
         })
         .await
         .map_err(|err| Status::internal(err.to_string()))??;

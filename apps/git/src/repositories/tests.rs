@@ -56,7 +56,7 @@ fn stalled_import_only_blocks_mutations_of_its_own_repository() {
                 );
                 repos.set_head(OTHER, "main")?;
                 repos.fetch_with(request(OTHER), |_, _, _, _| Ok(()))?;
-                repos.quarantine(OTHER)?;
+                repos.quarantine(format!("{OTHER}.git").as_bytes())?;
                 Ok(())
             })();
             done.send(result).unwrap();
@@ -132,10 +132,6 @@ fn creation_head_and_quarantine_validate_the_boundary_and_preserve_data() {
             repos.set_head(bad, "main").unwrap_err().code(),
             Code::InvalidArgument
         );
-        assert_eq!(
-            repos.quarantine(bad).unwrap_err().code(),
-            Code::InvalidArgument
-        );
     }
     assert_eq!(
         repos.create(ID, "a..b").unwrap_err().code(),
@@ -145,7 +141,13 @@ fn creation_head_and_quarantine_validate_the_boundary_and_preserve_data() {
         repos.set_head(ID, "main").unwrap_err().code(),
         Code::NotFound
     );
-    assert_eq!(repos.quarantine(ID).unwrap_err().code(), Code::NotFound);
+    assert_eq!(
+        repos
+            .quarantine(format!("{ID}.git").as_bytes())
+            .unwrap_err()
+            .code(),
+        Code::NotFound
+    );
     let path = temp.0.join(format!("repos/{ID}.git"));
     assert!(!path.exists());
     repos.create(ID, "trunk").unwrap();
@@ -178,7 +180,7 @@ fn creation_head_and_quarantine_validate_the_boundary_and_preserve_data() {
     symlink("missing", orphans.join(format!("{ID}.git.2"))).unwrap();
     let mut synced = vec![];
     let destination = repos
-        .quarantine_with_sync(ID, &mut |parent| {
+        .quarantine_with_sync(format!("{ID}.git").as_bytes(), &mut |parent| {
             synced.push(parent.to_owned());
             sync_dir(parent)
         })
@@ -208,7 +210,7 @@ fn quarantine_reports_sync_failures_and_refuses_symlinked_paths() {
         let repos = Repositories::new(temp.0.clone());
         repos.create(ID, "main").unwrap();
         let err = repos
-            .quarantine_with_sync(ID, &mut |path| {
+            .quarantine_with_sync(format!("{ID}.git").as_bytes(), &mut |path| {
                 if path == temp.0.join(parent) {
                     Err(io::Error::other("sync failed"))
                 } else {
@@ -229,7 +231,7 @@ fn quarantine_reports_sync_failures_and_refuses_symlinked_paths() {
         symlink(&target, temp.0.join(name)).unwrap();
         assert!(
             repos
-                .quarantine(ID)
+                .quarantine(format!("{ID}.git").as_bytes())
                 .unwrap_err()
                 .message()
                 .contains("symlinks are refused")
@@ -245,7 +247,7 @@ fn quarantine_reports_sync_failures_and_refuses_symlinked_paths() {
         Code::AlreadyExists
     );
     assert!(repos.set_head(ID, "main").is_err());
-    assert!(repos.quarantine(ID).is_err());
+    assert!(repos.quarantine(format!("{ID}.git").as_bytes()).is_err());
 }
 
 #[test]
@@ -354,4 +356,86 @@ fn session_facts_remain_until_the_child_exits_and_the_server_acknowledges() {
     repos.acknowledged(&session.session_id);
     repos.acknowledged(&session.session_id);
     assert!(repos.exits().is_empty());
+}
+
+#[test]
+fn quarantine_accepts_only_immediate_directory_names_and_preserves_bytes() {
+    let temp = TempDir::new();
+    let _lock = prepare(&temp.0).unwrap();
+    let repos = Repositories::new(temp.0.clone());
+    for name in [
+        b"".as_slice(),
+        b".",
+        b"..",
+        b"../escape",
+        b"/absolute",
+        b"a/b",
+        b"a/",
+        b"a\0b",
+    ] {
+        assert_eq!(
+            repos.quarantine(name).unwrap_err().code(),
+            Code::InvalidArgument
+        );
+    }
+    assert_eq!(
+        repos.quarantine(b"missing").unwrap_err().code(),
+        Code::NotFound
+    );
+    fs::write(temp.0.join("repos/file"), "preserve").unwrap();
+    symlink(temp.0.join("tmp"), temp.0.join("repos/link")).unwrap();
+    assert!(repos.quarantine(b"file").is_err());
+    assert!(repos.quarantine(b"link").is_err());
+    assert_eq!(
+        fs::read_to_string(temp.0.join("repos/file")).unwrap(),
+        "preserve"
+    );
+    assert!(
+        fs::symlink_metadata(temp.0.join("repos/link"))
+            .unwrap()
+            .is_symlink()
+    );
+    let names: &[&[u8]] = &[
+        b"orphan.git",
+        b"no-suffix",
+        #[cfg(target_os = "linux")]
+        b"non-utf8-\xff.git",
+    ];
+    for name in names {
+        let filename = OsStr::from_bytes(name);
+        let source = temp.0.join("repos").join(filename);
+        // Eligibility (0067) still applies: an empty repository whose name is not a public id.
+        fs::create_dir_all(source.join("objects/info")).unwrap();
+        fs::create_dir_all(source.join("objects/pack")).unwrap();
+        fs::create_dir_all(source.join("refs/heads")).unwrap();
+        fs::write(source.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            source.join("config"),
+            "[core]\nrepositoryformatversion = 0\nbare = true\n",
+        )
+        .unwrap();
+        fs::write(source.join("evidence"), "preserve").unwrap();
+        let first = temp.0.join("tmp/orphans").join(filename);
+        fs::write(&first, "collision").unwrap();
+        let mut suffixed = filename.to_os_string();
+        suffixed.push(".1");
+        let expected = temp.0.join("tmp/orphans").join(suffixed);
+        let mut synced = vec![];
+        assert_eq!(
+            repos
+                .quarantine_with_sync(name, &mut |parent| {
+                    synced.push(parent.to_owned());
+                    sync_dir(parent)
+                })
+                .unwrap(),
+            expected
+        );
+        assert_eq!(synced, [temp.0.join("repos"), temp.0.join("tmp/orphans")]);
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read_to_string(expected.join("evidence")).unwrap(),
+            "preserve"
+        );
+        assert_eq!(fs::read_to_string(first).unwrap(), "collision");
+    }
 }

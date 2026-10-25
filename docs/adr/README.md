@@ -76,6 +76,7 @@ The ADRs describe the product. Values of a particular deployment (hosts, ports, 
 | 0066 | Incoming Git object validation                                               |
 | 0067 | Quarantine eligibility and repository identity reservation                   |
 | 0068 | Shared request middleware dependencies                                       |
+| 0069 | Orphan quarantine by immediate directory name                                | Accepted                                                                                                                                                                                                                                                                                                                                                             |
 
 Relational schema: [`docs/schema.md`](../schema.md) (Accepted).
 
