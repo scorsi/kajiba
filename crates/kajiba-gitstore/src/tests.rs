@@ -308,6 +308,57 @@ fn drain_reports_read_errors_instead_of_returning_incomplete_output() {
 }
 
 #[test]
+fn process_group_cleanup_kills_descendants_and_reaps_on_error_and_unwind() {
+    use std::io::{BufRead, Read};
+
+    for unwind in [false, true] {
+        let mut group = ProcessGroup {
+            child: sh("sleep 30 & echo ready; wait")
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+            reaped: false,
+        };
+        let pid = group.child.id() as libc::pid_t;
+        let mut stdout = std::io::BufReader::new(group.child.stdout.take().unwrap());
+        let mut ready = String::new();
+        stdout.read_line(&mut ready).unwrap();
+        assert_eq!(ready, "ready\n");
+        let started = std::time::Instant::now();
+        let result = std::panic::catch_unwind(move || -> std::io::Result<()> {
+            let _group = group;
+            if unwind {
+                panic!("worker failed after spawning git");
+            }
+            Err(std::io::Error::other("worker failed"))
+        });
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(result.is_err(), unwind);
+        if let Ok(result) = result {
+            assert!(result.is_err());
+        }
+        // SAFETY: a nonblocking wait for our former child writes no status here.
+        assert_eq!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        let (send, recv) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut remaining = Vec::new();
+            send.send(stdout.read_to_end(&mut remaining)).unwrap();
+        });
+        assert_eq!(
+            recv.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),
+            0
+        );
+    }
+}
+
+#[test]
 fn run_kills_a_child_past_its_deadline() {
     for script in [
         "exec sleep 30",

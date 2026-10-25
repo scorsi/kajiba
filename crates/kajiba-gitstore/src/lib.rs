@@ -401,6 +401,37 @@ fn wait_without_reaping(pid: libc::pid_t) {
     }
 }
 
+struct ProcessGroup {
+    child: std::process::Child,
+    reaped: bool,
+}
+
+impl ProcessGroup {
+    fn finish(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        if !self.reaped {
+            // SAFETY: the unreaped child reserves its pid and process group id.
+            unsafe { libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL) };
+        }
+        loop {
+            match self.child.wait() {
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => {
+                    self.reaped = result.is_ok();
+                    return result;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        if !self.reaped {
+            let _ = self.finish();
+        }
+    }
+}
+
 /// Runs the child to completion within `deadline`, a hard limit on the process, not
 /// on its pipes: a child that closes stdout and lingers is still killed, and a
 /// descendant (ssh, curl) holding a pipe dies with the child's process group.
@@ -428,22 +459,25 @@ fn run_output_limited(
     use std::os::unix::process::CommandExt;
     use std::sync::mpsc::channel;
     let end = std::time::Instant::now() + deadline;
-    let mut child = command
-        .stdin(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(|err| Error::Git(format!("git: {err}")))?;
-    let pid = child.id() as libc::pid_t;
-    let mut input = child.stdin.take().expect("piped");
+    let mut group = ProcessGroup {
+        child: command
+            .stdin(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .map_err(|err| Error::Git(format!("git: {err}")))?,
+        reaped: false,
+    };
+    let pid = group.child.id() as libc::pid_t;
+    let mut input = group.child.stdin.take().expect("piped");
     let (exited, exit) = channel::<()>();
     let remaining = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(output_limit));
     let stdout = drain(
-        child.stdout.take().expect("piped"),
+        group.child.stdout.take().expect("piped"),
         remaining.clone(),
         exited.clone(),
     );
     let stderr = drain(
-        child.stderr.take().expect("piped"),
+        group.child.stderr.take().expect("piped"),
         remaining,
         exited.clone(),
     );
@@ -458,11 +492,8 @@ fn run_output_limited(
         .recv_timeout(end.saturating_duration_since(std::time::Instant::now()))
         .is_err();
     // Exit, output overflow or deadline: no descendant in the group outlives git.
-    // SAFETY: the child is not reaped yet, so `pid` is ours and still names the group.
-    unsafe { libc::kill(-pid, libc::SIGKILL) };
-    let status = child
-        .wait()
-        .map_err(|err| Error::Git(format!("git: {err}")))?;
+    // A failed wait must unwind so the supervisor cannot report an unproven exit.
+    let status = group.finish().expect("git child could not be reaped");
     if timed_out {
         return Err(Error::Git(format!(
             "git did not finish within {} s",

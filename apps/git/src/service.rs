@@ -130,6 +130,7 @@ impl git_service_server::GitService for Git {
         let server_socket = self.server_socket.clone();
         // Admission, child wait and exit recording all survive a cancelled Fetch RPC.
         tokio::spawn(async move {
+            let mut worker_completed = true;
             let result = async {
                 let mut client = server_client(&server_socket, &session.generation).await?;
                 let opened = client
@@ -156,12 +157,18 @@ impl git_service_server::GitService for Git {
                     repo = session.repo_public_id
                 );
                 let worker = repositories.clone();
-                tokio::task::spawn_blocking(move || worker.fetch(request))
+                worker_completed = false;
+                let result = tokio::task::spawn_blocking(move || worker.fetch(request))
                     .await
-                    .map_err(|_| Status::internal("import worker failed"))?
+                    .map_err(|_| Status::internal("import worker failed"))?;
+                worker_completed = true;
+                result
             }
             .await;
-            repositories.finished(&session.session_id, if result.is_ok() { 0 } else { 1 });
+            // A worker panic is not proof of child termination (0053).
+            if worker_completed {
+                repositories.finished(&session.session_id, if result.is_ok() { 0 } else { 1 });
+            }
             result
         })
         .await
