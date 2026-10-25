@@ -4,6 +4,93 @@ use std::os::unix::fs::{MetadataExt, symlink};
 const ID: &str = "00000000000000000000000001";
 
 #[test]
+fn stalled_import_only_blocks_mutations_of_its_own_repository() {
+    use kajiba_proto::git::v1::RemoteRef;
+    use std::{sync::mpsc, time::Duration};
+    const OTHER: &str = "00000000000000000000000002";
+    let temp = TempDir::new();
+    let _lock = prepare(&temp.0).unwrap();
+    let repos = Repositories::new(temp.0.clone());
+    // Minimal empty bare repositories; no Git command needs to write a fixture.
+    for id in [ID, OTHER] {
+        let path = temp.0.join(format!("repos/{id}.git"));
+        for dir in ["refs/heads", "objects/info", "objects/pack"] {
+            fs::create_dir_all(path.join(dir)).unwrap();
+        }
+        fs::write(path.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            path.join("config"),
+            "[core]\nrepositoryformatversion = 0\nbare = true\n",
+        )
+        .unwrap();
+    }
+    let request = |id: &str| FetchRequest {
+        repo_public_id: id.into(),
+        refs: vec![RemoteRef {
+            ref_name: "refs/heads/main".into(),
+            object_id: "1".repeat(40),
+        }],
+        ..Default::default()
+    };
+    let (entered, started) = mpsc::channel();
+    let (release, resume) = mpsc::channel();
+    let (done, completed) = mpsc::channel();
+    let (same_done, same_completed) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let repos = &repos;
+        scope.spawn(move || {
+            repos
+                .fetch_with(request(ID), |_, _, _, _| {
+                    entered.send(()).unwrap();
+                    resume.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        scope.spawn(move || {
+            let result = (|| -> Result<(), Status> {
+                assert_eq!(
+                    repos.create(OTHER, "main").unwrap_err().code(),
+                    Code::AlreadyExists
+                );
+                repos.set_head(OTHER, "main")?;
+                repos.fetch_with(request(OTHER), |_, _, _, _| Ok(()))?;
+                repos.quarantine(OTHER)?;
+                Ok(())
+            })();
+            done.send(result).unwrap();
+        });
+        scope.spawn(move || {
+            same_done.send(repos.set_head(ID, "main")).unwrap();
+        });
+        let other = completed.recv_timeout(Duration::from_secs(5));
+        let same = same_completed.recv_timeout(Duration::from_millis(100));
+        // Always release the import before asserting, including on a regression.
+        release.send(()).unwrap();
+        other.unwrap().unwrap();
+        assert!(matches!(same, Err(mpsc::RecvTimeoutError::Timeout)));
+        same_completed
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+    });
+}
+
+#[test]
+fn mutation_locks_are_shared_with_waiters_and_retired_after_use() {
+    let repos = Repositories::new("/unused".into());
+    let first = repos.mutation(ID);
+    let waiter = repos.mutation(ID);
+    assert!(Arc::ptr_eq(&first, &waiter));
+    drop(first);
+    assert!(Arc::ptr_eq(&waiter, &repos.mutation(ID)));
+    drop(waiter);
+    let _other = repos.mutation("00000000000000000000000002");
+    assert!(!repos.mutations.lock().unwrap().contains_key(ID));
+}
+
+#[test]
 fn completed_session_counters_saturate() {
     use kajiba_proto::git::v1::SessionKind;
     let repositories = Repositories::new("/unused".into());

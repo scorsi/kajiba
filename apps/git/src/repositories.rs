@@ -8,15 +8,16 @@ use kajiba_core::{
 use kajiba_gitstore::{GitStore, Gix};
 use kajiba_proto::git::v1::{FetchRequest, Session};
 use std::{
+    collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex, Weak},
 };
 use tonic::{Code, Status};
 
 pub struct Repositories {
     root: PathBuf,
-    mutation: Mutex<()>,
+    mutations: Mutex<BTreeMap<String, Weak<Mutex<()>>>>,
     sessions: Mutex<Sessions>,
 }
 
@@ -31,9 +32,20 @@ impl Repositories {
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
-            mutation: Mutex::new(()),
+            mutations: Mutex::default(),
             sessions: Mutex::default(),
         }
+    }
+
+    fn mutation(&self, id: &str) -> Arc<Mutex<()>> {
+        let mut mutations = self.mutations.lock().unwrap();
+        mutations.retain(|_, lock| lock.strong_count() != 0);
+        if let Some(lock) = mutations.get(id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        mutations.insert(id.to_owned(), Arc::downgrade(&lock));
+        lock
     }
 
     fn path(&self, id: &str) -> Result<PathBuf, Status> {
@@ -61,7 +73,8 @@ impl Repositories {
     }
 
     pub fn create(&self, id: &str, branch: &str) -> Result<(), Status> {
-        let _guard = self.mutation.lock().unwrap();
+        let mutation = self.mutation(id);
+        let _guard = mutation.lock().unwrap();
         let path = self.path(id)?;
         branch_valid(branch)?;
         match fs::symlink_metadata(&path) {
@@ -105,7 +118,8 @@ impl Repositories {
     }
 
     pub fn set_head(&self, id: &str, branch: &str) -> Result<(), Status> {
-        let _guard = self.mutation.lock().unwrap();
+        let mutation = self.mutation(id);
+        let _guard = mutation.lock().unwrap();
         let path = self.present(id)?;
         branch_valid(branch)?;
         Gix.set_head(&path, branch).map_err(internal)
@@ -315,8 +329,19 @@ impl Repositories {
     }
 
     pub fn fetch(&self, request: FetchRequest) -> Result<(), Status> {
+        self.fetch_with(request, |path, source, credentials, refs| {
+            Gix.fetch(path, source, credentials, refs)
+        })
+    }
+
+    fn fetch_with(
+        &self,
+        request: FetchRequest,
+        fetch: impl FnOnce(&Path, &str, &str, &[kajiba_gitstore::Ref]) -> kajiba_gitstore::Result<()>,
+    ) -> Result<(), Status> {
         // Keep the empty-target check and the fetch atomic against other mutations.
-        let _guard = self.mutation.lock().unwrap();
+        let mutation = self.mutation(&request.repo_public_id);
+        let _guard = mutation.lock().unwrap();
         let path = self.present(&request.repo_public_id)?;
         if !Gix.refs(&path).map_err(internal)?.is_empty() {
             return Err(rpc_error(
@@ -353,8 +378,7 @@ impl Repositories {
                 "import refs are empty",
             ));
         }
-        Gix.fetch(&path, &request.source, &request.credentials, &refs)
-            .map_err(source_error)
+        fetch(&path, &request.source, &request.credentials, &refs).map_err(source_error)
     }
 
     pub fn quarantine(&self, id: &str) -> Result<PathBuf, Status> {
@@ -366,7 +390,8 @@ impl Repositories {
         id: &str,
         sync: &mut impl FnMut(&Path) -> io::Result<()>,
     ) -> Result<PathBuf, Status> {
-        let _guard = self.mutation.lock().unwrap();
+        let mutation = self.mutation(id);
+        let _guard = mutation.lock().unwrap();
         let path = self.present(id)?;
         real_dir(&self.root.join("tmp")).map_err(internal)?;
         let orphans = self.root.join("tmp/orphans");
