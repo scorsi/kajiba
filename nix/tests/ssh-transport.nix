@@ -155,7 +155,7 @@ pkgs.testers.runNixOSTest {
         forge.succeed(f"rm -f {control}/entered {control}/release; touch {control}/hold")
         git("-C /root/work commit --allow-empty -S -m held")
         command = f"env GIT_SSH_COMMAND=${ssh} GIT_SSH_VARIANT=simple KAJIBA_TEST_USER={alice} git -C /root/work push host:alice/demo main"
-        forge.succeed(f"({command}; echo $? >/root/push.status) >/root/push.out 2>&1 </dev/null &")
+        forge.succeed(f"(set +e; {command}; echo $? >/root/push.status) >/root/push.out 2>&1 </dev/null &")
         forge.wait_for_file(f"{control}/entered")
         assert sql("SELECT COUNT(*) FROM pending_push") == "1"
         return sql("SELECT COUNT(*) FROM event WHERE kind='push'")
