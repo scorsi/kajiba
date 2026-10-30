@@ -9,9 +9,19 @@ name = "kajiba-runner"
 path = "src/main.rs"
 
 [dependencies]
+# Already transitive (tonic): the loopback `/metrics` listener (0022).
+axum.workspace = true
 clap.workspace = true
 kajiba-proto = { path = "../../crates/kajiba-proto" }
 kajiba-core = { path = "../../crates/kajiba-core" }
-
-[dev-dependencies]
+# Already transitive: the hostname from the OS (0019 as amended).
+libc.workspace = true
+# Reads `nix config show --json` (0009).
 serde_json.workspace = true
+tokio.workspace = true
+# Already transitive (tonic): the outbound half of the runner stream.
+tokio-stream.workspace = true
+# The kajiba.runner.v1 client over HTTPS with the system certificate store (0076).
+tonic = { workspace = true, features = ["tls-native-roots"] }
+# Already transitive (tonic): the log facade of the nisshi layer (0022).
+tracing.workspace = true

@@ -2235,10 +2235,16 @@ dependencies = [
 name = "kajiba-runner"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "clap",
  "kajiba-core",
  "kajiba-proto",
+ "libc",
  "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]

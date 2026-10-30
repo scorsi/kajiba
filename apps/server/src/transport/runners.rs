@@ -41,7 +41,7 @@ const PASS_PERIOD: Duration = Duration::from_secs(1);
 
 /// A runner silent this long after opening `Connect` is dropped: one heartbeat period (0105).
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_HOSTNAME: usize = 253;
+use kajiba_core::config::MAX_HOSTNAME;
 /// ADR 0105: a log chunk holds at most 64 KiB.
 const MAX_CHUNK: usize = 64 * 1024;
 /// `have` ids considered per bundle request (0106).

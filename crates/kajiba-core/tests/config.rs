@@ -1120,3 +1120,27 @@ fn git_side_paths_are_absolute_and_configurable() {
         assert!(error.contains(&format!("git.{field}")), "{error}");
     }
 }
+
+#[test]
+fn runner_hostname_and_development_mode() {
+    let runner = RunnerConfig::parse(RUNNER).unwrap();
+    assert_eq!((runner.hostname, runner.development), (None, false));
+    let runner =
+        RunnerConfig::parse(&format!("hostname = \"vm-host.example.org\"\n{RUNNER}")).unwrap();
+    assert_eq!(runner.hostname.as_deref(), Some("vm-host.example.org"));
+    for hostname in ["''", "\"a\\u0007b\"", &format!("'{}'", "a".repeat(254))] {
+        runner_error(&format!("hostname = {hostname}\n{RUNNER}"), "hostname");
+    }
+    // The credential rule of ADR 0104: loopback http only in development mode.
+    let loopback = RUNNER.replace("https://forge.example.org", "http://127.0.0.1:8080");
+    runner_error(&loopback, "url: refusing to send a credential");
+    let runner = RunnerConfig::parse(&format!("development = true\n{loopback}")).unwrap();
+    assert!(runner.development);
+    runner_error(
+        &format!(
+            "development = true\n{}",
+            RUNNER.replace("https://", "http://")
+        ),
+        "url: refusing to send a credential",
+    );
+}

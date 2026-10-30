@@ -350,11 +350,19 @@ pub struct RunnerConfig {
     pub max_jobs: u32,
     #[serde(default = "runner_state_dir")]
     pub state_dir: PathBuf,
+    /// Shown by the server, never used for authorization; the OS hostname when absent.
+    pub hostname: Option<String>,
+    /// Plain `http` to a loopback `url` (ADR 0104); off by default.
+    #[serde(default)]
+    pub development: bool,
     #[serde(default)]
     pub log: LogConfig,
     #[serde(default)]
     pub metrics: MetricsConfig,
 }
+
+/// Longest hostname a runner reports (the server refuses longer ones).
+pub const MAX_HOSTNAME: usize = 253;
 
 #[derive(Debug, Clone, Copy, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -965,6 +973,17 @@ impl RunnerConfig {
         crate::log::filter(&config.log.level, None)?;
         config.name = validate_name(&config.name).map_err(|err| format!("name: {err}"))?;
         url_host(&config.url, "url")?;
+        crate::transport::credential_tls(&config.url, config.development)
+            .map_err(|err| format!("url: {err}"))?;
+        if config.hostname.as_ref().is_some_and(|hostname| {
+            hostname.is_empty()
+                || hostname.len() > MAX_HOSTNAME
+                || hostname.chars().any(char::is_control)
+        }) {
+            return Err(format!(
+                "hostname: must be 1 to {MAX_HOSTNAME} characters without control characters"
+            ));
+        }
         validate_metrics(&config.metrics)?;
         validate_path(&config.token_file, "token_file")?;
         validate_path(&config.state_dir, "state_dir")?;
