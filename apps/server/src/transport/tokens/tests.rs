@@ -226,7 +226,7 @@ async fn only_a_session_manages_tokens() {
         (Code::PermissionDenied, "SESSION_REQUIRED".into())
     );
 
-    // Through the auth layer: an admin-scoped PAT is still refused, a session passes.
+    // Through the auth layer: PATs are refused regardless of scope, a session passes.
     let admin_pat = service
         .create_token(from(1, true, create("admin", &[Scope::Admin])))
         .await
@@ -254,22 +254,20 @@ async fn only_a_session_manages_tokens() {
     .unwrap();
     for path in ["CreateToken", "ListTokens", "RevokeToken"] {
         let path = format!("/kajiba.v1.TokenService/{path}");
-        let status = call(
-            &mut app,
-            &path,
-            &[("authorization", &format!("Bearer {admin_pat}"))],
-        )
-        .await
-        .unwrap();
-        assert_eq!(reason(&status), "SESSION_REQUIRED", "{path}");
-        let status = call(
-            &mut app,
-            &path,
-            &[("authorization", &format!("Bearer {READ}"))],
-        )
-        .await
-        .unwrap();
-        assert_eq!(reason(&status), "SCOPE_MISSING", "{path}");
+        for pat in [admin_pat.as_str(), READ] {
+            let status = call(
+                &mut app,
+                &path,
+                &[("authorization", &format!("Bearer {pat}"))],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                (status.code(), reason(&status)),
+                (Code::PermissionDenied, "SESSION_REQUIRED".into()),
+                "{path}"
+            );
+        }
     }
     let cookie = format!("kajiba_session={cookie}");
     assert!(

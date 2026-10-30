@@ -205,7 +205,12 @@ pub(super) fn now() -> Result<i64, Status> {
 }
 
 impl Auth {
-    async fn principal(&self, headers: &HeaderMap, scope: Scope) -> Result<Principal, Status> {
+    async fn principal(
+        &self,
+        headers: &HeaderMap,
+        scope: Scope,
+        path: &str,
+    ) -> Result<Principal, Status> {
         let internal = |err: sqlx::Error| Status::internal(format!("credentials: {err}"));
         let (Some(readers), Some(writer)) = (self.health.database.get(), self.health.writer.get())
         else {
@@ -238,6 +243,14 @@ impl Auth {
             }
         };
         let found = admit(found, now).map_err(refuse)?;
+        // ADR 0081: a valid PAT is refused regardless of its scopes.
+        if session.is_none() && path.starts_with("/kajiba.v1.TokenService/") {
+            return Err(refused(
+                tonic::Code::PermissionDenied,
+                "SESSION_REQUIRED",
+                "personal access tokens are managed from a browser session".into(),
+            ));
+        }
         let scopes = scopes(found.scopes.as_deref());
         if !scopes.contains(&scope) {
             return Err(refuse(Refusal::ScopeMissing));
@@ -282,7 +295,10 @@ async fn guard(auth: Auth, mut request: Request, next: Next) -> Response {
     let Some(&Access::Scope(scope)) = auth.access.get(request.uri().path()) else {
         return next.run(request).await;
     };
-    match auth.principal(request.headers(), scope).await {
+    match auth
+        .principal(request.headers(), scope, request.uri().path())
+        .await
+    {
         Ok(principal) => {
             request.extensions_mut().insert(principal);
             next.run(request).await
