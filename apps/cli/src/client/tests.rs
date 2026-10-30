@@ -339,6 +339,10 @@ fn another_minor_from_one_point_zero_warns() {
     assert_eq!(warning("1.2.0", "2.2.0"), None);
     assert_eq!(warning("1.2.0", "garbage"), None);
     assert!(warning("1.2.0-rc.1", "1.3.0+build").is_some());
+    for malformed in ["1.3.0-", "1.3.0+", "1.3.0-rc_1", "1.3.0-rc..1", "1.3.0-01"] {
+        assert_eq!(warning("1.2.0", malformed), None, "{malformed}");
+        assert_eq!(warning(malformed, "1.2.0"), None, "{malformed}");
+    }
 }
 
 #[tokio::test]

@@ -17,6 +17,7 @@ ADR 0076 lists the J4 dependencies of `kajiba-cli` that were new to the workspac
   | `prost`       | `kajiba-cli` | encoding a message to re-read it as a dynamic message for `--json`                              |
   | `serde_json`  | `kajiba-cli` | writing the protojson of `--json` (`prost-reflect`'s `serde` feature, 0076)                     |
   | `tempfile`    | `kajiba-cli` | exclusive temporary files and cleanup for atomic credential-file replacement (0089)             |
+  | `kajiba-core` | `kajiba-cli` | shared strict semantic version parsing for request and response headers (0080, 0090)            |
 
 ## Consequences
 

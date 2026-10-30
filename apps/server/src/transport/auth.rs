@@ -13,6 +13,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use kajiba_core::version::semver;
 use kajiba_proto::{
     Access,
     v1::{
@@ -38,18 +39,6 @@ pub fn set_cookie(value: &str, max_age: Duration) -> String {
 pub const CLIENT_VERSION: &str = "kajiba-client-version";
 /// The server version on every `kajiba.v1` response, for the CLI's warning (ADR 0090).
 pub const SERVER_VERSION: &str = "kajiba-server-version";
-
-/// `X.Y.Z`, optionally followed by a `-` pre-release or `+` build suffix.
-fn semver(version: &str) -> Option<(u64, u64, u64)> {
-    let core = version.split(['-', '+']).next()?;
-    let mut parts = core.split('.').map(|part| {
-        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
-            .then(|| part.parse().ok())
-            .flatten()
-    });
-    let version = (parts.next()??, parts.next()??, parts.next()??);
-    parts.next().is_none().then_some(version)
-}
 
 /// ADR 0023's server ↔ CLI row: before 1.0 the same `0.minor`, from 1.0 the same major
 /// (the CLI warns about another minor); patch may differ. A malformed version is refused.

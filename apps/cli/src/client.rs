@@ -1,5 +1,6 @@
 //! The tonic client of the forge's `kajiba.v1` API (0007): token file, forge URL, the
 //! version header on every call (0080, 0090) and errors carrying the gRPC reason (0020).
+use kajiba_core::version::semver;
 use std::{
     ffi::OsString,
     fmt,
@@ -151,19 +152,10 @@ fn server_version(metadata: &MetadataMap) -> Option<String> {
     Some(metadata.get(SERVER_VERSION)?.to_str().ok()?.into())
 }
 
-/// `X.Y.Z`, optionally followed by a `-` pre-release or `+` build suffix.
-fn semver(version: &str) -> Option<(u64, u64)> {
-    let core = version.split(['-', '+']).next()?;
-    let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
-    let version = (parts.next()??, parts.next()??);
-    parts.next()??;
-    parts.next().is_none().then_some(version)
-}
-
 /// ADR 0023's server ↔ CLI row from 1.0: the server accepts another minor of the same
 /// major, and the CLI warns. Before 1.0 the server refuses it (VERSION_INCOMPATIBLE).
 pub fn warning(client: &str, server: &str) -> Option<String> {
-    let ((major, minor), (server_major, server_minor)) = (semver(client)?, semver(server)?);
+    let ((major, minor, _), (server_major, server_minor, _)) = (semver(client)?, semver(server)?);
     (major >= 1 && major == server_major && minor != server_minor)
         .then(|| format!("server version {server} differs from kajiba {client}"))
 }

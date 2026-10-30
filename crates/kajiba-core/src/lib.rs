@@ -6,6 +6,7 @@ pub mod local;
 pub mod log;
 pub mod names;
 pub mod state;
+pub mod version;
 
 /// SHA-256 of a secret, the form stored in the database (docs/schema.md).
 pub fn sha256(secret: &[u8]) -> [u8; 32] {

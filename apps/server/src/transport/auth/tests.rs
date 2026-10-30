@@ -449,6 +449,11 @@ fn version_rule_before_and_from_one_zero() {
         ("0.4.2", "0.4.x", false),
         ("0.4.2", "0..2", false),
         ("0.4.2", "0.+4.2", false),
+        ("0.4.2", "0.4.2-", false),
+        ("0.4.2", "0.4.2+", false),
+        ("0.4.2", "0.4.2-rc_1", false),
+        ("0.4.2", "0.4.2-rc..1", false),
+        ("0.4.2", "0.4.2-01", false),
     ] {
         assert_eq!(compatible(server, client), expected, "{server} vs {client}");
     }
