@@ -4,7 +4,7 @@ use kajiba_proto::v1::{GetViewerRequest, auth_service_client::AuthServiceClient}
 use std::{
     fs,
     io::{self, BufRead, Write},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    os::unix::fs::DirBuilderExt,
     path::Path,
 };
 
@@ -68,23 +68,16 @@ fn save(path: &Path, content: &str) -> Result<(), Error> {
             .create(dir)
             .map_err(failed)?;
     }
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    let temporary = path.with_file_name(name);
-    match fs::remove_file(&temporary) {
-        Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(failed(err)),
-        _ => {}
-    }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(failed)?;
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(dir).map_err(failed)?;
     writeln!(file, "{content}")
-        .and_then(|()| file.sync_all())
-        .and_then(|()| fs::rename(&temporary, path))
-        .map_err(failed)
+        .and_then(|()| file.as_file().sync_all())
+        .map_err(failed)?;
+    file.persist(path).map_err(|err| failed(err.error))?;
+    Ok(())
 }
 
 /// Terminal echo off on stdin until dropped.

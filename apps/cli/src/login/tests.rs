@@ -25,6 +25,52 @@ fn mode(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
+#[test]
+fn overlapping_saves_preserve_whole_files_and_unrelated_temporary_files() {
+    let dir = TempDir::new();
+    let path = dir.0.join("token");
+    let unrelated = dir.0.join("token.tmp");
+    fs::write(&unrelated, "unrelated file").unwrap();
+    let contents: Vec<_> = (0..8).map(|i| i.to_string().repeat(32 * 1024)).collect();
+    let start = std::sync::Barrier::new(contents.len());
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = contents
+            .iter()
+            .map(|content| {
+                scope.spawn(|| {
+                    start.wait();
+                    save(&path, content).unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    });
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(
+        contents
+            .iter()
+            .any(|content| saved == format!("{content}\n"))
+    );
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(fs::read_to_string(&unrelated).unwrap(), "unrelated file");
+    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 2);
+}
+
+#[test]
+fn a_failed_save_cleans_up_only_its_temporary_file() {
+    let dir = TempDir::new();
+    let path = dir.0.join("token");
+    fs::create_dir(&path).unwrap();
+    let unrelated = dir.0.join("token.tmp");
+    fs::write(&unrelated, "unrelated file").unwrap();
+    assert!(save(&path, TOKEN).is_err());
+    assert!(path.is_dir());
+    assert_eq!(fs::read_to_string(&unrelated).unwrap(), "unrelated file");
+    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 2);
+}
+
 #[tokio::test]
 async fn saves_a_checked_token_and_the_url_mode_0600() {
     let fake = Fake::default();

@@ -16,6 +16,7 @@ ADR 0076 lists the J4 dependencies of `kajiba-cli` that were new to the workspac
   | `libc`        | `kajiba-cli` | turning terminal echo off while `kajiba login` reads a token (0089)                             |
   | `prost`       | `kajiba-cli` | encoding a message to re-read it as a dynamic message for `--json`                              |
   | `serde_json`  | `kajiba-cli` | writing the protojson of `--json` (`prost-reflect`'s `serde` feature, 0076)                     |
+  | `tempfile`    | `kajiba-cli` | exclusive temporary files and cleanup for atomic credential-file replacement (0089)             |
 
 ## Consequences
 
