@@ -41,7 +41,13 @@ const LIST: &str = "/kajiba.v1.RepoService/ListRepos";
 async fn created_token_is_shown_once_stored_hashed_and_authenticates() {
     let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
     let service = Tokens(fixture.repos.0.clone());
-    let mut app = router(fixture.repos.0.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        fixture.repos.0.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let created = service
         .create_token(from(
             1,
@@ -222,7 +228,13 @@ async fn only_a_session_manages_tokens() {
         .await
         .unwrap()
     };
-    let mut app = router(fixture.repos.0.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        fixture.repos.0.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     for path in ["CreateToken", "ListTokens", "RevokeToken"] {
         let path = format!("/kajiba.v1.TokenService/{path}");
         let status = call(
@@ -258,7 +270,13 @@ async fn only_a_session_manages_tokens() {
 async fn revocation_refuses_the_token_and_spares_declared_ones() {
     let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
     let service = Tokens(fixture.repos.0.clone());
-    let mut app = router(fixture.repos.0.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        fixture.repos.0.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let created = service
         .create_token(from(1, true, create("laptop", &[Scope::RepoRead])))
         .await

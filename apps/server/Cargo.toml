@@ -24,6 +24,7 @@ sqlx.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 tonic-types.workspace = true
+tonic-web.workspace = true
 tonic-reflection.workspace = true
 tracing.workspace = true
 zlib-rs.workspace = true

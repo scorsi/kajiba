@@ -835,20 +835,25 @@ async fn browsing_responses_keep_their_permit_until_the_body_is_delivered() {
     let mut body = vec![0];
     body.extend((message.len() as u32).to_be_bytes());
     body.extend(message);
-    let response = super::super::router(fixture.repos.0.clone(), false, Default::default())
-        .unwrap()
-        .call(
-            axum::http::Request::post("/kajiba.v1.RepoService/GetBlob")
-                .header("content-type", "application/grpc")
-                .header(
-                    "authorization",
-                    format!("Bearer {}", crate::transport::auth::tests::READ),
-                )
-                .body(axum::body::Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = super::super::router(
+        fixture.repos.0.clone(),
+        false,
+        Default::default(),
+        "https://example.org",
+    )
+    .unwrap()
+    .call(
+        axum::http::Request::post("/kajiba.v1.RepoService/GetBlob")
+            .header("content-type", "application/grpc")
+            .header(
+                "authorization",
+                format!("Bearer {}", crate::transport::auth::tests::READ),
+            )
+            .body(axum::body::Body::from(body))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     assert_eq!(response.status(), 200);
     // Built but unread: the permit is still taken (ADR 0050).
     let budget = &fixture.repos.0.public_reads;
@@ -1072,7 +1077,13 @@ async fn every_method_requires_a_credential_with_repo_read() {
     fixture
         .fill("alice/demo", &[("README.md", "hello\n")], &[])
         .await;
-    let mut app = super::super::router(fixture.repos.0.clone(), false, Default::default()).unwrap();
+    let mut app = super::super::router(
+        fixture.repos.0.clone(),
+        false,
+        Default::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let repo = || "alice/demo".to_owned();
     let main = || "main".to_owned();
     let calls: [(&str, Vec<u8>); 6] = [

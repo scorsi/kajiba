@@ -5,11 +5,16 @@ use tokio::{sync::Semaphore, time::timeout};
 use tonic::codegen::Service;
 
 async fn get(fixture: &Fixture, path: &str) -> (u16, String) {
-    let response = super::super::router(fixture.repos.0.clone(), false, Default::default())
-        .unwrap()
-        .call(http::Request::get(path).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let response = super::super::router(
+        fixture.repos.0.clone(),
+        false,
+        Default::default(),
+        "https://example.org",
+    )
+    .unwrap()
+    .call(http::Request::get(path).body(Body::empty()).unwrap())
+    .await
+    .unwrap();
     let status = response.status().as_u16();
     let body = axum::body::to_bytes(response.into_body(), 1 << 20)
         .await
@@ -134,7 +139,13 @@ async fn raw_blob_size_limit_and_permit_follow_the_allocation() {
             &[],
         )
         .await;
-    let mut app = super::super::router(fixture.repos.0.clone(), false, Default::default()).unwrap();
+    let mut app = super::super::router(
+        fixture.repos.0.clone(),
+        false,
+        Default::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let response = app
         .call(
             http::Request::get("/raw/alice/demo/main/above-limit")

@@ -114,7 +114,13 @@ async fn repository_requests_are_size_bounded_before_decoding() {
     use kajiba_proto::v1::{GetRepoRequest, get_repo_request};
 
     let fixture = repos::tests::Fixture::new(&auth::tests::tokens()).await;
-    let mut app = router(fixture.repos.0.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        fixture.repos.0.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let authorization = format!("Bearer {}", auth::tests::READ);
     let mut call = async |method: &str, frame: Vec<u8>| {
         let response = app
@@ -170,7 +176,13 @@ async fn repository_requests_are_size_bounded_before_decoding() {
 #[tokio::test]
 async fn readiness_waits_for_startup_and_checks_database_and_directories() {
     let state = State::new();
-    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        state.health.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     assert!(!state.health.state_dir.join("db/kajiba.sqlite").exists());
     assert_eq!(get(&mut app, "/healthz").await, StatusCode::OK);
     assert_eq!(
@@ -210,7 +222,13 @@ async fn readiness_tracks_sshd_and_git_link_and_skips_disabled_ssh() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     state.health.ssh_probe = Some(address);
-    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        state.health.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let connections = Arc::new(AtomicUsize::new(0));
     let start = |listener: TcpListener| {
         let connections = connections.clone();
@@ -243,7 +261,8 @@ async fn readiness_tracks_sshd_and_git_link_and_skips_disabled_ssh() {
 
     let mut disconnected = state.health.clone();
     disconnected.git_side = Arc::default();
-    let mut unavailable = router(disconnected, false, Arc::default()).unwrap();
+    let mut unavailable =
+        router(disconnected, false, Arc::default(), "https://example.org").unwrap();
     assert_eq!(
         get(&mut unavailable, "/readyz").await,
         StatusCode::SERVICE_UNAVAILABLE
@@ -264,7 +283,13 @@ async fn readiness_tracks_sshd_and_git_link_and_skips_disabled_ssh() {
     // sshd back, on a fresh port: rebinding the old one races other tests' ephemeral ports.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     state.health.ssh_probe = Some(listener.local_addr().unwrap());
-    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        state.health.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let sshd = start(listener);
     assert_eq!(
         get(&mut app, "/readyz").await,
@@ -278,7 +303,13 @@ async fn readiness_tracks_sshd_and_git_link_and_skips_disabled_ssh() {
 
     // The live listener records any unwanted connection when the subsystem is disabled.
     state.health.ssh_probe = None;
-    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        state.health.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     assert_eq!(get(&mut app, "/readyz").await, StatusCode::OK);
     assert_eq!(serving_status(&mut app).await, ServingStatus::Serving);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -296,7 +327,13 @@ async fn ssh_readiness_accepts_a_slow_banner_after_cache_expiry() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     state.health.ssh_probe = Some(listener.local_addr().unwrap());
     *state.health.ssh_status.lock().await = Some((Instant::now() - SSH_PROBE_TTL, true));
-    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        state.health.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let peer = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -326,7 +363,13 @@ async fn ssh_readiness_refuses_wrong_truncated_and_stalled_banners() {
         state.start().await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         state.health.ssh_probe = Some(listener.local_addr().unwrap());
-        let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+        let mut app = router(
+            state.health.clone(),
+            false,
+            Arc::default(),
+            "https://example.org",
+        )
+        .unwrap();
         let peer = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             if let Some(banner) = banner {
@@ -443,7 +486,13 @@ async fn reflection_is_disabled_by_default() {
             .unwrap();
     assert!(!config.http.reflection);
     let state = State::new();
-    let mut app = router(state.health.clone(), config.http.reflection, Arc::default()).unwrap();
+    let mut app = router(
+        state.health.clone(),
+        config.http.reflection,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     for version in ["v1", "v1alpha"] {
         let response = grpc(
             &mut app,
@@ -461,7 +510,13 @@ async fn reflection_is_disabled_by_default() {
 #[tokio::test]
 async fn reflection_lists_health_and_returns_its_descriptor_when_enabled() {
     let state = State::new();
-    let mut app = router(state.health.clone(), true, Arc::default()).unwrap();
+    let mut app = router(
+        state.health.clone(),
+        true,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     // Only v1 is served; the deprecated v1alpha is not.
     let response = grpc(
         &mut app,
@@ -532,7 +587,13 @@ async fn http_and_grpc_share_one_ephemeral_port() {
     state.start().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = router(state.health.clone(), false, Arc::default()).unwrap();
+    let app = router(
+        state.health.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let (_stop, stopped) = watch::channel(false);
     let server = tokio::spawn(serve_tcp(listener, app, PUBLIC, stopped));
     let http = tokio::task::spawn_blocking(move || {
@@ -873,7 +934,13 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
 #[tokio::test]
 async fn tonic_transport_errors_receive_error_info() {
     let state = State::new();
-    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        state.health.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let response = grpc(
         &mut app,
         "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
@@ -895,7 +962,13 @@ async fn tonic_transport_errors_receive_error_info() {
 async fn requests_update_metrics_after_body_completion_including_grpc_trailers() {
     let state = State::new();
     let registry = Arc::new(Registry::default());
-    let mut app = router(state.health.clone(), false, registry.clone()).unwrap();
+    let mut app = router(
+        state.health.clone(),
+        false,
+        registry.clone(),
+        "https://example.org",
+    )
+    .unwrap();
     let before = registry.exposition("test", [0; 4], [0; 4]);
     assert!(before.contains("kajiba_requests_total{kind=\"other\",code=\"2xx\"} 0\n"));
     let response = app

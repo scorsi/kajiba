@@ -110,7 +110,13 @@ mod ceremonies {
             .repos
             .0
             .set_passkeys(Passkeys::new(ORIGIN, Duration::from_secs(3600)).unwrap());
-        let app = router(fixture.repos.0.clone(), false, Default::default()).unwrap();
+        let app = router(
+            fixture.repos.0.clone(),
+            false,
+            Default::default(),
+            "https://example.org",
+        )
+        .unwrap();
         (fixture, app)
     }
 

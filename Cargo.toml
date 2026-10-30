@@ -39,6 +39,8 @@ zlib-rs = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "process", "io-util"] }
 tonic = "0.12"
 tonic-types = "0.12"
+# grpc-web on the kajiba.v1 routes (0005, 0076).
+tonic-web = { version = "0.12", default-features = false }
 tonic-build = "0.12"
 tonic-reflection = { version = "0.12", default-features = false, features = ["server"] }
 

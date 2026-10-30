@@ -53,7 +53,12 @@ async fn runtime(fixture: &Fixture, id: u8, user: &str, token: &str, expires_at:
     .unwrap();
 }
 
-async fn session(fixture: &Fixture, user: &str, value: &str, expires_at: i64) {
+pub(in crate::transport) async fn session(
+    fixture: &Fixture,
+    user: &str,
+    value: &str,
+    expires_at: i64,
+) {
     sqlx::query(
         "INSERT INTO session (user_id, token_hash, created_at, expires_at, last_seen_at)
          SELECT id, ?, 0, ?, 0 FROM user WHERE name = ?",
@@ -150,7 +155,13 @@ fn expiry_is_reached_at_its_instant_and_revocation_or_disabled_user_invalidates(
 async fn credential_matrix() {
     let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
     let registry = Arc::new(Registry::default());
-    let mut app = router(fixture.repos.0.clone(), false, registry.clone()).unwrap();
+    let mut app = router(
+        fixture.repos.0.clone(),
+        false,
+        registry.clone(),
+        "https://example.org",
+    )
+    .unwrap();
     let later = now() + 3_600_000;
     runtime(&fixture, 1, "alice", RUNTIME, later).await;
     runtime(&fixture, 2, "alice", "kjb_revoked", later).await;
@@ -269,7 +280,13 @@ async fn credential_matrix() {
 #[tokio::test]
 async fn usage_is_written_at_most_once_a_minute() {
     let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
-    let mut app = router(fixture.repos.0.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        fixture.repos.0.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let auth = format!("Bearer {READ}");
     assert_eq!(last_used(&fixture, READ).await, None);
     let before = now();
@@ -316,7 +333,13 @@ async fn anonymous_routes_stay_anonymous() {
     fixture
         .fill("alice/demo", &[("README.md", "hello\n")], &[])
         .await;
-    let mut app = router(fixture.repos.0.clone(), true, Arc::default()).unwrap();
+    let mut app = router(
+        fixture.repos.0.clone(),
+        true,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     for path in [
         "/healthz",
         "/alice/demo.git/info/refs?service=git-upload-pack",
@@ -348,7 +371,13 @@ fn credentials_never_reach_the_logs() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
             session(&fixture, "alice", SESSION, now() + 60_000).await;
-            let mut app = router(fixture.repos.0.clone(), false, Arc::default()).unwrap();
+            let mut app = router(
+                fixture.repos.0.clone(),
+                false,
+                Arc::default(),
+                "https://example.org",
+            )
+            .unwrap();
             for header in [
                 ("authorization", format!("Bearer {READ}")),
                 ("authorization", format!("Bearer {PAST}")),
@@ -422,7 +451,13 @@ fn version_rule_before_and_from_one_zero() {
 #[tokio::test]
 async fn client_version_is_checked_before_credentials() {
     let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
-    let mut app = router(fixture.repos.0.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        fixture.repos.0.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let server = env!("CARGO_PKG_VERSION");
     let (major, minor, patch) = semver(server).unwrap();
     let bearer = format!("Bearer {READ}");
@@ -504,7 +539,13 @@ fn session_cookie_attributes() {
 async fn sessions_are_created_resolved_and_logged_out_one_at_a_time() {
     use crate::db::sessions;
     let fixture = Fixture::new(DEMO).await;
-    let mut app = router(fixture.repos.0.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        fixture.repos.0.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let user = alice(&fixture).await;
     let ttl = Duration::from_secs(3600);
     let (first, second) = {
@@ -551,7 +592,13 @@ async fn sessions_are_created_resolved_and_logged_out_one_at_a_time() {
 async fn session_expiry_is_absolute_and_expired_rows_are_purged() {
     use crate::db::sessions;
     let fixture = Fixture::new(DEMO).await;
-    let mut app = router(fixture.repos.0.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        fixture.repos.0.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let user = alice(&fixture).await;
     let ttl = Duration::from_secs(60);
     let started = now();

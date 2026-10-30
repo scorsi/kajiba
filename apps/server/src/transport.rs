@@ -139,8 +139,13 @@ impl HealthService for Health {
     }
 }
 
-fn router(health: Health, reflection: bool, registry: Arc<Registry>) -> Result<Router, String> {
-    let mut app = Routes::new(HealthServiceServer::new(health.clone()))
+fn router(
+    health: Health,
+    reflection: bool,
+    registry: Arc<Registry>,
+    public_url: &str,
+) -> Result<Router, String> {
+    let api = Routes::new(HealthServiceServer::new(health.clone()))
         .add_service(AuthServiceServer::new(auth::Sessions(health.clone())))
         .add_service(TokenServiceServer::new(tokens::Tokens(health.clone())))
         .add_service(
@@ -155,6 +160,17 @@ fn router(health: Health, reflection: bool, registry: Arc<Registry>) -> Result<R
         .route_layer(middleware::from_fn_with_state(
             auth::Auth::new(health.clone(), registry.clone())?,
             auth::authenticate,
+        ));
+    // grpc-web is translated before the auth layer, so it sees one protocol (0005).
+    let mut app = api
+        .clone()
+        .route_layer(middleware::from_fn_with_state(
+            web::grpc_web(api),
+            web::translate,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            web::origin(public_url)?,
+            web::cors,
         ))
         // Ceremony routes: JSON, outside the gRPC auth layer, protected by their challenge (0020).
         .merge(webauthn::routes(health.clone()))
@@ -332,7 +348,13 @@ pub async fn serve(
     )?;
     let gate = gate::Gate::new(&admin, registry.clone());
     let git_side = health.git_side.clone();
-    let app = router(health, config.reflection, registry.clone()).map_err(std::io::Error::other)?;
+    let app = router(
+        health,
+        config.reflection,
+        registry.clone(),
+        &config.public_url,
+    )
+    .map_err(std::io::Error::other)?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let metrics = metrics::bind(metrics_config.listen)
         .await?
@@ -415,6 +437,7 @@ pub mod raw;
 pub mod repos;
 mod stream;
 mod tokens;
+mod web;
 pub mod webauthn;
 
 #[cfg(test)]

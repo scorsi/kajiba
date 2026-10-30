@@ -1,7 +1,7 @@
 use axum::{
     body::{Body, Bytes},
     extract::Request,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
     middleware::Next,
     response::Response,
 };
@@ -46,6 +46,7 @@ pub async fn request(
         started,
         finished: false,
         grpc,
+        web: false,
     };
     let mut response = next.run(request).instrument(body.span.clone()).await;
     let details = {
@@ -53,6 +54,12 @@ pub async fn request(
         grpc_details(response.headers_mut(), &body.request_id)
     };
     body.grpc |= details.is_some();
+    body.web = response.headers().get(CONTENT_TYPE).is_some_and(|value| {
+        matches!(
+            value.as_bytes(),
+            b"application/grpc-web" | b"application/grpc-web+proto"
+        )
+    });
     let (status, error) = details.unwrap_or_else(|| (response.status().as_u16().to_string(), None));
     let (parts, inner) = response.into_parts();
     body.http_status = Some(parts.status.as_u16());
@@ -116,6 +123,44 @@ fn grpc_details(headers: &mut HeaderMap, request_id: &str) -> Option<(String, Op
     Some((code_name(status.code()).into(), error))
 }
 
+/// A grpc-web trailers frame: flag `0x80`, a big-endian length, then HTTP/1-style
+/// `name:value\r\n` lines. Message frames have flag 0 or 1.
+fn web_trailers(frame: &Bytes) -> Option<HeaderMap> {
+    let (&flag, rest) = frame.split_first()?;
+    let (length, block) = rest.split_at_checked(4)?;
+    let length = u32::from_be_bytes(length.try_into().ok()?) as usize;
+    if flag != 0x80 || block.len() != length {
+        return None;
+    }
+    let mut trailers = HeaderMap::new();
+    for line in block.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            continue;
+        }
+        let colon = line.iter().position(|&b| b == b':')?;
+        trailers.append(
+            HeaderName::from_bytes(&line[..colon]).ok()?,
+            HeaderValue::from_bytes(line[colon + 1..].trim_ascii()).ok()?,
+        );
+    }
+    Some(trailers)
+}
+
+fn web_trailers_frame(trailers: &HeaderMap) -> Bytes {
+    let mut block = Vec::new();
+    for (name, value) in trailers {
+        block.extend_from_slice(name.as_str().as_bytes());
+        block.push(b':');
+        block.extend_from_slice(value.as_bytes());
+        block.extend_from_slice(b"\r\n");
+    }
+    let mut frame = vec![0x80];
+    frame.extend_from_slice(&(block.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&block);
+    frame.into()
+}
+
 fn code_name(code: tonic::Code) -> &'static str {
     use tonic::Code;
     match code {
@@ -155,6 +200,10 @@ struct RequestBody {
     started: Instant,
     finished: bool,
     grpc: bool,
+    // Binary grpc-web: the trailers travel as the body's last data frame.
+    // shortcut: grpc-web-text (base64) trailers are not decoded, so its calls log no
+    // `grpc_code`; decode them if a client ever uses it (connect-web sends binary).
+    web: bool,
 }
 
 impl RequestBody {
@@ -203,7 +252,18 @@ impl HttpBody for RequestBody {
         let frame = Pin::new(&mut self.inner).poll_frame(cx);
         match frame {
             Poll::Ready(Some(Ok(mut frame))) => {
-                if let Some((status, error)) = frame
+                let web = self
+                    .web
+                    .then(|| frame.data_ref().and_then(web_trailers))
+                    .flatten();
+                if let Some(mut trailers) = web {
+                    if let Some((status, error)) = grpc_details(&mut trailers, &self.request_id) {
+                        frame = Frame::data(web_trailers_frame(&trailers));
+                        self.grpc = true;
+                        self.status = status;
+                        self.error = error;
+                    }
+                } else if let Some((status, error)) = frame
                     .trailers_mut()
                     .and_then(|trailers| grpc_details(trailers, &self.request_id))
                 {
@@ -315,6 +375,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grpc_web_trailer_frames_are_enriched_and_recorded() {
+        let mut trailers = HeaderMap::new();
+        Status::permission_denied("no")
+            .add_header(&mut trailers)
+            .unwrap();
+        let frame = web_trailers_frame(&trailers);
+        assert_eq!(web_trailers(&frame), Some(trailers));
+        // A message frame or a truncated block is not trailers.
+        assert_eq!(web_trailers(&Bytes::from_static(b"\0\0\0\0\0")), None);
+        assert_eq!(web_trailers(&frame.slice(..frame.len() - 1)), None);
+        let mut body = RequestBody {
+            observe: Box::new(|_, _| {}),
+            inner: Body::from(frame),
+            span: tracing::info_span!("request", request_id = "test-id"),
+            request_id: "test-id".into(),
+            method: "other",
+            status: "200".into(),
+            http_status: Some(200),
+            error: None,
+            started: Instant::now(),
+            finished: false,
+            grpc: false,
+            web: true,
+        };
+        let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+            .await
+            .unwrap()
+            .unwrap();
+        let trailers = web_trailers(frame.data_ref().unwrap()).unwrap();
+        let status = Status::from_header_map(&trailers).unwrap();
+        assert_eq!(status.code(), Code::PermissionDenied);
+        let details = tonic_types::pb::Status::decode(status.details()).unwrap();
+        let info = tonic_types::pb::ErrorInfo::decode(details.details[0].value.as_slice()).unwrap();
+        assert_eq!(info.metadata["request_id"], "test-id");
+        assert_eq!(body.status, "PERMISSION_DENIED");
+        assert!(body.grpc && body.finished);
+    }
+
+    #[tokio::test]
     async fn streamed_error_trailers_receive_details_without_buffering() {
         let mut trailers = HeaderMap::new();
         Status::unavailable("startup")
@@ -333,6 +432,7 @@ mod tests {
             started: Instant::now(),
             finished: false,
             grpc: true,
+            web: false,
         };
         assert!(!body.finished);
         let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))

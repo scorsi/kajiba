@@ -99,7 +99,13 @@ async fn gzip_budget_is_global_and_released_on_cancellation_and_error() {
         .unwrap();
     health.started(database, crate::db::Writer::new(writer.into()));
     let repos = super::Repos(health.clone());
-    let mut app = super::super::router(health.clone(), false, Default::default()).unwrap();
+    let mut app = super::super::router(
+        health.clone(),
+        false,
+        Default::default(),
+        "https://example.org",
+    )
+    .unwrap();
 
     struct Pending(Option<tokio::sync::oneshot::Sender<()>>);
     impl http_body::Body for Pending {
@@ -178,7 +184,13 @@ async fn gzip_budget_is_global_and_released_on_cancellation_and_error() {
 
 /// Serves the whole public router on an ephemeral loopback port.
 async fn serve(fixture: &Fixture) -> String {
-    let app = super::super::router(fixture.repos.0.clone(), false, Default::default()).unwrap();
+    let app = super::super::router(
+        fixture.repos.0.clone(),
+        false,
+        Default::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -186,15 +198,20 @@ async fn serve(fixture: &Fixture) -> String {
 }
 
 async fn call(fixture: &Fixture, path: &str) -> http::Response<axum::body::Body> {
-    super::super::router(fixture.repos.0.clone(), false, Default::default())
-        .unwrap()
-        .call(
-            http::Request::get(path)
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap()
+    super::super::router(
+        fixture.repos.0.clone(),
+        false,
+        Default::default(),
+        "https://example.org",
+    )
+    .unwrap()
+    .call(
+        http::Request::get(path)
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap()
 }
 
 async fn text(response: http::Response<axum::body::Body>) -> String {
@@ -286,7 +303,13 @@ async fn clones_through_the_router_by_name_and_redirect_v0_and_v2() {
 async fn matched_ui_routes_observe_request_counters_and_durations() {
     let fixture = Fixture::new(DEMO).await;
     let registry = std::sync::Arc::new(crate::metrics::Registry::default());
-    let mut app = super::super::router(fixture.repos.0.clone(), false, registry.clone()).unwrap();
+    let mut app = super::super::router(
+        fixture.repos.0.clone(),
+        false,
+        registry.clone(),
+        "https://example.org",
+    )
+    .unwrap();
     for (path, status) in [
         ("/alice/old", http::StatusCode::MOVED_PERMANENTLY),
         ("/alice/demo", http::StatusCode::NOT_FOUND),
@@ -358,16 +381,21 @@ async fn unknown_archived_and_ui_routes_answer_plain_statuses() {
         assert_eq!(response.status(), http::StatusCode::FORBIDDEN, "{path}");
         assert!(text(response).await.contains("archived"));
     }
-    let response = super::super::router(fixture.repos.0.clone(), false, Default::default())
-        .unwrap()
-        .call(
-            http::Request::post("/alice/demo.git/git-upload-pack")
-                .header("content-type", "application/x-git-upload-pack-request")
-                .body(axum::body::Body::from("0000"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = super::super::router(
+        fixture.repos.0.clone(),
+        false,
+        Default::default(),
+        "https://example.org",
+    )
+    .unwrap()
+    .call(
+        http::Request::post("/alice/demo.git/git-upload-pack")
+            .header("content-type", "application/x-git-upload-pack-request")
+            .body(axum::body::Body::from("0000"))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
     assert_eq!(
         call(&fixture, "/alice/old").await.status(),
@@ -390,16 +418,21 @@ async fn public_read_budget_is_shared_and_refuses_before_reading_requests() {
         assert_eq!(response.headers()["retry-after"], "1");
     }
 
-    let response = super::super::router(fixture.repos.0.clone(), false, Default::default())
-        .unwrap()
-        .call(
-            http::Request::post("/alice/demo.git/git-upload-pack")
-                .header("content-type", "application/x-git-upload-pack-request")
-                .body(axum::body::Body::new(Unread))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = super::super::router(
+        fixture.repos.0.clone(),
+        false,
+        Default::default(),
+        "https://example.org",
+    )
+    .unwrap()
+    .call(
+        http::Request::post("/alice/demo.git/git-upload-pack")
+            .header("content-type", "application/x-git-upload-pack-request")
+            .body(axum::body::Body::new(Unread))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(response.headers()["retry-after"], "1");
     drop(permits);
@@ -437,11 +470,16 @@ async fn post(
     for encoding in encodings {
         request = request.header("content-encoding", *encoding);
     }
-    super::super::router(fixture.repos.0.clone(), false, Default::default())
-        .unwrap()
-        .call(request.body(body).unwrap())
-        .await
-        .unwrap()
+    super::super::router(
+        fixture.repos.0.clone(),
+        false,
+        Default::default(),
+        "https://example.org",
+    )
+    .unwrap()
+    .call(request.body(body).unwrap())
+    .await
+    .unwrap()
 }
 
 #[tokio::test]

@@ -131,7 +131,13 @@ async fn readiness_tracks_local_listener_and_admin_command_reaches_the_service()
         .store(false, Ordering::Release);
     let dir = SocketDir::new();
     let local = bind(&dir.socket(), state.health.local_serving.clone()).unwrap();
-    let mut app = super::super::router(state.health.clone(), false, Arc::default()).unwrap();
+    let mut app = super::super::router(
+        state.health.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     assert_eq!(
         super::super::tests::get(&mut app, "/readyz").await,
         axum::http::StatusCode::SERVICE_UNAVAILABLE

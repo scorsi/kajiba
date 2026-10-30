@@ -92,7 +92,13 @@ async fn readiness_tracks_missing_mismatched_connected_and_restarted_daemon() {
     state.start().await;
     let link = state.health.git_side.clone();
     link.client.lock().unwrap().take();
-    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        state.health.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     let path = state.health.state_dir.join("git-local.sock");
     assert_eq!(
         get(&mut app, "/readyz").await,
@@ -186,7 +192,13 @@ async fn readyz_requires_both_gate_listener_and_version_accepted_link() {
     use axum::http::StatusCode;
     let state = State::new();
     state.start().await;
-    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    let mut app = router(
+        state.health.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
     assert_eq!(get(&mut app, "/readyz").await, StatusCode::OK);
     state.health.git_side.client.lock().unwrap().take();
     assert_eq!(
