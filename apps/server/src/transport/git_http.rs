@@ -247,7 +247,15 @@ async fn ui(
             [(header::LOCATION, format!("/{}/{}", found.owner, found.name))],
         )
             .into_response(),
-        Ok(_) => refused,
+        // A repository or application page of the `--ui-dir` bundle (ADR 0094).
+        Ok(_) => match repos.0.ui_dir.get() {
+            Some(dir) => {
+                super::ui::file(dir, &axum::http::Method::GET, &format!("/{owner}/{name}"))
+                    .await
+                    .unwrap_or(refused)
+            }
+            None => refused,
+        },
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

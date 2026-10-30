@@ -20,6 +20,9 @@ use crate::names::validate_name;
 pub struct ServerConfig {
     #[serde(default = "server_state_dir")]
     pub state_dir: PathBuf,
+    /// Directory of the admin (`local.sock`) and gate (`git.sock`) sockets (ADR 0093).
+    #[serde(default = "server_run_dir")]
+    pub run_dir: PathBuf,
     pub http: HttpConfig,
     #[serde(default)]
     pub git: GitSideConfig,
@@ -51,6 +54,9 @@ pub struct GitSideConfig {
     pub state_dir: PathBuf,
     pub socket: PathBuf,
     pub group_ids: Vec<u32>,
+    /// The git side's system user: the only peer of the gate socket, whose primary group
+    /// owns it (ADR 0095).
+    pub user: String,
 }
 
 impl Default for GitSideConfig {
@@ -59,6 +65,7 @@ impl Default for GitSideConfig {
             state_dir: git_state_dir(),
             socket: "/run/kajiba-git/local.sock".into(),
             group_ids: Vec::new(),
+            user: git_user(),
         }
     }
 }
@@ -70,6 +77,16 @@ pub struct GitConfig {
     pub state_dir: PathBuf,
     #[serde(default = "server_socket")]
     pub server_socket: PathBuf,
+    /// Directory of the `local.sock` and `ssh.sock` sockets (ADR 0093).
+    #[serde(default = "git_run_dir")]
+    pub run_dir: PathBuf,
+    /// The server's system user, a peer of `local.sock` (ADR 0095).
+    #[serde(default = "server_user")]
+    pub server_user: String,
+    /// The git side's own system user: a peer of `local.sock` and the only one of
+    /// `ssh.sock`, as sshd runs `serve-ssh` under it (ADR 0095).
+    #[serde(default = "git_user")]
+    pub user: String,
     pub hooks_path: PathBuf,
     #[serde(default)]
     pub log: LogConfig,
@@ -320,6 +337,18 @@ fn git_state_dir() -> PathBuf {
 }
 fn server_socket() -> PathBuf {
     "/run/kajiba/git.sock".into()
+}
+fn server_run_dir() -> PathBuf {
+    "/run/kajiba".into()
+}
+fn git_run_dir() -> PathBuf {
+    "/run/kajiba-git".into()
+}
+fn server_user() -> String {
+    "kajiba-server".into()
+}
+fn git_user() -> String {
+    "kajiba-git".into()
 }
 fn runner_state_dir() -> PathBuf {
     "/var/lib/kajiba-runner".into()
@@ -720,6 +749,7 @@ impl ServerConfig {
         validate_path(&config.state_dir, "state_dir")?;
         validate_path(&config.dump.dir, "dump.dir")?;
         for (path, field) in [
+            (&config.run_dir, "run_dir"),
             (&config.git.state_dir, "git.state_dir"),
             (&config.git.socket, "git.socket"),
         ] {
@@ -855,6 +885,7 @@ impl GitConfig {
         for (path, field) in [
             (&config.state_dir, "state_dir"),
             (&config.server_socket, "server_socket"),
+            (&config.run_dir, "run_dir"),
             (&config.hooks_path, "hooks_path"),
         ] {
             if !path.is_absolute() {

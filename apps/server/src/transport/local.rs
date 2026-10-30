@@ -18,6 +18,8 @@ use std::{
 };
 use tonic::{Request, Response, Status, service::Routes};
 
+/// The admin socket, in the server's `run_dir` (ADR 0093); the path below is the default.
+pub const SOCKET_NAME: &str = "local.sock";
 pub const SOCKET_PATH: &str = "/run/kajiba/local.sock";
 
 #[derive(Clone)]

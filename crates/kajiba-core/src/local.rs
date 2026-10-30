@@ -209,6 +209,17 @@ pub fn effective_uid() -> u32 {
 
 /// Resolve a fixed service identity without falling back to a broader peer policy.
 pub fn user_id(name: &std::ffi::CStr) -> io::Result<u32> {
+    user_ids(name).map(|(uid, _)| uid)
+}
+
+/// A configured service identity (ADR 0095): its uid and primary gid.
+pub fn named_user(name: &str) -> io::Result<(u32, u32)> {
+    let name = std::ffi::CString::new(name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "user name contains NUL"))?;
+    user_ids(&name)
+}
+
+fn user_ids(name: &std::ffi::CStr) -> io::Result<(u32, u32)> {
     let mut buffer = vec![0_u8; 16 * 1024];
     loop {
         let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
@@ -242,7 +253,8 @@ pub fn user_id(name: &std::ffi::CStr) -> io::Result<u32> {
             ));
         }
         // SAFETY: getpwnam_r succeeded and populated entry.
-        return Ok(unsafe { entry.assume_init().pw_uid });
+        let entry = unsafe { entry.assume_init() };
+        return Ok((entry.pw_uid, entry.pw_gid));
     }
 }
 /// Structured local RPC errors, including correlation outside the public middleware.
@@ -367,6 +379,11 @@ mod tests {
             0
         );
         assert!(group_id(c"kajiba-nonexistent-test-group").is_err());
+        assert_eq!(named_user("root").unwrap(), (0, 0));
+        assert_eq!(
+            named_user("a\0b").unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
         assert_eq!(
             user_id(c"kajiba-nonexistent-test-user").unwrap_err().kind(),
             io::ErrorKind::NotFound

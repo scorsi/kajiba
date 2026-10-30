@@ -7,6 +7,9 @@ fn config(state: &Path, server: &Path) -> GitConfig {
     GitConfig {
         state_dir: state.into(),
         server_socket: server.into(),
+        run_dir: state.into(),
+        server_user: "kajiba-server".into(),
+        user: "kajiba-git".into(),
         hooks_path: state.join("hooks"),
         log: Default::default(),
         metrics: Default::default(),

@@ -12,3 +12,6 @@ result-*
 .DS_Store
 .claude/scheduled_tasks.lock
 .claude/napkin.md
+
+# nix run .#e2e (failed test traces)
+/e2e-results

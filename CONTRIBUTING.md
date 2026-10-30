@@ -34,6 +34,30 @@ checks only run on Linux, by construction (NixOS VMs aren't cross-built from
 Darwin). CI runs the full check on `aarch64-linux`, plus the Playwright `e2e`
 job from J4 (ADR 0015).
 
+### `e2e` job
+
+```sh
+nix run .#e2e                      # whole suite
+nix run .#e2e -- --grep enrollment # Playwright arguments pass through
+```
+
+The app starts `kajiba-git` and `kajiba-server` from the flake's packages as
+the current user, in a temporary directory under `/tmp` (socket directories
+and peer identities set in a generated configuration, ADRs 0093 and 0095),
+with `http.public_url = "http://localhost:<port>"` and `auth.session_ttl =
+"1m"`. The server serves `packages.kajiba-ui` through `--ui-dir` (ADR 0094).
+The Playwright suite of `apps/ui/e2e/` then runs with nixpkgs' Chromium
+(`playwright-driver.browsers`, matching the pinned `@playwright/test`);
+Playwright never downloads a browser. The app exits with the suite's status
+and prints both daemons' last log lines on failure.
+
+- `KAJIBA_E2E_PORT` (default `18080`): the server's port, which must be free.
+- `KAJIBA_E2E_OUTPUT` (default `./e2e-results`): traces of failed tests.
+
+It runs outside the Nix sandbox and is never part of `nix flake check`. The
+CI job runs it on Linux after the flake check; it needs no root, no `/run`
+directory and no VM.
+
 ## Protobuf
 
 `.proto` files live in `proto/`, packages `kajiba.v1`, `kajiba.runner.v1`,

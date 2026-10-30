@@ -5,6 +5,9 @@ use kajiba_proto::hook::v1::{
 };
 use std::{path::Path, time::Duration};
 
+/// The daemon's socket, in its `run_dir` (ADR 0093).
+pub const SOCKET_NAME: &str = "local.sock";
+/// Where `ssh-keys` and `hook`, run by sshd and git without a configuration, reach it.
 pub const SOCKET_PATH: &str = "/run/kajiba-git/local.sock";
 
 /// The user public id and canonical key of an active user's auth key; `None` when the

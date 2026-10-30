@@ -13,7 +13,8 @@ use std::{
 };
 use tonic::{Request, Response, Status, service::Routes};
 
-pub const SOCKET_PATH: &str = "/run/kajiba/git.sock";
+/// The gate socket, in the server's `run_dir` (ADR 0093).
+pub const SOCKET_NAME: &str = "git.sock";
 
 mod policy;
 

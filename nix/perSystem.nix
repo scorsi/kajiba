@@ -61,6 +61,18 @@
         kajiba-ui = pkgs.callPackage ./packages/kajiba-ui.nix { };
       };
 
+      apps.e2e = {
+        type = "app";
+        program = lib.getExe (
+          pkgs.callPackage ./apps/e2e.nix {
+            kajibaServer = config.packages.kajiba-server;
+            kajibaGit = config.packages.kajiba-git;
+            kajibaUi = config.packages.kajiba-ui;
+          }
+        );
+        meta.description = "Playwright e2e suite against both daemons (CI job e2e)";
+      };
+
       devShells.default = pkgs.mkShellNoCC {
         packages = with pkgs; [
           cargo

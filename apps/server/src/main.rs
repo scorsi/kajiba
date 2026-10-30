@@ -25,6 +25,9 @@ enum Command {
         /// Configuration file.
         #[arg(long)]
         config: PathBuf,
+        /// Serve the web application from this built bundle (`packages.kajiba-ui`).
+        #[arg(long)]
+        ui_dir: Option<PathBuf>,
     },
     /// Inspect configuration offline.
     Config {
@@ -33,6 +36,9 @@ enum Command {
     },
     /// Administer the running server over its local socket.
     Admin {
+        /// The server's admin socket: `local.sock` in its `run_dir`.
+        #[arg(long, default_value = transport::local::SOCKET_PATH)]
+        socket: PathBuf,
         #[command(subcommand)]
         command: AdminCommand,
     },
@@ -97,7 +103,7 @@ async fn main() -> ExitCode {
         }
     };
     match command {
-        Command::Serve { config } => {
+        Command::Serve { config, ui_dir } => {
             let config = match load_config(&config, true) {
                 Ok(config) => config,
                 Err(err) => {
@@ -122,6 +128,9 @@ async fn main() -> ExitCode {
                 config.git.state_dir.clone(),
                 config.ssh.probe,
             );
+            if let Some(dir) = ui_dir {
+                health.set_ui_dir(dir);
+            }
             match transport::webauthn::Passkeys::new(
                 &config.http.public_url,
                 config.auth.session_ttl,
@@ -190,7 +199,7 @@ async fn main() -> ExitCode {
             };
             health.started(readers.clone(), writer.clone());
             return match tokio::select! {
-                result = transport::serve(&config.http, &config.metrics, &config.git, health, readers, bus.clone(), admin) => result,
+                result = transport::serve(&config, health, readers, bus.clone(), admin) => result,
                 () = dispatcher.run(&bus, &writer) => unreachable!("dispatcher runs until shutdown"),
                 () = db::sessions::purge_periodically(&writer) => unreachable!("purge runs until shutdown"),
                 () = gate.recover_periodically(&db::events::SystemClock, &writer, &bus, &config.git.state_dir, &store) => unreachable!("recovery runs until shutdown"),
@@ -213,10 +222,9 @@ async fn main() -> ExitCode {
                 }
             };
         }
-        Command::Admin { command } => match command {
+        Command::Admin { socket, command } => match command {
             AdminCommand::Enroll { user } => {
-                return admin_enroll(std::path::Path::new(transport::local::SOCKET_PATH), user)
-                    .await;
+                return admin_enroll(&socket, user).await;
             }
             AdminCommand::Import {
                 repo,
@@ -224,19 +232,12 @@ async fn main() -> ExitCode {
                 source_file,
                 credentials_file,
             } => {
-                return admin_import(
-                    std::path::Path::new(transport::local::SOCKET_PATH),
-                    repo,
-                    source,
-                    source_file,
-                    credentials_file,
-                )
-                .await;
+                return admin_import(&socket, repo, source, source_file, credentials_file).await;
             }
             AdminCommand::Repo {
                 command: RepoCommand::List,
             } => {
-                return admin_repo_list(std::path::Path::new(transport::local::SOCKET_PATH)).await;
+                return admin_repo_list(&socket).await;
             }
         },
     }
@@ -345,7 +346,24 @@ mod tests {
                 .unwrap()
                 .command,
             Command::Serve {
-                config: PathBuf::from("server.toml")
+                config: PathBuf::from("server.toml"),
+                ui_dir: None,
+            }
+        );
+        assert_eq!(
+            Args::try_parse_from([
+                "kajiba-server",
+                "serve",
+                "--config",
+                "server.toml",
+                "--ui-dir",
+                "/srv/ui"
+            ])
+            .unwrap()
+            .command,
+            Command::Serve {
+                config: PathBuf::from("server.toml"),
+                ui_dir: Some("/srv/ui".into()),
             }
         );
     }
@@ -428,9 +446,30 @@ mod tests {
                 Args::try_parse_from(["kajiba-server", "admin"].into_iter().chain(args))
                     .unwrap()
                     .command,
-                Command::Admin { command }
+                Command::Admin {
+                    socket: "/run/kajiba/local.sock".into(),
+                    command
+                }
             );
         }
+        assert_eq!(
+            Args::try_parse_from([
+                "kajiba-server",
+                "admin",
+                "--socket",
+                "/tmp/a.sock",
+                "repo",
+                "list"
+            ])
+            .unwrap()
+            .command,
+            Command::Admin {
+                socket: "/tmp/a.sock".into(),
+                command: AdminCommand::Repo {
+                    command: RepoCommand::List
+                }
+            }
+        );
         // Exactly one of the source argument and --source-file.
         for args in [
             vec!["import", "alice/demo"],

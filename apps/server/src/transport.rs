@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response as HttpResponse},
     routing::get,
 };
-use kajiba_core::config::{HttpConfig, MetricsConfig};
+use kajiba_core::config::ServerConfig;
 use kajiba_proto::v1::{
     CheckRequest, CheckResponse,
     auth_service_server::AuthServiceServer,
@@ -35,6 +35,7 @@ pub struct Health {
     database: Arc<OnceLock<SqlitePool>>,
     writer: Arc<OnceLock<crate::db::Writer>>,
     passkeys: Arc<OnceLock<webauthn::Passkeys>>,
+    ui_dir: Arc<OnceLock<PathBuf>>,
     state_dir: PathBuf,
     git_state_dir: PathBuf,
     local_serving: Arc<local::Serving>,
@@ -54,6 +55,7 @@ impl Health {
             database: Arc::default(),
             writer: Arc::default(),
             passkeys: Arc::default(),
+            ui_dir: Arc::default(),
             git_state_dir,
             state_dir,
             local_serving: Arc::default(),
@@ -74,6 +76,11 @@ impl Health {
     }
 
     /// The WebAuthn relying party; the ceremony routes answer 503 until it is set.
+    /// `serve --ui-dir`: page and asset requests no route answers read this bundle.
+    pub fn set_ui_dir(&self, dir: PathBuf) {
+        let _ = self.ui_dir.set(dir);
+    }
+
     pub fn set_passkeys(&self, passkeys: webauthn::Passkeys) {
         assert!(self.passkeys.set(passkeys).is_ok(), "passkeys set twice");
     }
@@ -162,6 +169,7 @@ fn router(
             auth::authenticate,
         ));
     // grpc-web is translated before the auth layer, so it sees one protocol (0005).
+    let ui_dir = health.ui_dir.clone();
     let mut app = api
         .clone()
         .route_layer(middleware::from_fn_with_state(
@@ -204,7 +212,14 @@ fn router(
     }
     Ok(app
         .fallback(|request: HttpRequest| async move {
-            refusal(&request, StatusCode::NOT_FOUND, tonic::Code::Unimplemented)
+            let page = match (ui_dir.get(), request.headers().contains_key(CONTENT_TYPE)) {
+                // A body-less GET or HEAD: a page or asset, never an API call.
+                (Some(dir), false) => ui::file(dir, request.method(), request.uri().path()).await,
+                _ => None,
+            };
+            page.unwrap_or_else(|| {
+                refusal(&request, StatusCode::NOT_FOUND, tonic::Code::Unimplemented)
+            })
         })
         .layer(middleware::from_fn_with_state(
             registry,
@@ -327,24 +342,25 @@ async fn serve_tcp(
 }
 
 pub async fn serve(
-    config: &HttpConfig,
-    metrics_config: &MetricsConfig,
-    git_config: &kajiba_core::config::GitSideConfig,
+    server: &ServerConfig,
     health: Health,
     readers: SqlitePool,
     bus: Arc<EventBus>,
     admin: local::Admin,
 ) -> std::io::Result<()> {
+    let (config, metrics_config, git_config, run_dir) =
+        (&server.http, &server.metrics, &server.git, &server.run_dir);
     let registry = Arc::new(Registry::default());
     let local = local::bind(
-        std::path::Path::new(local::SOCKET_PATH),
+        &run_dir.join(local::SOCKET_NAME),
         health.local_serving.clone(),
     )?;
+    let (git_uid, git_gid) = kajiba_core::local::named_user(&git_config.user)?;
     let gate_local = gate::bind(
-        std::path::Path::new(gate::SOCKET_PATH),
+        &run_dir.join(gate::SOCKET_NAME),
         health.gate_serving.clone(),
-        kajiba_core::local::user_id(c"kajiba-git")?,
-        kajiba_core::local::group_id(c"kajiba-git")?,
+        git_uid,
+        git_gid,
     )?;
     let gate = gate::Gate::new(&admin, registry.clone());
     let git_side = health.git_side.clone();
@@ -437,6 +453,7 @@ pub mod raw;
 pub mod repos;
 mod stream;
 mod tokens;
+mod ui;
 mod web;
 pub mod webauthn;
 

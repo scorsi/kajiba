@@ -1,26 +1,26 @@
 use kajiba_core::{
     config::GitConfig,
-    local::{Local, user_id},
+    local::{Local, named_user},
 };
 use std::{ffi::OsStr, io, path::Path};
 use tokio::signal::unix::{SignalKind, signal};
 use tonic::service::Routes;
 
-use crate::local::SOCKET_PATH;
+use crate::local::SOCKET_NAME;
 
 pub async fn serve(config: GitConfig) -> Result<(), String> {
     tracing::info!(event = "start", version = env!("CARGO_PKG_VERSION"));
     let mut terminate = signal(SignalKind::terminate()).map_err(|err| err.to_string())?;
     let mut interrupt = signal(SignalKind::interrupt()).map_err(|err| err.to_string())?;
-    let peers = [c"kajiba-server", c"kajiba-git"]
+    let peers = [&config.server_user, &config.user]
         .into_iter()
-        .map(user_id)
+        .map(|name| named_user(name).map(|(uid, _)| uid))
         .collect::<io::Result<Vec<_>>>()
         .map_err(|err| err.to_string())?;
     let notify = std::env::var_os("NOTIFY_SOCKET");
     run(
         &config,
-        Path::new(SOCKET_PATH),
+        &config.run_dir.join(SOCKET_NAME),
         peers[1],
         peers,
         notify.as_deref(),

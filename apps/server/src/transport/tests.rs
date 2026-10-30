@@ -1111,3 +1111,48 @@ fn proto_and_configuration_scope_names_agree() {
     }
     assert_eq!(seen.len(), 4);
 }
+
+#[tokio::test]
+async fn ui_dir_serves_pages_and_assets_behind_every_route() {
+    let fixture = repos::tests::Fixture::new(&auth::tests::tokens()).await;
+    let dir = std::env::temp_dir().join(format!("kajiba-ui-router-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("_app")).unwrap();
+    std::fs::write(dir.join("index.html"), "page").unwrap();
+    std::fs::write(dir.join("_app/start.js"), "code").unwrap();
+    let mut without = router(
+        fixture.repos.0.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
+    assert_eq!(get(&mut without, "/-/login").await, StatusCode::NOT_FOUND);
+
+    fixture.repos.0.set_ui_dir(dir.clone());
+    let mut app = router(
+        fixture.repos.0.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
+    // Two segments reach the repository page route, others the fallback.
+    for path in [
+        "/",
+        "/-/login",
+        "/-/runs/01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "/alice/demo",
+        "/_app/start.js",
+    ] {
+        assert_eq!(get(&mut app, path).await, StatusCode::OK, "{path}");
+    }
+    assert_eq!(
+        get(&mut app, "/_app/missing.js").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(get(&mut app, "/healthz").await, StatusCode::OK);
+    // gRPC calls to unknown methods still get their gRPC refusal, never the page.
+    let response = grpc(&mut app, "/kajiba.v1.Nope/Call", CheckRequest {}).await;
+    assert_eq!(response.headers()["grpc-status"], "12");
+    std::fs::remove_dir_all(dir).unwrap();
+}
