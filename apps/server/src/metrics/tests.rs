@@ -14,6 +14,11 @@ fn golden_exposition() {
     registry.auth_refused("SCOPE_MISSING");
     // Never a label outside the closed set.
     registry.auth_refused("secret");
+    registry.set_runners_connected(2);
+    registry.runner_refused("secret");
+    registry.runner_refused("version");
+    registry.runner_refused("version");
+    registry.runner_refused("CREDENTIAL_INVALID");
     assert_eq!(
         registry.exposition("test", [2, 1, 3, 3], [1, 0, 0, 0]),
         include_str!("../../tests/fixtures/metrics.prom")
@@ -68,7 +73,13 @@ fn labels_are_closed_and_version_is_escaped() {
     registry.observe(Kind::Other, "secret", Duration::ZERO);
     let output = registry.exposition("a\\b\"c\nd", [0; 4], [0; 4]);
     assert!(output.contains("version=\"a\\\\b\\\"c\\nd\""));
-    assert!(!output.contains("secret"));
+    // `secret` is only a runner refusal reason, never an echoed label value.
+    assert!(
+        output
+            .lines()
+            .filter(|line| line.contains("secret"))
+            .eq(["kajiba_runner_refusals_total{reason=\"secret\"} 0"])
+    );
     for family in ["kajiba_handler_lag_events", "kajiba_handler_failures_total"] {
         let samples: Vec<_> = output
             .lines()
@@ -91,7 +102,7 @@ fn labels_are_closed_and_version_is_escaped() {
             "kajiba_pushes_total{result=\"refused\"} 0",
         ]
     );
-    assert_eq!(samples, 200);
+    assert_eq!(samples, 206);
     assert!(samples <= 500);
 }
 

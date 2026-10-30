@@ -200,6 +200,16 @@ kajiba_pushes_total{result="refused"} 2
 kajiba_auth_refusals_total{reason="CREDENTIAL_INVALID"} 0
 kajiba_auth_refusals_total{reason="CREDENTIAL_EXPIRED"} 1
 kajiba_auth_refusals_total{reason="SCOPE_MISSING"} 2
+# HELP kajiba_runners_connected Runners with a live connection.
+# TYPE kajiba_runners_connected gauge
+kajiba_runners_connected 2
+# HELP kajiba_runner_refusals_total Runner connections refused at admission.
+# TYPE kajiba_runner_refusals_total counter
+kajiba_runner_refusals_total{reason="unknown"} 0
+kajiba_runner_refusals_total{reason="disabled"} 0
+kajiba_runner_refusals_total{reason="secret"} 1
+kajiba_runner_refusals_total{reason="version"} 2
+kajiba_runner_refusals_total{reason="capabilities"} 0
 # HELP kajiba_handler_lag_events Journal events after the handler checkpoint.
 # TYPE kajiba_handler_lag_events gauge
 kajiba_handler_lag_events{handler="ci"} 2

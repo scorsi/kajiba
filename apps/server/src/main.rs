@@ -198,6 +198,10 @@ async fn main() -> ExitCode {
                 bus: bus.clone(),
                 state_dir: config.git.state_dir.clone(),
             };
+            health.set_runners(transport::runners::Declared {
+                runners: config.runners.clone(),
+                bus: bus.clone(),
+            });
             health.started(readers.clone(), writer.clone());
             return match tokio::select! {
                 result = transport::serve(&config, health, readers, bus.clone(), admin) => result,

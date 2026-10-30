@@ -73,6 +73,10 @@ fn known(path: &str) -> Option<&'static str> {
         "/kajiba.v1.TokenService/CreateToken" => "/kajiba.v1.TokenService/CreateToken",
         "/kajiba.v1.TokenService/ListTokens" => "/kajiba.v1.TokenService/ListTokens",
         "/kajiba.v1.TokenService/RevokeToken" => "/kajiba.v1.TokenService/RevokeToken",
+        "/kajiba.runner.v1.RunnerService/Connect" => "/kajiba.runner.v1.RunnerService/Connect",
+        "/kajiba.runner.v1.RunnerService/FetchRunBundle" => {
+            "/kajiba.runner.v1.RunnerService/FetchRunBundle"
+        }
         "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo" => {
             "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
         }

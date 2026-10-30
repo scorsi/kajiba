@@ -201,7 +201,7 @@ pub struct CredentialConfig {
 }
 
 /// A declared runner (0026): its secret and the capabilities it may announce.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerDeclaration {
     pub token_file: PathBuf,

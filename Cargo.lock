@@ -2259,6 +2259,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-reflection",
  "tonic-types",

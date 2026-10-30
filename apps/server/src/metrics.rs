@@ -14,6 +14,8 @@ use std::{
 
 pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 pub const HANDLERS: [&str; 4] = ["ci", "mirror", "notifier", "webhook"];
+/// `runner-refused` reasons (0108).
+const RUNNER_REASONS: [&str; 5] = ["unknown", "disabled", "secret", "version", "capabilities"];
 const KINDS: [&str; 6] = ["grpc", "grpc_web", "git_http", "raw", "ui", "other"];
 const CODES: [&str; 22] = [
     "OK",
@@ -107,6 +109,8 @@ pub struct Registry {
     durations: [Histogram; 6],
     pushes: [Counter; 2],
     auth_refusals: [Counter; 3],
+    runners_connected: AtomicU64,
+    runner_refusals: [Counter; 5],
 }
 impl Registry {
     /// Count one refusal of the auth interceptor; `reason` is one of `AUTH_REASONS`.
@@ -114,6 +118,17 @@ impl Registry {
         if let Some(index) = AUTH_REASONS.iter().position(|known| *known == reason) {
             self.auth_refusals[index].add(1);
         }
+    }
+
+    /// Count one `runner-refused`; `reason` is one of `RUNNER_REASONS`.
+    pub fn runner_refused(&self, reason: &str) {
+        if let Some(index) = RUNNER_REASONS.iter().position(|known| *known == reason) {
+            self.runner_refusals[index].add(1);
+        }
+    }
+
+    pub fn set_runners_connected(&self, count: u64) {
+        self.runners_connected.store(count, Relaxed);
     }
 
     /// Count admission decisions once per push, regardless of its number of refs.
@@ -186,6 +201,22 @@ impl Registry {
             writeln!(
                 out,
                 "kajiba_auth_refusals_total{{reason=\"{reason}\"}} {}",
+                count.get()
+            )
+            .unwrap();
+        }
+        out.push_str("# HELP kajiba_runners_connected Runners with a live connection.\n# TYPE kajiba_runners_connected gauge\n");
+        writeln!(
+            out,
+            "kajiba_runners_connected {}",
+            self.runners_connected.load(Relaxed)
+        )
+        .unwrap();
+        out.push_str("# HELP kajiba_runner_refusals_total Runner connections refused at admission.\n# TYPE kajiba_runner_refusals_total counter\n");
+        for (reason, count) in RUNNER_REASONS.iter().zip(&self.runner_refusals) {
+            writeln!(
+                out,
+                "kajiba_runner_refusals_total{{reason=\"{reason}\"}} {}",
                 count.get()
             )
             .unwrap();

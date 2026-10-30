@@ -11,6 +11,7 @@ use axum::{
     routing::get,
 };
 use kajiba_core::config::ServerConfig;
+use kajiba_proto::runner::v1::runner_service_server::RunnerServiceServer;
 use kajiba_proto::v1::{
     CheckRequest, CheckResponse,
     auth_service_server::AuthServiceServer,
@@ -36,6 +37,7 @@ pub struct Health {
     writer: Arc<OnceLock<crate::db::Writer>>,
     passkeys: Arc<OnceLock<webauthn::Passkeys>>,
     ui_dir: Arc<OnceLock<PathBuf>>,
+    runners: Arc<OnceLock<runners::Declared>>,
     state_dir: PathBuf,
     git_state_dir: PathBuf,
     local_serving: Arc<local::Serving>,
@@ -57,6 +59,7 @@ impl Health {
             writer: Arc::default(),
             passkeys: Arc::default(),
             ui_dir: Arc::default(),
+            runners: Arc::default(),
             git_state_dir,
             state_dir,
             local_serving: Arc::default(),
@@ -81,6 +84,11 @@ impl Health {
     /// `serve --ui-dir`: page and asset requests no route answers read this bundle.
     pub fn set_ui_dir(&self, dir: PathBuf) {
         let _ = self.ui_dir.set(dir);
+    }
+
+    /// The declared runners; `Connect` answers `UNAVAILABLE` until they are set.
+    pub fn set_runners(&self, declared: runners::Declared) {
+        assert!(self.runners.set(declared).is_ok(), "runners set twice");
     }
 
     pub fn set_passkeys(&self, passkeys: webauthn::Passkeys) {
@@ -154,6 +162,7 @@ fn router(
     registry: Arc<Registry>,
     public_url: &str,
 ) -> Result<Router, String> {
+    let runner_service = runners::Runners::new(health.clone(), registry.clone());
     let api = Routes::new(HealthServiceServer::new(health.clone()))
         .add_service(AuthServiceServer::new(auth::Sessions(health.clone())))
         .add_service(TokenServiceServer::new(tokens::Tokens(health.clone())))
@@ -212,6 +221,10 @@ fn router(
             .map_err(|err| err.to_string())?;
         app = Routes::from(app).add_service(reflection).into_axum_router();
     }
+    // A runner's stream lasts as long as the runner: no `kajiba.v1` layer, no timeout (0105).
+    app = Routes::from(app)
+        .add_service(RunnerServiceServer::new(runner_service))
+        .into_axum_router();
     Ok(app
         .fallback(|request: HttpRequest| async move { ui_response(ui_dir.get(), request).await })
         .layer(middleware::from_fn_with_state(
@@ -454,6 +467,7 @@ pub(crate) mod git_side;
 pub mod local;
 pub mod raw;
 pub mod repos;
+pub mod runners;
 mod stream;
 mod tokens;
 mod ui;

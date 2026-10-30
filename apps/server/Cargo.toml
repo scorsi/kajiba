@@ -22,6 +22,7 @@ kajiba-proto = { path = "../../crates/kajiba-proto" }
 serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 tonic.workspace = true
 tonic-types.workspace = true
 tonic-web.workspace = true
