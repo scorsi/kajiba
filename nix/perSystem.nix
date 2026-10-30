@@ -211,6 +211,12 @@
           };
         in
         {
+          nixos-cli = import ./tests/cli.nix {
+            inherit pkgs testLib;
+            kajibaServerPackage = config.packages.kajiba-server;
+            kajibaGitPackage = config.packages.kajiba-git;
+            kajibaCliPackage = config.packages.kajiba-cli;
+          };
           nixos-server-lifecycle = import ./tests/server-lifecycle.nix {
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
