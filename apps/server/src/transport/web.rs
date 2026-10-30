@@ -38,8 +38,10 @@ pub(super) async fn translate(
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if !matches!(Kind::from_content_type(content_type), Kind::GrpcWeb) {
-        return next.run(request).await;
+    match Kind::from_content_type(content_type) {
+        Kind::GrpcWeb => {}
+        Kind::Grpc => return next.run(request).await,
+        _ => return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
     }
     match web.call(request.map(tonic::body::boxed)).await {
         Ok(response) => response.map(Body::new),
@@ -61,13 +63,16 @@ pub(super) fn origin(public_url: &str) -> Result<HeaderValue, String> {
 }
 
 /// Only the forge's origin gets `Access-Control-Allow-*` headers; another origin's
-/// preflight is refused (ADR 0020).
+/// requests are refused before dispatch, including simple requests (ADR 0020).
 pub(super) async fn cors(
     State(forge): State<HeaderValue>,
     request: Request,
     next: Next,
 ) -> Response {
     let allowed = request.headers().get(ORIGIN) == Some(&forge);
+    if request.headers().contains_key(ORIGIN) && !allowed {
+        return (StatusCode::FORBIDDEN, [(VARY, "Origin")]).into_response();
+    }
     let mut response = if request.method() == Method::OPTIONS {
         if !allowed {
             return (StatusCode::FORBIDDEN, [(VARY, "Origin")]).into_response();

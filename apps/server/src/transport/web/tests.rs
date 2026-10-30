@@ -151,7 +151,75 @@ async fn only_the_forge_origin_passes_cors() {
             )
             .await
             .unwrap();
+        assert_eq!(call.status(), StatusCode::FORBIDDEN, "{origin}");
         assert!(!call.headers().contains_key("access-control-allow-origin"));
+    }
+}
+
+#[tokio::test]
+async fn rejected_requests_cannot_log_out_a_session() {
+    let (mut app, fixture) = app(Arc::default()).await;
+    let cookie = format!("kajiba_session={SESSION}");
+    for (origin, content_type, expected) in [
+        (None, None, StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        (None, Some("text/plain"), StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        (
+            Some(FORGE),
+            Some("text/plain"),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (
+            Some("https://evil.example.org"),
+            Some("text/plain"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some("https://evil.example.org"),
+            Some("application/grpc"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some("https://evil.example.org"),
+            Some("application/grpc-web+proto"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some("null"),
+            Some("application/grpc"),
+            StatusCode::FORBIDDEN,
+        ),
+        (None, Some("application/grpc"), StatusCode::OK),
+        (
+            Some(FORGE),
+            Some("application/grpc-web+proto"),
+            StatusCode::OK,
+        ),
+    ] {
+        let mut request =
+            http::Request::post("/kajiba.v1.AuthService/Logout").header("cookie", &cookie);
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        let response = app
+            .call(request.body(Body::from(vec![0u8; 5])).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{origin:?} {content_type:?}");
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session")
+            .fetch_one(&mut *fixture.writer.lock().await)
+            .await
+            .unwrap();
+        if expected == StatusCode::OK {
+            assert_eq!(remaining, 0);
+            let later = crate::transport::auth::now().unwrap() + 3_600_000;
+            session(&fixture, "alice", SESSION, later).await;
+        } else {
+            assert!(!response.headers().contains_key("set-cookie"));
+            assert_eq!(remaining, 1);
+        }
     }
 }
 
