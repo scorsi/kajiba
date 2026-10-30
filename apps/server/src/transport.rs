@@ -406,6 +406,7 @@ pub mod raw;
 pub mod repos;
 mod stream;
 mod tokens;
+mod webauthn;
 
 #[cfg(test)]
 mod tests;

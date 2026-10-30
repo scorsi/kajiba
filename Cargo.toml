@@ -30,6 +30,8 @@ serde = { version = "1", features = ["derive"] }
 ssh-key = { version = "0.6.7", default-features = false, features = ["alloc", "ecdsa"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
 toml = "0.8"
+# Passkey relying party (0014, 0076); `conditional-ui` provides discoverable login.
+webauthn-rs = { version = "0.5", default-features = false, features = ["conditional-ui"] }
 # Already transitive (gix): inflates gzipped git upload-pack requests.
 zlib-rs = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "process", "io-util"] }

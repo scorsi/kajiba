@@ -27,4 +27,5 @@ tonic-types.workspace = true
 tonic-reflection.workspace = true
 tracing.workspace = true
 zlib-rs.workspace = true
+webauthn-rs.workspace = true
 

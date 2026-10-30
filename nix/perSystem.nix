@@ -33,7 +33,12 @@
           ];
         };
         strictDeps = true;
-        nativeBuildInputs = [ pkgs.protobuf ];
+        nativeBuildInputs = [
+          pkgs.protobuf
+          pkgs.pkg-config
+        ];
+        # webauthn-rs-core links OpenSSL (0076).
+        buildInputs = [ pkgs.openssl ];
         PROTOC = "${pkgs.protobuf}/bin/protoc";
         cargoExtraArgs = "--locked --workspace";
       };
@@ -68,6 +73,8 @@
           protobuf
           sqlx-cli
           mold
+          pkg-config
+          openssl
           playwright
         ];
         PROTOC = "${pkgs.protobuf}/bin/protoc";
