@@ -3,8 +3,8 @@
  *
  * Mirrors `kajiba.v1.RepoService` with protobuf-es naming (camelCase fields,
  * `{ … }` request objects, numeric enums). Sign-in, enrollment, logout and
- * `getViewer` talk to kajiba-server (the WebAuthn ceremonies of ADRs 0084/0085
- * and the committed connect-web client); every other function is still a MOCK
+ * `getViewer` and token management talk to kajiba-server (the WebAuthn ceremonies
+ * and the committed connect-web client); repository and admin data are still MOCKS
  * reading `./mock.ts`, replaced in J5 keeping the exported names and types.
  *
  * Everything under "ASSUMED" does not exist in the API yet: each item is a
@@ -15,11 +15,15 @@
 
 import { createClient } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
+import { Scope } from "./gen/kajiba/v1/options_pb.ts";
+import {
+  TokenService,
+  TokenSource,
+  type Token as TokenMessage,
+} from "./gen/kajiba/v1/token_pb.ts";
 import { AuthService } from "./gen/kajiba/v1/auth_pb.ts";
 import {
   MOCK_MIRROR_STATUS,
-  MOCK_PASSKEYS,
-  MOCK_TOKENS,
   MOCK_REPOS,
   MOCK_SERVER,
   MOCK_RUNNERS,
@@ -472,22 +476,14 @@ export async function getServerInfo(): Promise<ServerInfo> {
   };
 }
 
-// ── ASSUMED: auth / account service ─────────────────────────────────────
-
-export interface Passkey {
-  id: string;
-  /** Label chosen at enrolment (authenticator name). */
-  name: string;
-  createTime?: Timestamp;
-  lastUsedTime?: Timestamp;
-}
+// ── Account tokens (ADR 0081) ──────────────────────────────────────────
 
 /** Token scopes, as `kajiba.v1.Scope` and the server configuration name them (ADR 0014). */
 export const TOKEN_SCOPES = [
-  { id: "repo:read", label: "Read repositories" },
-  { id: "repo:write", label: "Push to repositories" },
-  { id: "ci:trigger", label: "Trigger CI runs" },
-  { id: "admin", label: "Administer your repositories" },
+  { id: "repo:read", value: Scope.REPO_READ, label: "Read repositories" },
+  { id: "repo:write", value: Scope.REPO_WRITE, label: "Push to repositories" },
+  { id: "ci:trigger", value: Scope.CI_TRIGGER, label: "Trigger CI runs" },
+  { id: "admin", value: Scope.ADMIN, label: "Administer your repositories" },
 ] as const;
 
 export interface Token {
@@ -495,119 +491,68 @@ export interface Token {
   name: string;
   scopes: string[];
   createTime?: Timestamp;
-  /** Unset = never expires (declared tokens only). */
+  /** Unset = never expires. */
   expireTime?: Timestamp;
   lastUsedTime?: Timestamp;
   /** Declared in the server configuration: shown, never revocable here. */
   declared: boolean;
+  revokedTime?: Timestamp;
 }
 
-const ts = (s?: number): Timestamp | undefined =>
-  s === undefined ? undefined : { seconds: BigInt(s), nanos: 0 };
-const nowSec = () => Math.floor(Date.now() / 1000);
+const tokens = createClient(
+  TokenService,
+  createGrpcWebTransport({
+    baseUrl: typeof location === "undefined" ? "/" : location.origin,
+  }),
+);
 
-/** ASSUMED `ListPasskeys`. */
-export async function listPasskeys() {
-  await mockGate();
-  const passkeys: Passkey[] = MOCK_PASSKEYS.map((p) => ({
-    id: p.id,
-    name: p.name,
-    createTime: ts(p.created),
-    lastUsedTime: ts(p.lastUsed),
-  }));
-  return { passkeys };
-}
-
-/**
- * ASSUMED `BeginPasskeyEnrollment` + `navigator.credentials.create` +
- * `FinishPasskeyEnrollment`. `replaceId` re-enrols (replaces) an existing one.
- */
-export async function enrollPasskey(req: {
-  name: string;
-  replaceId?: string;
-}): Promise<Passkey> {
-  await mockGate();
-  await new Promise((r) => setTimeout(r, 900)); // the authenticator prompt
-  const pk = {
-    id: `pk_${Date.now()}`,
-    name: req.name,
-    created: nowSec(),
-    lastUsed: nowSec(),
-  };
-  const i = MOCK_PASSKEYS.findIndex((p) => p.id === req.replaceId);
-  if (i >= 0) MOCK_PASSKEYS.splice(i, 1, pk);
-  else MOCK_PASSKEYS.push(pk);
+function toToken(t: TokenMessage): Token {
   return {
-    id: pk.id,
-    name: pk.name,
-    createTime: ts(pk.created),
-    lastUsedTime: ts(pk.lastUsed),
+    id: t.publicId,
+    name: t.name,
+    scopes: t.scopes.map(
+      (s) => TOKEN_SCOPES.find((scope) => scope.value === s)!.id,
+    ),
+    createTime: t.createdAt,
+    expireTime: t.expiresAt,
+    lastUsedTime: t.lastUsedAt,
+    declared: t.source === TokenSource.CONFIG,
+    revokedTime: t.revokedAt,
   };
 }
 
-/** ASSUMED `ListTokens` — the viewer's runtime tokens and declared tokens. */
+/** `ListTokens` — all pages, including declared and revoked tokens. */
 export async function listTokens() {
-  await mockGate();
-  const tokens: Token[] = MOCK_TOKENS.map((t) => ({
-    id: t.id,
-    name: t.name,
-    scopes: [...t.scopes],
-    createTime: ts(t.created),
-    expireTime: ts(t.expires),
-    lastUsedTime: ts(t.lastUsed),
-    declared: t.declared,
-  }));
-  return { tokens };
+  const listed: Token[] = [];
+  let pageToken = "";
+  do {
+    const page = await tokens.listTokens({ pageToken });
+    listed.push(...page.tokens.map(toToken));
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  return { tokens: listed };
 }
 
-/** ASSUMED `CreateToken` — the secret is returned once, never again. */
+/** `CreateToken` — the server returns the secret once, never again. */
 export async function createToken(req: {
   name: string;
   scopes: string[];
   expireTime: Timestamp;
 }): Promise<{ token: Token; secret: string }> {
-  await mockGate();
-  if (MOCK_TOKENS.some((t) => t.name === req.name)) {
-    throw new ApiError(
-      Code.FailedPrecondition,
-      `a token named '${req.name}' already exists`,
-    );
-  }
-  const t = {
-    id: `tok_${Date.now()}`,
+  const { token, secret } = await tokens.createToken({
     name: req.name,
-    scopes: [...req.scopes],
-    created: nowSec(),
-    expires: Number(req.expireTime.seconds),
-    lastUsed: undefined as number | undefined,
-    declared: false,
-  };
-  MOCK_TOKENS.unshift(t as (typeof MOCK_TOKENS)[number]);
-  const secret = "kjb_" + fakeId(t.id) + fakeId(t.name).slice(0, 12);
-  return {
-    token: {
-      ...t,
-      createTime: ts(t.created),
-      expireTime: ts(t.expires),
-      lastUsedTime: undefined,
-    },
-    secret,
-  };
+    scopes: req.scopes.map(
+      (s) => TOKEN_SCOPES.find((scope) => scope.id === s)!.value,
+    ),
+    expiresAt: req.expireTime,
+  });
+  if (!token) throw new Error("The server returned no token.");
+  return { token: toToken(token), secret };
 }
 
-/** ASSUMED `RevokeToken` — runtime tokens only. */
+/** `RevokeToken` — runtime tokens only; declared tokens are read-only. */
 export async function revokeToken(req: { id: string }) {
-  await mockGate();
-  const i = MOCK_TOKENS.findIndex((t) => t.id === req.id);
-  if (i < 0) throw new ApiError(Code.NotFound, "token not found");
-  if (MOCK_TOKENS[i].declared) {
-    throw new ApiError(
-      Code.FailedPrecondition,
-      "declared tokens are managed in the configuration",
-    );
-  }
-  MOCK_TOKENS.splice(i, 1);
-  return {};
+  return tokens.revokeToken({ publicId: req.id });
 }
 
 // ── WebAuthn ceremonies (plain JSON routes, ADRs 0084 and 0085) ─────────

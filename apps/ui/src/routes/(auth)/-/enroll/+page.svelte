@@ -41,8 +41,7 @@
 		<Icon name="check" size={28} class="text-ok" />
 		<h1 class="mt-2 text-lg font-semibold tracking-tight">Passkey registered</h1>
 		<p class="mt-1 text-[0.8125rem] text-fg-muted">
-			You're signed in as <span class="font-medium text-fg">{done.user}</span>. Enroll a second
-			passkey from your account page as a backup.
+			You're signed in as <span class="font-medium text-fg">{done.user}</span>.
 		</p>
 		<a
 			href="/"

@@ -1,14 +1,9 @@
-<!--
-	Account: passkeys (list, enrol another, re-enrol) and personal access
-	tokens (create, revoke). Declared tokens are listed read-only.
--->
+<!-- Account: personal access tokens; declared tokens are read-only. -->
 <script lang="ts">
 	import {
 		TOKEN_SCOPES,
 		createToken,
-		enrollPasskey,
 		getViewer,
-		listPasskeys,
 		listTokens,
 		revokeToken,
 		type Token
@@ -21,29 +16,9 @@
 	import { resource } from '#lib/resource.svelte.ts';
 
 	const viewer = resource(() => getViewer());
-	const passkeys = resource(() => listPasskeys().then((r) => r.passkeys));
 	const tokens = resource(() => listTokens().then((r) => r.tokens));
 
 	const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
-
-	// ── passkeys ──
-	let enrolling = $state<string | null>(null); // passkey id being replaced, or 'new'
-	let enrolError = $state('');
-	let newKeyName = $state('');
-
-	async function enrol(replaceId?: string, name?: string) {
-		enrolling = replaceId ?? 'new';
-		enrolError = '';
-		try {
-			await enrollPasskey({ name: name || newKeyName || 'Passkey', replaceId });
-			newKeyName = '';
-			passkeys.retry();
-		} catch (e) {
-			enrolError = errorText(e);
-		} finally {
-			enrolling = null;
-		}
-	}
 
 	// ── tokens ──
 	const EXPIRY = [
@@ -99,6 +74,7 @@
 	}
 
 	function expiry(t: Token): { text: string; soon: boolean } {
+		if (t.revokedTime) return { text: 'revoked', soon: false };
 		const d = toDate(t.expireTime);
 		if (!d) return { text: 'never expires', soon: false };
 		const soon = d.getTime() - Date.now() < 7 * 86400000;
@@ -130,72 +106,6 @@
 					: ''}
 			</p>{/if}
 	</header>
-
-	<!-- Passkeys -->
-	<section class="mt-6 rounded-md border border-border bg-surface" aria-labelledby="passkeys-h">
-		<div class="flex flex-wrap items-center gap-3 border-b border-border px-4 py-3">
-			<div class="flex-1">
-				<h2 id="passkeys-h" class="text-[0.8125rem] font-medium">Passkeys</h2>
-				<p class="text-xs text-fg-subtle">The only way to sign in. Keep at least two.</p>
-			</div>
-		</div>
-
-		{#if passkeys.error}
-			<StateView error={passkeys.error} onretry={passkeys.retry} />
-		{:else if !passkeys.data}
-			<div class="p-4"><Skeleton lines={2} /></div>
-		{:else}
-			<ul class="divide-y divide-border">
-				{#each passkeys.data as pk (pk.id)}
-					<li class="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 text-[0.8125rem]">
-						<Icon name="key" size={15} class="text-fg-subtle" />
-						<span class="min-w-0 flex-1">
-							<span class="font-medium">{pk.name}</span>
-							<span class="block text-xs text-fg-subtle">
-								added <span title={absoluteTime(toDate(pk.createTime))}
-									>{relativeTime(toDate(pk.createTime))}</span
-								>
-								· last used {relativeTime(toDate(pk.lastUsedTime))}
-							</span>
-						</span>
-						<button
-							type="button"
-							class={btn}
-							disabled={enrolling !== null}
-							onclick={() => enrol(pk.id, pk.name)}
-							title="Register a new credential on this authenticator; the old one stops working"
-						>
-							{enrolling === pk.id ? 'Waiting for the key…' : 'Re-enrol'}
-						</button>
-					</li>
-				{:else}
-					<li class="px-4 py-4 text-[0.8125rem] text-fg-subtle">No passkey.</li>
-				{/each}
-			</ul>
-			<form
-				class="flex flex-wrap items-end gap-2 border-t border-border px-4 py-3"
-				onsubmit={(e) => {
-					e.preventDefault();
-					enrol();
-				}}
-			>
-				<label class="min-w-48 flex-1 text-xs text-fg-subtle">
-					Name of the new passkey
-					<input
-						bind:value={newKeyName}
-						placeholder="e.g. YubiKey 5 Nano"
-						maxlength="64"
-						class="mt-1 h-8 w-full rounded-sm border border-border bg-bg px-2 text-[0.8125rem] text-fg placeholder:text-fg-subtle"
-					/>
-				</label>
-				<button type="submit" class={btn} disabled={enrolling !== null}>
-					<Icon name="plus" size={14} />
-					{enrolling === 'new' ? 'Waiting for the key…' : 'Enrol another passkey'}
-				</button>
-				{#if enrolError}<p class="basis-full text-xs text-danger" role="alert">{enrolError}</p>{/if}
-			</form>
-		{/if}
-	</section>
 
 	<!-- Tokens -->
 	<section class="mt-6 rounded-md border border-border bg-surface" aria-labelledby="tokens-h">
@@ -333,7 +243,7 @@
 									>Cancel</button
 								>
 							</span>
-						{:else}
+						{:else if !t.revokedTime}
 							<button type="button" class={btn} onclick={() => (confirmRevoke = t.id)}>
 								<Icon name="trash" size={14} /> Revoke
 							</button>

@@ -23,6 +23,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
       ../../apps/ui/vite.config.ts
       ../../apps/ui/tsconfig.json
       ../../apps/ui/src
+      ../../apps/ui/tests
       ../../apps/ui/static
     ];
   };
@@ -50,6 +51,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   checkPhase = ''
     runHook preCheck
     pnpm --filter kajiba-ui check
+    (cd apps/ui && node --test tests/*.test.js)
     runHook postCheck
   '';
 
