@@ -84,17 +84,27 @@ bash nix/checks/proto-generated.sh
 bash nix/checks/proto-generated-test.sh "$PWD/nix/checks/proto-generated.sh"
 ```
 
-`buf-breaking` is informational: in `nix flake check` it always passes with a
-skip message, because the Nix sandbox source has no git history (no `.git`, no
-tags) to compare against. Run the comparison manually from a checkout, against
-the last release tag (replace `<tag>` with that tag):
+`buf-breaking` compares `proto/` with the last release's `proto/`, pinned as
+the `proto-baseline` flake input (ADR 0101). Until the first release there is
+no such input: the check passes and prints `no release baseline`. With each
+release, point the input at this repository at the release tag, then
+`nix flake update proto-baseline`:
 
-```sh
-cd proto
-buf breaking --against '.git#tag=<tag>'
+```nix
+proto-baseline = {
+  url = "git+https://example.org/kajiba.git?ref=refs/tags/v<version>";
+  flake = false;
+};
 ```
 
-Before 1.0.0, breaking changes are allowed in a minor bump (ADRs 0020, 0023).
+The check also exercises itself on temporary copies of `proto/`:
+
+```sh
+bash nix/checks/buf-breaking-test.sh "$PWD/nix/checks/buf-breaking.sh" "$PWD/proto"
+```
+
+Before 1.0.0, breaking changes are allowed in a minor bump and the check only
+reports them; from 1.0.0 on, it fails on them (ADRs 0020, 0023).
 
 ## Versioning
 

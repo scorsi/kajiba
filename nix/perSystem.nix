@@ -193,8 +193,14 @@
           installPhase = "touch $out";
         };
 
-        buf-breaking = pkgs.runCommand "buf-breaking" { } ''
-          echo "buf-breaking: informational; always skipped in the Nix sandbox, whose source has no git history to compare against. Run it manually: see CONTRIBUTING.md."
+        # Against the last release's proto/, the `proto-baseline` flake input once a release
+        # exists (ADR 0101); informational before 1.0 (0020).
+        buf-breaking = pkgs.runCommand "buf-breaking" { nativeBuildInputs = [ pkgs.buf ]; } ''
+          export HOME=$TMPDIR
+          bash ${./checks/buf-breaking-test.sh} ${./checks/buf-breaking.sh} ${../proto}
+          bash ${./checks/buf-breaking.sh} ${../proto} '${
+            lib.optionalString (inputs ? proto-baseline) "${inputs.proto-baseline}/proto"
+          }' ${commonCargoArgs.version}
           touch $out
         '';
       }
