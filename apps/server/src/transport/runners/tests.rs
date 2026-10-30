@@ -717,3 +717,81 @@ async fn logs_and_results_are_acknowledged_and_counted() {
     );
     assert_eq!(std::fs::read(&log).unwrap(), b"line\nline\n");
 }
+
+#[tokio::test]
+async fn a_reconnected_runner_continues_its_attempt_and_resends_unacknowledged_logs() {
+    use kajiba_proto::runner::v1::{Accept, ContinueAttempt, LogChunk};
+    let forge = Forge::start().await;
+    forge.run().await;
+    let (sender, mut stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
+        panic!("expected an assignment");
+    };
+    let attempt = assignment.attempt_id;
+    send(
+        &sender,
+        Message::Accept(Accept {
+            attempt_id: attempt.clone(),
+        }),
+    )
+    .await;
+    let chunk = |sequence: u64| {
+        Message::LogChunk(LogChunk {
+            attempt_id: attempt.clone(),
+            sequence,
+            step_index: 0,
+            data: format!("{sequence}\n").into_bytes(),
+        })
+    };
+    let ack = |sequence| {
+        connect_response::Message::LogAck(LogAck {
+            attempt_id: attempt.clone(),
+            sequence,
+        })
+    };
+    for sequence in [1, 2] {
+        send(&sender, chunk(sequence)).await;
+        assert_eq!(next(&mut stream).await, ack(sequence));
+    }
+    drop((sender, stream));
+    forge
+        .until("SELECT connected FROM runner WHERE name = 'build-1'", 0)
+        .await;
+    let unknown = "7ZZZZZZZZZZZZZZZZZZZZZZZZZ".to_owned();
+    let (sender, mut stream) = forge
+        .connect(
+            Some(SECRET),
+            Hello {
+                in_flight_attempt_ids: vec![attempt.clone(), unknown.clone()],
+                ..hello("build-1")
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        next(&mut stream).await,
+        connect_response::Message::ContinueAttempt(ContinueAttempt {
+            attempt_id: attempt.clone()
+        })
+    );
+    assert_eq!(next(&mut stream).await, ack(2));
+    assert_eq!(
+        next(&mut stream).await,
+        connect_response::Message::CancelAttempt(CancelAttempt {
+            attempt_id: unknown
+        })
+    );
+    // The runner resends from its last acknowledgment it saw, here one chunk early.
+    for (sequence, acknowledged) in [(2, 2), (3, 3)] {
+        send(&sender, chunk(sequence)).await;
+        assert_eq!(next(&mut stream).await, ack(acknowledged));
+    }
+    let log = forge
+        .state
+        .health
+        .state_dir
+        .join(format!("ci/logs/{attempt}.log"));
+    assert_eq!(std::fs::read(&log).unwrap(), b"1\n2\n3\n");
+    let attempts: Vec<(i64, String)> = forge.sql("SELECT number, state FROM job_attempt").await;
+    assert_eq!(attempts, [(1, "running".into())]);
+}

@@ -12,9 +12,9 @@ use crate::{
 };
 use kajiba_core::config::{Capabilities, RunnerDeclaration};
 use kajiba_proto::runner::v1::{
-    Assignment, CancelAttempt, ConnectRequest, ConnectResponse, FetchRunBundleRequest,
-    FetchRunBundleResponse, Hello, LogAck, ResultAck, ResultState, StepState,
-    connect_request::Message, connect_response, runner_service_server::RunnerService,
+    Assignment, CancelAttempt, ConnectRequest, ConnectResponse, ContinueAttempt,
+    FetchRunBundleRequest, FetchRunBundleResponse, Hello, LogAck, ResultAck, ResultState,
+    StepState, connect_request::Message, connect_response, runner_service_server::RunnerService,
 };
 use sqlx::{Connection, SqliteConnection};
 use std::{
@@ -424,9 +424,11 @@ impl Runners {
     }
 
     async fn pass(&self, now: i64) {
-        let Some(writer) = self.health.writer.get() else {
+        let (Some(writer), Some(declared)) = (self.health.writer.get(), self.health.runners.get())
+        else {
             return;
         };
+        let bus = &declared.bus;
         let mut writer = writer.lock().await;
         // Read under the writer lock, like admission, so it agrees with `runner.connected`.
         let offers: Vec<Offer> = self
@@ -439,14 +441,17 @@ impl Runners {
             .collect();
         let result = async {
             let mut tx = writer.begin().await?;
+            // Expiry first: a replayed job is matched in the same pass.
+            let changes = attempts::expire(&mut tx, now).await?;
             let matched = attempts::assign(&mut tx, &offers, now).await?;
-            tx.commit().await?;
-            Ok::<_, sqlx::Error>(matched)
+            bus.commit(tx).await?;
+            Ok::<_, sqlx::Error>((changes, matched))
         }
         .await;
         drop(writer);
         let assigned = match result {
-            Ok((assigned, pending)) => {
+            Ok((changes, (assigned, pending))) => {
+                self.runs_changed(changes);
                 self.registry.set_jobs_pending(pending as u64);
                 assigned
             }
@@ -475,6 +480,42 @@ impl Runners {
                 let _ = outbound.send(Ok(response(message))).await;
             }
         }
+    }
+
+    /// Answer each in-flight attempt of a reconnected runner with continue, followed by
+    /// its log acknowledgment so the runner resends from there, or cancel (0008).
+    async fn resume(&self, id: i64, attempts: &[String]) -> Result<Vec<ConnectResponse>, Status> {
+        if attempts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let writer = self
+            .health
+            .writer
+            .get()
+            .ok_or_else(|| internal("no writer"))?;
+        let mut writer = writer.lock().await;
+        let mut tx = writer.begin().await.map_err(internal)?;
+        let answers = attempts::resume(&mut tx, id, attempts, crate::db::runs::now())
+            .await
+            .map_err(internal)?;
+        tx.commit().await.map_err(internal)?;
+        let mut responses = Vec::new();
+        for (attempt, answer) in attempts.iter().zip(answers) {
+            let Some(sequence) = answer else {
+                responses.push(cancel(attempt));
+                continue;
+            };
+            responses.push(response(connect_response::Message::ContinueAttempt(
+                ContinueAttempt {
+                    attempt_id: attempt.clone(),
+                },
+            )));
+            responses.push(response(connect_response::Message::LogAck(LogAck {
+                attempt_id: attempt.clone(),
+                sequence,
+            })));
+        }
+        Ok(responses)
     }
 
     /// Log `run-state` for each run that changed and count the finished ones.
@@ -622,6 +663,22 @@ fn step_state(state: StepState) -> Option<&'static str> {
     })
 }
 
+/// Send the answers, or the status that ends the stream; false once ended.
+async fn answer(outbound: &Outbound, answers: Result<Vec<ConnectResponse>, Status>) -> bool {
+    match answers {
+        Ok(answers) => {
+            for answer in answers {
+                let _ = outbound.send(Ok(answer)).await;
+            }
+            true
+        }
+        Err(status) => {
+            let _ = outbound.send(Err(status)).await;
+            false
+        }
+    }
+}
+
 type Responses = Pin<Box<dyn Stream<Item = Result<ConnectResponse, Status>> + Send>>;
 
 #[tonic::async_trait]
@@ -653,7 +710,12 @@ impl RunnerService for Runners {
             .await?;
         let runners = self.clone();
         tokio::spawn(async move {
-            loop {
+            let mut open = answer(
+                &outbound,
+                runners.resume(id, &hello.in_flight_attempt_ids).await,
+            )
+            .await;
+            while open {
                 tokio::select! {
                     _ = &mut replaced => {
                         let _ = outbound
@@ -664,13 +726,7 @@ impl RunnerService for Runners {
                     message = inbound.message() => match message {
                         Ok(Some(ConnectRequest { message: Some(message) })) => {
                             let answers = runners.handle((id, &hello.name), &request_id, message).await;
-                            let failed = answers.is_err();
-                            for answer in answers.map_or_else(|status| vec![Err(status)], |answers| answers.into_iter().map(Ok).collect()) {
-                                let _ = outbound.send(answer).await;
-                            }
-                            if failed {
-                                break;
-                            }
+                            open = answer(&outbound, answers).await;
                         }
                         Ok(Some(_)) => {}
                         Ok(None) | Err(_) => break,

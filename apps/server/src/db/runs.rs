@@ -14,14 +14,11 @@ pub fn now() -> i64 {
 /// ADR 0105: jobs are replayable with at most 3 attempts.
 pub const MAX_ATTEMPTS: i64 = 3;
 
-// The transitions are applied by assignment, results and lease expiry (J6 tasks 7 to 9).
 macro_rules! states {
     ($name:ident { $($variant:ident = $text:literal),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        #[cfg_attr(not(test), allow(dead_code))]
         pub enum $name { $($variant),+ }
 
-        #[cfg_attr(not(test), allow(dead_code))]
         impl $name {
             #[cfg(test)]
             pub const ALL: &[Self] = &[$(Self::$variant),+];
@@ -30,7 +27,6 @@ macro_rules! states {
                 match self { $(Self::$variant => $text),+ }
             }
 
-            #[allow(dead_code)]
             pub fn parse(text: &str) -> Option<Self> {
                 match text { $($text => Some(Self::$variant),)+ _ => None }
             }
@@ -70,7 +66,6 @@ states!(AttemptState {
     Lost = "lost",
 });
 
-#[cfg_attr(not(test), allow(dead_code))]
 /// A transition the domain refuses (0008).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Refused {
@@ -78,7 +73,6 @@ pub struct Refused {
     pub to: &'static str,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn check<S: Copy>(
     from: S,
     to: S,
@@ -95,7 +89,6 @@ fn check<S: Copy>(
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 /// `queued → running → succeeded | failed | cancelled`; a queued run may also end
 /// without starting (cancelled, or failed before any attempt).
 pub fn run_transition(from: RunState, to: RunState) -> Result<RunState, Refused> {
@@ -107,7 +100,6 @@ pub fn run_transition(from: RunState, to: RunState) -> Result<RunState, Refused>
     check(from, to, allowed, RunState::as_str)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 /// `pending → assigned → running → succeeded | failed | cancelled | lost`. An unfinished
 /// job may be cancelled; when its attempt is lost before a result, the job goes back to
 /// `pending` for a replay, or ends `failed` (`lease-expired`) or `lost` (not replayable).
@@ -122,7 +114,6 @@ pub fn job_transition(from: JobState, to: JobState) -> Result<JobState, Refused>
     check(from, to, allowed, JobState::as_str)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 /// `running → succeeded | failed | cancelled | lost`: the first terminal state wins.
 pub fn attempt_transition(from: AttemptState, to: AttemptState) -> Result<AttemptState, Refused> {
     let allowed = from == AttemptState::Running && to != AttemptState::Running;

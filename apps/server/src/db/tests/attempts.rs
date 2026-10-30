@@ -1,7 +1,8 @@
 use super::*;
 use crate::db::attempts::{
     BACKEND_UNAVAILABLE, Chunk, Finish, LEASE_MS, NO_CONNECTED_RUNNER, Offer, Outcome,
-    RUNNERS_BUSY, TAGS_UNMATCHED, accept, append_log, assign, finish, heartbeat, step,
+    RUNNERS_BUSY, TAGS_UNMATCHED, accept, append_log, assign, expire, finish, heartbeat, resume,
+    step,
 };
 use crate::db::runs::{AttemptState, NewRun, RunState, create_run};
 
@@ -590,6 +591,204 @@ async fn heartbeats_renew_live_leases_and_steps_are_recorded() {
             Some(20)
         )]
     );
+    readers.close().await;
+    writer.close().await.unwrap();
+}
+
+async fn sweep(writer: &mut SqliteConnection, now: i64) -> Vec<(String, RunState)> {
+    let mut tx = writer.begin().await.unwrap();
+    let changes = expire(&mut tx, now).await.unwrap();
+    tx.commit().await.unwrap();
+    changes
+}
+
+async fn lease(writer: &mut SqliteConnection) -> i64 {
+    count(
+        writer,
+        "SELECT lease_expires_at FROM job_attempt ORDER BY number DESC LIMIT 1",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn expired_leases_are_replayed_up_to_max_attempts_then_fail_the_run() {
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    populate(&mut writer).await;
+    let (run, first) = running(&mut writer).await;
+    let offers = [offer(1, &["nix"], &[], 1)];
+    let mut attempts = vec![first];
+    for number in 1..=3 {
+        let expiry = lease(&mut writer).await;
+        // The lease holds up to its last millisecond.
+        assert!(sweep(&mut writer, expiry).await.is_empty());
+        assert_eq!(
+            count(
+                &mut writer,
+                "SELECT count(*) FROM job_attempt WHERE state = 'lost'"
+            )
+            .await,
+            number - 1
+        );
+        let changes = sweep(&mut writer, expiry + 1).await;
+        assert_eq!(
+            count(
+                &mut writer,
+                "SELECT count(*) FROM job_attempt WHERE state = 'lost'"
+            )
+            .await,
+            number
+        );
+        if number < 3 {
+            assert!(changes.is_empty());
+            assert_eq!(jobs(&mut writer).await, [("pending".into(), None)]);
+            let (assigned, _) = pass(&mut writer, &offers, expiry + 2).await;
+            attempts.push(assigned[0].attempt.clone());
+        } else {
+            assert_eq!(changes, [(run.clone(), RunState::Failed)]);
+        }
+    }
+    assert_eq!(
+        count(&mut writer, "SELECT max(number) FROM job_attempt").await,
+        3
+    );
+    let row: (String, String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT job.state, run.state, run.failure_check, run.failure_reason FROM job JOIN run ON run.id = job.run_id",
+    )
+    .fetch_one(&mut writer)
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        (
+            "failed".into(),
+            "failed".into(),
+            None,
+            Some("lease-expired".into())
+        )
+    );
+    let events: Vec<(String, String, String, serde_json::Value)> = sqlx::query_as::<_, (String, String, String, String)>(
+        "SELECT kind, principal_kind, correlation_id, payload FROM event WHERE kind IN ('attempt-lost', 'attempt-replayed', 'run-finished') ORDER BY id",
+    )
+    .fetch_all(&mut writer)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|(kind, principal, correlation, payload)| {
+        (kind, principal, correlation, serde_json::from_str(&payload).unwrap())
+    })
+    .collect();
+    let job: String = sqlx::query_scalar("SELECT public_id FROM job")
+        .fetch_one(&mut writer)
+        .await
+        .unwrap();
+    let mut expected = Vec::new();
+    for (number, attempt) in attempts.iter().enumerate() {
+        expected.push((
+            "attempt-lost".to_owned(),
+            "system".to_owned(),
+            attempt.clone(),
+            serde_json::json!({ "run": run, "attempt": attempt, "runner": "build-1" }),
+        ));
+        expected.push(if number < 2 {
+            (
+                "attempt-replayed".into(),
+                "system".into(),
+                attempt.clone(),
+                serde_json::json!({ "run": run, "job": job, "attempt": attempt }),
+            )
+        } else {
+            (
+                "run-finished".into(),
+                "system".into(),
+                attempt.clone(),
+                serde_json::json!({ "run": run, "state": "failed", "check": null, "reason": "lease-expired" }),
+            )
+        });
+    }
+    assert_eq!(events, expected);
+    // A late result from a lost attempt is acknowledged and ignored, or cancelled when a
+    // replay superseded it.
+    assert_eq!(
+        result(
+            &mut writer,
+            (1, "build-1"),
+            &attempts[2],
+            AttemptState::Succeeded,
+            ""
+        )
+        .await,
+        Outcome::Done(Vec::new())
+    );
+    assert_eq!(
+        result(
+            &mut writer,
+            (1, "build-1"),
+            &attempts[0],
+            AttemptState::Succeeded,
+            ""
+        )
+        .await,
+        Outcome::Cancel
+    );
+    assert_eq!(ended(&mut writer).await.0, "lost");
+    readers.close().await;
+    writer.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconnection_continues_only_current_leased_attempts() {
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    populate(&mut writer).await;
+    let offers = [offer(1, &["nix"], &[], 3)];
+    // Attempt `stale` is superseded by a replay; `done` has its result; `expired` passed
+    // its lease without a sweep yet; `live` is current and leased, with two log chunks.
+    new_run(&mut writer, 1).await;
+    let (stale, _) = pass(&mut writer, &offers, 2).await;
+    sweep(&mut writer, 2 + LEASE_MS + 1).await;
+    let (replayed, _) = pass(&mut writer, &offers, 100_000).await;
+    new_run(&mut writer, 3).await;
+    let (done, _) = pass(&mut writer, &offers, 100_000).await;
+    result(
+        &mut writer,
+        (1, "build-1"),
+        &done[0].attempt,
+        AttemptState::Succeeded,
+        "",
+    )
+    .await;
+    new_run(&mut writer, 4).await;
+    let (expired, _) = pass(&mut writer, &offers, 50_000).await;
+    for sequence in [1, 2] {
+        log(&mut writer, &dir.0, 1, &replayed[0].attempt, sequence, b"x").await;
+    }
+    let now = 100_000 + 1;
+    let ids: Vec<String> = [
+        &replayed[0].attempt,
+        &stale[0].attempt,
+        &done[0].attempt,
+        &expired[0].attempt,
+        &"7ZZZZZZZZZZZZZZZZZZZZZZZZZ".to_owned(),
+    ]
+    .into_iter()
+    .cloned()
+    .collect();
+    let mut tx = writer.begin().await.unwrap();
+    assert_eq!(
+        resume(&mut tx, 1, &ids, now).await.unwrap(),
+        [Some(2), None, None, None, None]
+    );
+    // Another runner holds none of them.
+    assert_eq!(resume(&mut tx, 2, &ids[..1], now).await.unwrap(), [None]);
+    tx.commit().await.unwrap();
+    let renewed: i64 =
+        sqlx::query_scalar("SELECT lease_expires_at FROM job_attempt WHERE public_id = ?")
+            .bind(&replayed[0].attempt)
+            .fetch_one(&mut writer)
+            .await
+            .unwrap();
+    assert_eq!(renewed, now + LEASE_MS);
     readers.close().await;
     writer.close().await.unwrap();
 }

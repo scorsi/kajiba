@@ -1,5 +1,5 @@
 //! Attempts (0008): matching pending jobs to connected runners, acceptance, heartbeats,
-//! sequenced logs, steps and results.
+//! sequenced logs, steps, results, lease expiry and reconnection.
 
 use super::events::{NewEvent, append_event};
 use super::runs::{AttemptState, JobState, RunState, job_transition, run_transition};
@@ -176,20 +176,29 @@ pub(crate) struct Current {
     pub run: String,
     pub run_state: String,
     pub repo_id: i64,
+    pub number: i64,
+    pub lease_expires_at: i64,
+    pub job: String,
+    pub replayable: bool,
+    pub max_attempts: i64,
+    pub runner: String,
 }
+
+const ATTEMPT: &str = "SELECT a.id, a.public_id, a.state, j.id AS job_id, j.state AS job_state,
+        r.id AS run_id, r.public_id AS run, r.state AS run_state, r.repo_id, a.number,
+        a.lease_expires_at, j.public_id AS job, j.replayable, j.max_attempts, n.name AS runner
+    FROM job_attempt a JOIN job j ON j.id = a.job_id JOIN run r ON r.id = j.run_id
+    JOIN runner n ON n.id = a.runner_id";
 
 pub(crate) async fn current(
     tx: &mut SqliteConnection,
     runner_id: i64,
     attempt: &str,
 ) -> Result<Option<Current>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT a.id, a.public_id, a.state, j.id AS job_id, j.state AS job_state, r.id AS run_id,
-                r.public_id AS run, r.state AS run_state, r.repo_id
-         FROM job_attempt a JOIN job j ON j.id = a.job_id JOIN run r ON r.id = j.run_id
-         WHERE a.public_id = ? AND a.runner_id = ?
-           AND a.number = (SELECT max(number) FROM job_attempt WHERE job_id = a.job_id)",
-    )
+    sqlx::query_as(&format!(
+        "{ATTEMPT} WHERE a.public_id = ? AND a.runner_id = ?
+           AND a.number = (SELECT max(number) FROM job_attempt WHERE job_id = a.job_id)"
+    ))
     .bind(attempt)
     .bind(runner_id)
     .fetch_optional(&mut *tx)
@@ -506,4 +515,117 @@ pub(crate) async fn end(
     )
     .await?;
     Ok(vec![(attempt.run.clone(), to)])
+}
+
+/// Turn running attempts whose lease passed (`lease_expires_at < now`) into `lost`
+/// (`attempt-lost`). A replayable job below `max_attempts` goes back to `pending` for a
+/// new attempt (`attempt-replayed`); otherwise the job and its run fail with reason
+/// `lease-expired`. Returns the runs that changed.
+pub async fn expire(
+    tx: &mut SqliteConnection,
+    now: i64,
+) -> Result<Vec<(String, RunState)>, sqlx::Error> {
+    let lost: Vec<Current> = sqlx::query_as(&format!(
+        "{ATTEMPT} WHERE a.state = 'running' AND a.lease_expires_at < ? ORDER BY a.id"
+    ))
+    .bind(now)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut changes = Vec::new();
+    for attempt in lost {
+        sqlx::query("UPDATE job_attempt SET state = 'lost', finished_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(attempt.id)
+            .execute(&mut *tx)
+            .await?;
+        // The lost attempt's id ties its events together.
+        let correlation_id = attempt.public_id.as_str();
+        journal(
+            tx,
+            "attempt-lost",
+            None,
+            attempt.repo_id,
+            correlation_id,
+            serde_json::json!({ "run": attempt.run, "attempt": attempt.public_id, "runner": attempt.runner }),
+            now,
+        )
+        .await?;
+        tracing::warn!(
+            event = "attempt-lost",
+            run = attempt.run,
+            attempt = attempt.public_id,
+            runner = attempt.runner
+        );
+        let unfinished = matches!(
+            JobState::parse(&attempt.job_state),
+            Some(JobState::Assigned | JobState::Running)
+        );
+        if !unfinished {
+            continue;
+        }
+        if attempt.replayable && attempt.number < attempt.max_attempts {
+            sqlx::query("UPDATE job SET state = 'pending' WHERE id = ?")
+                .bind(attempt.job_id)
+                .execute(&mut *tx)
+                .await?;
+            journal(
+                tx,
+                "attempt-replayed",
+                None,
+                attempt.repo_id,
+                correlation_id,
+                serde_json::json!({ "run": attempt.run, "job": attempt.job, "attempt": attempt.public_id }),
+                now,
+            )
+            .await?;
+            continue;
+        }
+        let state = if attempt.replayable { "failed" } else { "lost" };
+        let reason = Some("lease-expired".to_owned());
+        changes.extend(
+            end(
+                tx,
+                &attempt,
+                (state, None, reason),
+                None,
+                correlation_id,
+                now,
+            )
+            .await?,
+        );
+    }
+    Ok(changes)
+}
+
+/// Answer a reconnected runner's in-flight attempts (0008): `Some(highest acknowledged
+/// log sequence)` to continue an attempt still current, running and leased (its lease is
+/// renewed), `None` to cancel it.
+pub async fn resume(
+    tx: &mut SqliteConnection,
+    runner_id: i64,
+    attempts: &[String],
+    now: i64,
+) -> Result<Vec<Option<u64>>, sqlx::Error> {
+    let mut answers = Vec::new();
+    for attempt in attempts {
+        let live = current(tx, runner_id, attempt)
+            .await?
+            .filter(|attempt| attempt.state == "running" && attempt.lease_expires_at >= now);
+        let Some(live) = live else {
+            answers.push(None);
+            continue;
+        };
+        sqlx::query("UPDATE job_attempt SET lease_expires_at = ? WHERE id = ?")
+            .bind(now + LEASE_MS)
+            .bind(live.id)
+            .execute(&mut *tx)
+            .await?;
+        let highest: i64 =
+            sqlx::query_scalar("SELECT COALESCE(max(seq), 0) FROM log_chunk WHERE attempt_id = ?")
+                .bind(live.id)
+                .fetch_one(&mut *tx)
+                .await?;
+        answers.push(Some(highest as u64));
+    }
+    Ok(answers)
 }
