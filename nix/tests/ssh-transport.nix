@@ -32,7 +32,8 @@ let
     export SSH_ORIGINAL_COMMAND="$2"
     exec ${pkgs.util-linux}/bin/runuser -u kajiba-git -- ${pkgs.runtimeShell} -c '
       echo $$ > ${control}/helper
-      exec ${lib.getExe kajibaGitPackage} serve-ssh --user "$KAJIBA_TEST_USER"
+      # Like sshd, hand over a pipe: callers may point stderr at a file, which epoll refuses.
+      exec ${lib.getExe kajibaGitPackage} serve-ssh --user "$KAJIBA_TEST_USER" 2> >(cat >&2)
     '
   '';
 in
