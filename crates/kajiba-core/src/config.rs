@@ -595,12 +595,6 @@ fn open_server_secret(path: &Path, field: &str, git_group_ids: &[u32]) -> Result
         .metadata()
         .map_err(|err| format!("{field} ({}): {err}", path.display()))?;
     if metadata.permissions().mode() & 0o040 != 0 {
-        if git_group_ids.contains(&metadata.gid()) {
-            return Err(format!(
-                "{field} ({}): must not be readable by a git-side group",
-                path.display()
-            ));
-        }
         match crate::local::group_id(c"kajiba-git") {
             Ok(gid) if metadata.gid() == gid => {
                 return Err(format!(
@@ -612,6 +606,13 @@ fn open_server_secret(path: &Path, field: &str, git_group_ids: &[u32]) -> Result
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(format!("{field}: cannot resolve group kajiba-git: {err}")),
+        }
+        // The fixed group goes first: its message names the group.
+        if git_group_ids.contains(&metadata.gid()) {
+            return Err(format!(
+                "{field} ({}): must not be readable by a git-side group",
+                path.display()
+            ));
         }
     }
     Ok(file)
