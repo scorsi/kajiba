@@ -8,7 +8,7 @@ use tonic::{Code, codegen::Service};
 use tonic_types::StatusExt;
 
 pub(in crate::transport) const READ: &str = "kjb_declared-read";
-const CI: &str = "kjb_declared-ci";
+pub(in crate::transport) const CI: &str = "kjb_declared-ci";
 const PAST: &str = "kjb_declared-past";
 const RUNTIME: &str = "kjb_runtime";
 const SESSION: &str = "session-secret";
@@ -73,19 +73,32 @@ pub(in crate::transport) async fn call(
     path: &str,
     headers: &[(&str, &str)],
 ) -> Option<Status> {
+    send(app, path, headers, Vec::new()).await
+}
+
+/// `call` with an encoded request message.
+pub(in crate::transport) async fn send(
+    app: &mut axum::Router,
+    path: &str,
+    headers: &[(&str, &str)],
+    payload: Vec<u8>,
+) -> Option<Status> {
     let mut request = http::Request::post(path).header("content-type", "application/grpc");
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
+    let mut frame = vec![0];
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&payload);
     let response = app
-        .call(request.body(Body::from(vec![0, 0, 0, 0, 0])).unwrap())
+        .call(request.body(Body::from(frame)).unwrap())
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     Status::from_header_map(response.headers()).filter(|status| status.code() != Code::Ok)
 }
 
-fn reason(status: &Status) -> String {
+pub(in crate::transport) fn reason(status: &Status) -> String {
     status
         .get_error_details()
         .error_info()

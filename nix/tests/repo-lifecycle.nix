@@ -10,6 +10,8 @@
 }:
 let
   inherit (pkgs) lib;
+  # A declared repo:read PAT: RepoService calls authenticate (J4 task 5); a test value, not a secret.
+  pat = "kjb_nixosTestTokenNotASecret0000000000000000000";
   stateDir = "/var/lib/kajiba-server";
   gitStateDir = "/var/lib/kajiba-git";
   repo = {
@@ -31,7 +33,10 @@ pkgs.testers.runNixOSTest {
       http.listen = "0.0.0.0:8080";
       http.publicUrl = "https://forge.example.org";
       http.reflection = true;
-      users.alice = { };
+      users.alice.tokens.test = {
+        sha256 = builtins.hashString "sha256" pat;
+        scopes = [ "repo:read" ];
+      };
       repos.demo = repo;
     };
     specialisation = {
@@ -72,6 +77,7 @@ pkgs.testers.runNixOSTest {
       import json
 
       unit = "kajiba-server.service"
+      grpcurl = "grpcurl -plaintext -H 'authorization: Bearer ${pat}'"
       base = "http://forge:8080"
       bundle = "/var/lib/kajiba-fixtures/demo.bundle"
       toplevel = "${nodes.forge.system.build.toplevel}"
@@ -86,7 +92,7 @@ pkgs.testers.runNixOSTest {
 
 
       def get_repo(**request):
-          out = forge.succeed(f"grpcurl -plaintext -d {shlex.quote(json.dumps(request))} forge:8080 kajiba.v1.RepoService/GetRepo")
+          out = forge.succeed(f"{grpcurl} -d {shlex.quote(json.dumps(request))} forge:8080 kajiba.v1.RepoService/GetRepo")
           repo = json.loads(out)["repo"]
           # Proto3 JSON omits false booleans.
           return repo.get("publicId", repo.get("public_id")), f"{repo['owner']}/{repo['name']}", repo.get("archived", False)
@@ -223,7 +229,7 @@ pkgs.testers.runNixOSTest {
           assert refs(forge, git_dir(public_id), user="kajiba-git") == source
           for name in ["alice/demo2", "alice/demo"]:
               request = json.dumps({"repo": name, "revision": "main", "path": "flake.nix"})
-              out = forge.succeed(f"grpcurl -plaintext -d {shlex.quote(request)} forge:8080 kajiba.v1.RepoService/GetBlob")
+              out = forge.succeed(f"{grpcurl} -d {shlex.quote(request)} forge:8080 kajiba.v1.RepoService/GetBlob")
               content = base64.b64decode(json.loads(out)["content"]).decode()
               assert content == DEMO_FLAKE, f"GetBlob flake.nix of the archived {name}: {content!r}"
           code, _, location = http("/alice/demo")

@@ -99,24 +99,47 @@ impl Repos {
 }
 
 impl Repos {
-    /// The git directory of a repository, active or archived (0026), by public id or by
-    /// `<owner>/<name>`, current or previous.
-    async fn browse_dir(&self, repo: &str) -> Result<PathBuf, Status> {
+    /// The git directory of a repository the caller can read, active or archived (0026),
+    /// by public id or by `<owner>/<name>`, current or previous.
+    async fn browse_dir(&self, user: i64, repo: &str) -> Result<PathBuf, Status> {
         let readers = self.readers()?;
-        let public_id = match repo.split_once('/') {
+        let (id, public_id) = match repo.split_once('/') {
             Some((owner, name)) => crate::db::repos::find(readers, owner, name)
                 .await
                 .map_err(internal)?
-                .map(|found| found.public_id),
-            None => sqlx::query_scalar("SELECT public_id FROM repo WHERE public_id = ?")
+                .map(|found| (found.id, found.public_id)),
+            None => sqlx::query_as("SELECT id, public_id FROM repo WHERE public_id = ?")
                 .bind(repo)
                 .fetch_optional(readers)
                 .await
                 .map_err(internal)?,
         }
         .ok_or_else(not_found)?;
+        readable(readers, user, id).await?;
         Ok(self.0.git_state_dir.join(format!("repos/{public_id}.git")))
     }
+}
+
+/// The authenticated caller the auth layer put in the request (0014).
+fn caller<T>(request: &Request<T>) -> Result<i64, Status> {
+    request
+        .extensions()
+        .get::<super::auth::Principal>()
+        .map(|principal| principal.user_id)
+        .ok_or_else(|| Status::internal("repositories: no authenticated caller"))
+}
+
+/// ADR 0014's role check: without a read role the repository does not exist (0020).
+async fn readable(
+    executor: impl sqlx::SqliteExecutor<'_>,
+    user: i64,
+    repo: i64,
+) -> Result<(), Status> {
+    crate::db::permissions::role(executor, user, repo)
+        .await
+        .map_err(internal)?
+        .map(drop)
+        .ok_or_else(not_found)
 }
 
 /// GetBlob refuses larger files (ADR 0047): a unary response is held in memory whole
@@ -335,6 +358,7 @@ impl RepoService for Repos {
         &self,
         request: Request<GetRepoRequest>,
     ) -> Result<Response<GetRepoResponse>, Status> {
+        let user = caller(&request)?;
         let readers = self.readers()?;
         let id = match request.into_inner().repo {
             Some(get_repo_request::Repo::PublicId(public_id)) => {
@@ -359,6 +383,7 @@ impl RepoService for Repos {
             }
         }
         .ok_or_else(not_found)?;
+        readable(readers, user, id).await?;
         let mut connection = readers.begin().await.map_err(internal)?;
         let row: Row = sqlx::query_as(&format!("{SELECT} WHERE repo.id = ?"))
             .bind(id)
@@ -374,6 +399,7 @@ impl RepoService for Repos {
         request: Request<ListReposRequest>,
     ) -> Result<Response<ListReposResponse>, Status> {
         const METHOD: &str = "v1.ListRepos";
+        let user = caller(&request)?;
         let request = request.into_inner();
         let size = cursor::page_size(request.page_size)?;
         let (key, id) = cursor::decode(METHOD, &request.page_token)?.unwrap_or_default();
@@ -398,9 +424,17 @@ impl RepoService for Repos {
             _ => String::new(),
         };
         let mut repos = Vec::with_capacity(rows.len());
-        // shortcut: three queries per repository (at most 200 per page), batch them if pages get slow.
+        // The cursor follows the rows read, not the rows returned: a repository the caller
+        // cannot read only shortens its page, and pages never skip or repeat a row.
+        // shortcut: four queries per repository (at most 200 per page), batch them if pages get slow.
         for row in rows {
-            repos.push(message(&mut connection, row).await.map_err(internal)?);
+            if crate::db::permissions::role(&mut *connection, user, row.0)
+                .await
+                .map_err(internal)?
+                .is_some()
+            {
+                repos.push(message(&mut connection, row).await.map_err(internal)?);
+            }
         }
         Ok(Response::new(ListReposResponse {
             repos,
@@ -412,11 +446,12 @@ impl RepoService for Repos {
         &self,
         request: Request<GetTreeRequest>,
     ) -> Result<Response<GetTreeResponse>, Status> {
+        let user = caller(&request)?;
         let request = request.into_inner();
         kajiba_gitstore::check_revision(&request.revision)
             .map_err(git_error("REVISION_NOT_FOUND"))?;
         path(&request.path)?;
-        let dir = self.browse_dir(&request.repo).await?;
+        let dir = self.browse_dir(user, &request.repo).await?;
         let permit = self.browse_permit()?;
         let root = self.0.git_state_dir.join("repos");
         blocking(permit, move |cancelled| {
@@ -448,11 +483,12 @@ impl RepoService for Repos {
         &self,
         request: Request<GetBlobRequest>,
     ) -> Result<Response<GetBlobResponse>, Status> {
+        let user = caller(&request)?;
         let request = request.into_inner();
         kajiba_gitstore::check_revision(&request.revision)
             .map_err(git_error("REVISION_NOT_FOUND"))?;
         path(&request.path)?;
-        let dir = self.browse_dir(&request.repo).await?;
+        let dir = self.browse_dir(user, &request.repo).await?;
         let permit = self.browse_permit()?;
         let root = self.0.git_state_dir.join("repos");
         blocking(permit, move |cancelled| {
@@ -471,6 +507,7 @@ impl RepoService for Repos {
         request: Request<ListCommitsRequest>,
     ) -> Result<Response<ListCommitsResponse>, Status> {
         const METHOD: &str = "v1.ListCommits";
+        let user = caller(&request)?;
         let request = request.into_inner();
         kajiba_gitstore::check_revision(&request.revision)
             .map_err(git_error("REVISION_NOT_FOUND"))?;
@@ -498,7 +535,7 @@ impl RepoService for Repos {
                 ),
             ));
         }
-        let dir = self.browse_dir(&request.repo).await?;
+        let dir = self.browse_dir(user, &request.repo).await?;
         let permit = self.browse_permit()?;
         let root = self.0.git_state_dir.join("repos");
         blocking(permit, move |cancelled| {
@@ -533,10 +570,11 @@ impl RepoService for Repos {
         &self,
         request: Request<GetCommitDiffRequest>,
     ) -> Result<Response<GetCommitDiffResponse>, Status> {
+        let user = caller(&request)?;
         let request = request.into_inner();
         kajiba_gitstore::check_revision(&request.revision)
             .map_err(git_error("REVISION_NOT_FOUND"))?;
-        let dir = self.browse_dir(&request.repo).await?;
+        let dir = self.browse_dir(user, &request.repo).await?;
         let permit = self.browse_permit()?;
         let root = self.0.git_state_dir.join("repos");
         blocking(permit, move |cancelled| {

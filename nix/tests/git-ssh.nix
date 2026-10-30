@@ -5,6 +5,10 @@
   kajibaGitPackage,
   testLib,
 }:
+let
+  # A declared repo:read PAT: RepoService calls authenticate (J4 task 5); a test value, not a secret.
+  pat = "kjb_nixosTestTokenNotASecret0000000000000000000";
+in
 pkgs.testers.runNixOSTest {
   name = "kajiba-git-ssh";
 
@@ -26,7 +30,13 @@ pkgs.testers.runNixOSTest {
           sshKeys = [ (builtins.readFile ./fixtures/ssh-writer-key.pub) ];
           signingKeys = [ (builtins.readFile ./fixtures/ssh-signing-key.pub) ];
         };
-        reader.sshKeys = [ (builtins.readFile ./fixtures/ssh-reader-key.pub) ];
+        reader = {
+          sshKeys = [ (builtins.readFile ./fixtures/ssh-reader-key.pub) ];
+          tokens.test = {
+            sha256 = builtins.hashString "sha256" pat;
+            scopes = [ "repo:read" ];
+          };
+        };
         admin = {
           sshKeys = [ (builtins.readFile ./fixtures/ssh-admin-key.pub) ];
           signingKeys = [ (builtins.readFile ./fixtures/ssh-admin-key.pub) ];
@@ -144,7 +154,7 @@ pkgs.testers.runNixOSTest {
 
       def rpc(method, **request):
           data = shlex.quote(json.dumps(request))
-          return json.loads(forge.succeed(f"grpcurl -plaintext -d {data} 127.0.0.1:8080 kajiba.v1.RepoService/{method}"))
+          return json.loads(forge.succeed(f"grpcurl -plaintext -H 'authorization: Bearer ${pat}' -d {data} 127.0.0.1:8080 kajiba.v1.RepoService/{method}"))
 
       forge.wait_for_unit(unit)
       forge.wait_for_unit("kajiba-git.service")

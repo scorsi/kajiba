@@ -186,6 +186,22 @@ impl Drop for Fixture {
     }
 }
 
+/// A request from `alice`, the first declared user (row id 1), as the auth layer passes it.
+fn as_alice<T>(message: T) -> Request<T> {
+    as_user(1, message)
+}
+
+fn as_user<T>(user_id: i64, message: T) -> Request<T> {
+    let mut request = Request::new(message);
+    request
+        .extensions_mut()
+        .insert(crate::transport::auth::Principal {
+            user_id,
+            scopes: vec![kajiba_proto::v1::Scope::RepoRead],
+        });
+    request
+}
+
 pub(in crate::transport) const DEMO: &str = "[repos.demo]\nowner='alice'\ndescription='Demo'\n\
      previous_names=['alice/old']\npermissions.bob='write'\n\
      mirrors=[{remote_url='https://example.org/demo.git', credential='github'}]\n";
@@ -195,14 +211,14 @@ const ZETA: &str = "[repos.zeta]\nowner='bob'\ndescription=''\nci_enabled=true\n
 
 async fn get(repos: &Repos, repo: get_repo_request::Repo) -> Result<Repo, Status> {
     repos
-        .get_repo(Request::new(GetRepoRequest { repo: Some(repo) }))
+        .get_repo(as_alice(GetRepoRequest { repo: Some(repo) }))
         .await
         .map(|response| response.into_inner().repo.unwrap())
 }
 
 async fn list(repos: &Repos, page_size: i32, page_token: String) -> ListReposResponse {
     repos
-        .list_repos(Request::new(ListReposRequest {
+        .list_repos(as_alice(ListReposRequest {
             page_size,
             page_token,
         }))
@@ -287,7 +303,7 @@ async fn get_returns_declared_fields_by_id_name_and_redirect_archived_included()
         );
     }
     let status = repos
-        .get_repo(Request::new(GetRepoRequest { repo: None }))
+        .get_repo(as_alice(GetRepoRequest { repo: None }))
         .await
         .unwrap_err();
     assert_eq!(status.code(), Code::InvalidArgument);
@@ -372,7 +388,7 @@ async fn list_pages_by_name_stay_stable_under_inserts_and_mark_archived() {
     for (size, token) in [(1, "garbage".to_owned()), (-1, String::new())] {
         let status = fixture
             .repos
-            .list_repos(Request::new(ListReposRequest {
+            .list_repos(as_alice(ListReposRequest {
                 page_size: size,
                 page_token: token,
             }))
@@ -383,7 +399,7 @@ async fn list_pages_by_name_stay_stable_under_inserts_and_mark_archived() {
     // A cursor of another list method is foreign.
     let status = fixture
         .repos
-        .list_repos(Request::new(ListReposRequest {
+        .list_repos(as_alice(ListReposRequest {
             page_size: 1,
             page_token: cursor::encode("admin.ListRepos", "alice/demo", 1),
         }))
@@ -429,7 +445,7 @@ async fn tree(
     path: &str,
 ) -> Result<Vec<String>, Status> {
     let response = repos
-        .get_tree(Request::new(GetTreeRequest {
+        .get_tree(as_alice(GetTreeRequest {
             repo: repo.into(),
             revision: revision.into(),
             path: path.into(),
@@ -445,7 +461,7 @@ async fn tree(
 
 async fn blob(repos: &Repos, repo: &str, revision: &str, path: &str) -> Result<Vec<u8>, Status> {
     repos
-        .get_blob(Request::new(GetBlobRequest {
+        .get_blob(as_alice(GetBlobRequest {
             repo: repo.into(),
             revision: revision.into(),
             path: path.into(),
@@ -545,7 +561,7 @@ async fn commits(
     page_token: String,
 ) -> Result<ListCommitsResponse, Status> {
     repos
-        .list_commits(Request::new(ListCommitsRequest {
+        .list_commits(as_alice(ListCommitsRequest {
             repo: "alice/demo".into(),
             revision: revision.into(),
             page_size,
@@ -557,7 +573,7 @@ async fn commits(
 
 async fn diff(repos: &Repos, revision: &str) -> Result<GetCommitDiffResponse, Status> {
     repos
-        .get_commit_diff(Request::new(GetCommitDiffRequest {
+        .get_commit_diff(as_alice(GetCommitDiffRequest {
             repo: "alice/demo".into(),
             revision: revision.into(),
         }))
@@ -1045,4 +1061,177 @@ async fn commit_pages_count_author_fields_and_end_with_an_empty_page() {
     // Nothing skipped or repeated: the continuation is the end of history.
     let rest = commits(repos, "", 3, page.next_page_token).await.unwrap();
     assert!(rest.commits.is_empty() && rest.next_page_token.is_empty());
+}
+
+#[tokio::test]
+async fn every_method_requires_a_credential_with_repo_read() {
+    use crate::transport::auth::tests::{CI, READ, reason, send, tokens};
+    use prost::Message;
+    let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
+    fixture
+        .fill("alice/demo", &[("README.md", "hello\n")], &[])
+        .await;
+    let mut app = super::super::router(fixture.repos.0.clone(), false, Default::default()).unwrap();
+    let repo = || "alice/demo".to_owned();
+    let main = || "main".to_owned();
+    let calls: [(&str, Vec<u8>); 6] = [
+        (
+            "GetRepo",
+            GetRepoRequest {
+                repo: Some(get_repo_request::Repo::Name(repo())),
+            }
+            .encode_to_vec(),
+        ),
+        ("ListRepos", ListReposRequest::default().encode_to_vec()),
+        (
+            "GetTree",
+            GetTreeRequest {
+                repo: repo(),
+                revision: main(),
+                path: String::new(),
+            }
+            .encode_to_vec(),
+        ),
+        (
+            "GetBlob",
+            GetBlobRequest {
+                repo: repo(),
+                revision: main(),
+                path: "README.md".into(),
+            }
+            .encode_to_vec(),
+        ),
+        (
+            "ListCommits",
+            ListCommitsRequest {
+                repo: repo(),
+                revision: main(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        ),
+        (
+            "GetCommitDiff",
+            GetCommitDiffRequest {
+                repo: repo(),
+                revision: main(),
+            }
+            .encode_to_vec(),
+        ),
+    ];
+    let (read, ci) = (format!("Bearer {READ}"), format!("Bearer {CI}"));
+    for (method, message) in calls {
+        let path = format!("/kajiba.v1.RepoService/{method}");
+        let send = async |app: &mut axum::Router, headers: &[(&str, &str)]| {
+            send(app, &path, headers, message.clone()).await
+        };
+        let status = send(&mut app, &[]).await.unwrap();
+        assert_eq!(
+            (status.code(), reason(&status)),
+            (Code::Unauthenticated, "CREDENTIAL_INVALID".into()),
+            "{method}"
+        );
+        let status = send(&mut app, &[("authorization", &ci)]).await.unwrap();
+        assert_eq!(
+            (status.code(), reason(&status)),
+            (Code::PermissionDenied, "SCOPE_MISSING".into()),
+            "{method}"
+        );
+        assert!(
+            send(&mut app, &[("authorization", &read)]).await.is_none(),
+            "{method}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn other_active_users_read_public_and_archived_repositories_disabled_ones_nothing() {
+    let mut fixture = Fixture::new(&format!("{DEMO}{TOOLS}")).await;
+    fixture.apply(DEMO).await;
+    let bob: i64 = sqlx::query_scalar("SELECT id FROM user WHERE name = 'bob'")
+        .fetch_one(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    let alice: i64 = sqlx::query_scalar("SELECT id FROM user WHERE name = 'alice'")
+        .fetch_one(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    // `as_alice` relies on it.
+    assert_eq!(alice, 1);
+    let get = |user, name: &str| {
+        fixture.repos.get_repo(as_user(
+            user,
+            GetRepoRequest {
+                repo: Some(get_repo_request::Repo::Name(name.into())),
+            },
+        ))
+    };
+    // bob is neither owner nor admin of alice's repositories, archived `tools` included.
+    assert!(
+        get(bob, "alice/tools")
+            .await
+            .unwrap()
+            .into_inner()
+            .repo
+            .unwrap()
+            .archived
+    );
+    assert!(get(bob, "alice/demo").await.is_ok());
+    let listed = fixture
+        .repos
+        .list_repos(as_user(bob, ListReposRequest::default()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(names(&listed.repos), ["alice/demo", "alice/tools"]);
+
+    sqlx::query("UPDATE user SET disabled_at = 1 WHERE id = ?")
+        .bind(bob)
+        .execute(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    for name in ["alice/demo", "alice/tools"] {
+        let status = get(bob, name).await.unwrap_err();
+        assert_eq!(
+            (status.code(), reason(&status)),
+            (Code::NotFound, "REPO_NOT_FOUND".into())
+        );
+    }
+    let status = fixture
+        .repos
+        .get_tree(as_user(
+            bob,
+            GetTreeRequest {
+                repo: "alice/demo".into(),
+                revision: "main".into(),
+                path: String::new(),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&status), "REPO_NOT_FOUND");
+    // Pages follow the rows read: unreadable rows shorten pages, the walk still ends.
+    let mut token = String::new();
+    let mut pages = 0;
+    loop {
+        let page = fixture
+            .repos
+            .list_repos(as_user(
+                bob,
+                ListReposRequest {
+                    page_size: 1,
+                    page_token: token,
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(page.repos.is_empty());
+        pages += 1;
+        token = page.next_page_token;
+        if token.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(pages, 2);
 }

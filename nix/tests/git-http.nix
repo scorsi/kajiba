@@ -8,6 +8,10 @@
   kajibaGitPackage,
   testLib,
 }:
+let
+  # A declared repo:read PAT: RepoService calls authenticate (J4 task 5); a test value, not a secret.
+  pat = "kjb_nixosTestTokenNotASecret0000000000000000000";
+in
 pkgs.testers.runNixOSTest {
   name = "kajiba-git-http";
 
@@ -21,7 +25,10 @@ pkgs.testers.runNixOSTest {
       http.listen = "0.0.0.0:8080";
       http.publicUrl = "https://forge.example.org";
       http.reflection = true;
-      users.alice = { };
+      users.alice.tokens.test = {
+        sha256 = builtins.hashString "sha256" pat;
+        scopes = [ "repo:read" ];
+      };
       repos.empty = {
         owner = "alice";
         description = "Import after recovery";
@@ -52,6 +59,7 @@ pkgs.testers.runNixOSTest {
     import json
 
     unit = "kajiba-server.service"
+    grpcurl = "grpcurl -plaintext -H 'authorization: Bearer ${pat}'"
     base = "http://forge:8080"
     bundle = "/var/lib/kajiba-fixtures/demo.bundle"
 
@@ -122,10 +130,10 @@ pkgs.testers.runNixOSTest {
         assert refs(forge, "/root/offline.git") == source
         assert http("/raw/alice/demo/main/flake.nix") == (200, DEMO_FLAKE)
         request = shlex.quote(json.dumps({"repo": "alice/demo", "revision": "main", "path": "flake.nix"}))
-        blob = json.loads(forge.succeed(f"grpcurl -plaintext -d {request} forge:8080 kajiba.v1.RepoService/GetBlob"))
+        blob = json.loads(forge.succeed(f"{grpcurl} -d {request} forge:8080 kajiba.v1.RepoService/GetBlob"))
         assert base64.b64decode(blob["content"]).decode() == DEMO_FLAKE
         request = shlex.quote(json.dumps({"name": "alice/demo"}))
-        repo = json.loads(forge.succeed(f"grpcurl -plaintext -d {request} forge:8080 kajiba.v1.RepoService/GetRepo"))["repo"]
+        repo = json.loads(forge.succeed(f"{grpcurl} -d {request} forge:8080 kajiba.v1.RepoService/GetRepo"))["repo"]
         assert repo["name"] == "demo"
         forge.fail(f"kajiba-server admin import alice/empty {bundle} 2>/tmp/unavailable.err")
         assert "GIT_SIDE_UNAVAILABLE" in forge.succeed("cat /tmp/unavailable.err")
