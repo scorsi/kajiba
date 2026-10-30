@@ -82,8 +82,8 @@ fn version_check(headers: &HeaderMap, server: &str) -> Result<(), Status> {
 pub struct Principal {
     pub user_id: i64,
     pub scopes: Vec<Scope>,
-    /// A browser session rather than a PAT: only a session manages PATs (ADR 0081).
-    pub session: bool,
+    /// Session token hash, absent for PATs; only a session manages PATs (ADR 0081).
+    pub session: Option<[u8; 32]>,
 }
 
 #[derive(Clone)]
@@ -120,7 +120,7 @@ impl Refusal {
         }
     }
 
-    fn status(self) -> Status {
+    pub(super) fn status(self) -> Status {
         let (code, message) = match self {
             Self::Invalid => (
                 tonic::Code::Unauthenticated,
@@ -225,14 +225,17 @@ impl Auth {
                 crate::db::credentials::find_token(readers, &kajiba_core::sha256(token.as_bytes()))
                     .await
                     .map_err(internal)?,
-                false,
+                None,
             ),
-            Some(Presented::Session(value)) => (
-                crate::db::sessions::find(readers, &kajiba_core::sha256(value.as_bytes()))
-                    .await
-                    .map_err(internal)?,
-                true,
-            ),
+            Some(Presented::Session(value)) => {
+                let hash = kajiba_core::sha256(value.as_bytes());
+                (
+                    crate::db::sessions::find(readers, &hash)
+                        .await
+                        .map_err(internal)?,
+                    Some(hash),
+                )
+            }
         };
         let found = admit(found, now).map_err(refuse)?;
         let scopes = scopes(found.scopes.as_deref());
@@ -242,7 +245,7 @@ impl Auth {
         // ADR 0078: at most one usage write per minute and credential, through the writer.
         if found.last_used_at.is_none_or(|used| now - used >= 60_000) {
             let mut writer = writer.lock().await;
-            if session {
+            if session.is_some() {
                 crate::db::sessions::seen(&mut writer, found.id, now).await
             } else {
                 crate::db::credentials::token_used(&mut writer, found.id, now).await

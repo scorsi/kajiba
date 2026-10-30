@@ -5,7 +5,7 @@
 
 use super::{
     Health,
-    auth::{Principal, now, scope_name, scopes},
+    auth::{Principal, admit, now, scope_name, scopes},
     cursor::{self, invalid_field},
     local::refused,
 };
@@ -28,19 +28,19 @@ fn internal(err: sqlx::Error) -> Status {
 }
 
 /// The session caller: a PAT never manages PATs (ADR 0081).
-fn session_caller<T>(request: &Request<T>) -> Result<i64, Status> {
+fn session_caller<T>(request: &Request<T>) -> Result<&Principal, Status> {
     let principal = request
         .extensions()
         .get::<Principal>()
         .ok_or_else(|| Status::internal("tokens: no authenticated caller"))?;
-    if !principal.session {
+    if principal.session.is_none() {
         return Err(refused(
             tonic::Code::PermissionDenied,
             "SESSION_REQUIRED",
             "personal access tokens are managed from a browser session".into(),
         ));
     }
-    Ok(principal.user_id)
+    Ok(principal)
 }
 
 type Row = (
@@ -119,7 +119,9 @@ impl TokenService for Tokens {
         &self,
         request: Request<CreateTokenRequest>,
     ) -> Result<Response<CreateTokenResponse>, Status> {
-        let user = session_caller(&request)?;
+        let principal = session_caller(&request)?;
+        let user = principal.user_id;
+        let hash = principal.session.expect("session caller");
         let request = request.into_inner();
         let name = kajiba_core::names::validate_name(&request.name)
             .map_err(|err| invalid_field("name", &err.to_string()))?;
@@ -157,6 +159,12 @@ impl TokenService for Tokens {
         );
         // The single writer serializes creations: the name check cannot race.
         let mut writer = self.writer()?.lock().await;
+        // Recovery may have revoked the session since authentication read it.
+        let found = crate::db::sessions::find(&mut *writer, &hash)
+            .await
+            .map_err(internal)?
+            .filter(|found| found.user_id == user);
+        admit(found, super::auth::now()?).map_err(|refusal| refusal.status())?;
         let taken: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM api_token WHERE user_id = ? AND name = ?)",
         )
@@ -201,7 +209,7 @@ impl TokenService for Tokens {
         request: Request<ListTokensRequest>,
     ) -> Result<Response<ListTokensResponse>, Status> {
         const METHOD: &str = "v1.ListTokens";
-        let user = session_caller(&request)?;
+        let user = session_caller(&request)?.user_id;
         let request = request.into_inner();
         let size = cursor::page_size(request.page_size)?;
         let (key, id) = cursor::decode(METHOD, &request.page_token)?.unwrap_or_default();
@@ -236,7 +244,7 @@ impl TokenService for Tokens {
         &self,
         request: Request<RevokeTokenRequest>,
     ) -> Result<Response<RevokeTokenResponse>, Status> {
-        let user = session_caller(&request)?;
+        let user = session_caller(&request)?.user_id;
         let public_id = request.into_inner().public_id;
         let mut writer = self.writer()?.lock().await;
         let found: Option<(i64, String)> =

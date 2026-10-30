@@ -13,9 +13,26 @@ fn from<T>(user_id: i64, session: bool, message: T) -> Request<T> {
     request.extensions_mut().insert(Principal {
         user_id,
         scopes: vec![Scope::Admin],
-        session,
+        session: session.then(|| kajiba_core::sha256(user_id.to_string().as_bytes())),
     });
     request
+}
+
+async fn fixture() -> Fixture {
+    let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
+    for user in [1_i64, 2] {
+        sqlx::query(
+            "INSERT INTO session (user_id, token_hash, created_at, expires_at, last_seen_at)
+             VALUES (?, ?, 0, ?, 0)",
+        )
+        .bind(user)
+        .bind(kajiba_core::sha256(user.to_string().as_bytes()).as_slice())
+        .bind(i64::MAX)
+        .execute(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    }
+    fixture
 }
 
 fn create(name: &str, scopes: &[Scope]) -> CreateTokenRequest {
@@ -39,7 +56,7 @@ const LIST: &str = "/kajiba.v1.RepoService/ListRepos";
 
 #[tokio::test]
 async fn created_token_is_shown_once_stored_hashed_and_authenticates() {
-    let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
+    let fixture = fixture().await;
     let service = Tokens(fixture.repos.0.clone());
     let mut app = router(
         fixture.repos.0.clone(),
@@ -198,7 +215,7 @@ async fn created_token_is_shown_once_stored_hashed_and_authenticates() {
 
 #[tokio::test]
 async fn only_a_session_manages_tokens() {
-    let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
+    let fixture = fixture().await;
     let service = Tokens(fixture.repos.0.clone());
     let status = service
         .list_tokens(from(1, false, ListTokensRequest::default()))
@@ -268,7 +285,7 @@ async fn only_a_session_manages_tokens() {
 
 #[tokio::test]
 async fn revocation_refuses_the_token_and_spares_declared_ones() {
-    let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
+    let fixture = fixture().await;
     let service = Tokens(fixture.repos.0.clone());
     let mut app = router(
         fixture.repos.0.clone(),
@@ -377,7 +394,7 @@ async fn revocation_refuses_the_token_and_spares_declared_ones() {
 
 #[tokio::test]
 async fn listing_pages_by_name_over_the_callers_tokens_only() {
-    let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
+    let fixture = fixture().await;
     let service = Tokens(fixture.repos.0.clone());
     for name in ["c", "a", "b"] {
         service
@@ -427,4 +444,77 @@ async fn listing_pages_by_name_over_the_callers_tokens_only() {
         .await
         .unwrap_err();
     assert_eq!(status.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn creation_rechecks_the_session_after_authentication() {
+    for (change, expected) in [
+        ("recovery", "CREDENTIAL_INVALID"),
+        ("expiry", "CREDENTIAL_EXPIRED"),
+        ("disabled", "CREDENTIAL_INVALID"),
+    ] {
+        let fixture = fixture().await;
+        let service = Tokens(fixture.repos.0.clone());
+        // Authentication has already admitted this request; its handler waits for the writer.
+        let request = from(1, true, create("late", &[Scope::RepoRead]));
+        let mut writer = fixture.writer.lock().await;
+        let creation = service.create_token(request);
+        tokio::pin!(creation);
+        assert!(
+            std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(
+                    std::future::Future::poll(creation.as_mut(), cx).is_pending(),
+                )
+            })
+            .await
+        );
+        match change {
+            "recovery" => {
+                crate::db::enrollment::issue(
+                    &mut writer,
+                    "alice",
+                    std::time::Duration::from_secs(60),
+                    now().unwrap(),
+                )
+                .await
+                .unwrap();
+                // Reusing the deleted session's integer ID must not revive the request.
+                sqlx::query(
+                    "INSERT INTO session (id, user_id, token_hash, created_at, expires_at, last_seen_at)
+                     VALUES (1, 1, ?, 0, ?, 0)",
+                )
+                .bind(kajiba_core::sha256(b"replacement").as_slice())
+                .bind(i64::MAX)
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+            }
+            "expiry" => {
+                sqlx::query("UPDATE session SET expires_at = ? WHERE user_id = 1")
+                    .bind(now().unwrap())
+                    .execute(&mut *writer)
+                    .await
+                    .unwrap();
+            }
+            "disabled" => {
+                sqlx::query("UPDATE user SET disabled_at = 1 WHERE id = 1")
+                    .execute(&mut *writer)
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        drop(writer);
+        let status = creation.await.unwrap_err();
+        assert_eq!(
+            (status.code(), reason(&status)),
+            (Code::Unauthenticated, expected.into())
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM api_token WHERE source = 'runtime'")
+                .fetch_one(&mut *fixture.writer.lock().await)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "{change}");
+    }
 }
