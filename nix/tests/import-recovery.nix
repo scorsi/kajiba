@@ -219,8 +219,9 @@ pkgs.testers.runNixOSTest {
                 forge.succeed(f"systemctl start {git_unit}")
                 if key == "both":
                     forge.succeed(f"systemctl start {unit}")
+                # As above: readyz can answer before the server's next Hello sees the new generation.
+                retry(lambda _: generation() != row["git_generation"])
                 ready()
-                assert generation() != row["git_generation"]
             forge.fail(f"kill -0 {child}")
             assert refs(forge, directory, user="kajiba-git") == {}
             recovered(before, row, [])
