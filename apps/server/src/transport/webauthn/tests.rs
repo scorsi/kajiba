@@ -427,6 +427,103 @@ mod ceremonies {
         assert_eq!(count(&fixture, "session").await, 1);
     }
 
+    /// A raw POST: the status, `Retry-After` and the JSON reason, if any.
+    async fn raw(
+        app: &mut Router,
+        path: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, Option<String>, Option<String>) {
+        let request = Request::post(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.call(request).await.unwrap();
+        let status = response.status();
+        let retry = response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .map(|value| value.to_str().unwrap().to_owned());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        (status, retry, json["reason"].as_str().map(str::to_owned))
+    }
+
+    /// `{"token":"…"}` padded to exactly `size` bytes.
+    fn enroll_body(size: usize) -> Vec<u8> {
+        let body = format!("{{\"token\":\"{}\"}}", "a".repeat(size - 12));
+        assert_eq!(body.len(), size);
+        body.into_bytes()
+    }
+
+    #[tokio::test]
+    async fn ceremony_bodies_are_capped_at_64_kib() {
+        let (_fixture, mut app) = fixture().await;
+        for path in [
+            "/auth/webauthn/enroll/start",
+            "/auth/webauthn/enroll/finish",
+            "/auth/webauthn/login/finish",
+        ] {
+            let (status, _, _) = raw(&mut app, path, enroll_body(MAX_BODY + 1)).await;
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+        }
+        // Exactly at the cap: the handler answers.
+        assert_eq!(
+            raw(
+                &mut app,
+                "/auth/webauthn/enroll/start",
+                enroll_body(MAX_BODY)
+            )
+            .await,
+            (
+                StatusCode::FORBIDDEN,
+                None,
+                Some("ENROLLMENT_INVALID".into())
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn ceremony_requests_share_a_budget_taken_before_the_body() {
+        let (fixture, mut app) = fixture().await;
+        let budget = fixture.repos.0.webauthn_requests.clone();
+        assert_eq!(budget.available_permits(), MAX_REQUESTS);
+        let held = budget
+            .clone()
+            .try_acquire_many_owned(MAX_REQUESTS as u32)
+            .unwrap();
+        let busy = (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some("1".into()),
+            Some("BUSY".into()),
+        );
+        for path in [
+            "/auth/webauthn/enroll/start",
+            "/auth/webauthn/enroll/finish",
+            "/auth/webauthn/login/start",
+            "/auth/webauthn/login/finish",
+        ] {
+            // An oversized body is not read: refused as busy, not as too large.
+            assert_eq!(
+                raw(&mut app, path, enroll_body(MAX_BODY + 1)).await,
+                busy,
+                "{path}"
+            );
+        }
+        drop(held);
+        assert_eq!(
+            raw(&mut app, "/auth/webauthn/enroll/start", enroll_body(64)).await,
+            (
+                StatusCode::FORBIDDEN,
+                None,
+                Some("ENROLLMENT_INVALID".into())
+            )
+        );
+        // Every permit is back once the answers are sent.
+        assert_eq!(budget.available_permits(), MAX_REQUESTS);
+    }
+
     #[test]
     fn the_enrollment_token_never_reaches_the_logs() {
         const CHILD: &str = "KAJIBA_TEST_ENROLL_LOGS";

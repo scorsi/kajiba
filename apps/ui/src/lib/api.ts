@@ -567,6 +567,7 @@ const REFUSALS: Record<string, string> = {
   NAME_INVALID: "The passkey name is too long or contains control characters.",
   CEREMONIES_FULL:
     "Too many sign-ins are in progress. Try again in a few minutes.",
+  BUSY: "The server is busy. Try again in a moment.",
 };
 
 async function ceremony(path: string, body?: unknown): Promise<Response> {

@@ -8,8 +8,12 @@ use super::{
 };
 use axum::{
     Json, Router,
-    extract::State,
-    http::{StatusCode, header::SET_COOKIE},
+    extract::{DefaultBodyLimit, Request, State},
+    http::{
+        StatusCode,
+        header::{RETRY_AFTER, SET_COOKIE},
+    },
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::post,
 };
@@ -18,9 +22,10 @@ use sqlx::Connection;
 use std::{
     collections::HashMap,
     io,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use tokio::sync::Semaphore;
 use webauthn_rs::prelude::{
     DiscoverableAuthentication, DiscoverableKey, Passkey, PasskeyRegistration, PublicKeyCredential,
     RegisterPublicKeyCredential, Url, Uuid, Webauthn, WebauthnBuilder,
@@ -30,6 +35,10 @@ use webauthn_rs::prelude::{
 pub const CEREMONY_TTL: Duration = Duration::from_secs(5 * 60);
 /// Outstanding ceremonies held in memory at most; a new one beyond is refused (ADR 0083).
 pub const MAX_CEREMONIES: usize = 64;
+/// Largest ceremony request body (ADR 0100).
+pub const MAX_BODY: usize = 64 * 1024;
+/// Ceremony requests in flight at most, admitted before their body is read (ADR 0100).
+pub const MAX_REQUESTS: usize = 32;
 /// Longest passkey name, in characters (ADR 0084).
 const MAX_NAME: usize = 64;
 
@@ -171,12 +180,27 @@ fn starting() -> Response {
 }
 
 pub(super) fn routes(health: Health) -> Router {
+    let budget = health.webauthn_requests.clone();
     Router::new()
         .route("/auth/webauthn/enroll/start", post(enroll_start))
         .route("/auth/webauthn/enroll/finish", post(enroll_finish))
         .route("/auth/webauthn/login/start", post(login_start))
         .route("/auth/webauthn/login/finish", post(login_finish))
+        .layer(DefaultBodyLimit::max(MAX_BODY))
+        .route_layer(middleware::from_fn_with_state(budget, admit))
         .with_state(health)
+}
+
+/// A permit of the shared ceremony budget, held until the handler answers; taken before the
+/// body is read, so at most `MAX_REQUESTS` bodies are buffered at once (ADR 0100).
+async fn admit(State(budget): State<Arc<Semaphore>>, request: Request, next: Next) -> Response {
+    let Ok(_permit) = budget.try_acquire_owned() else {
+        let mut busy = refusal(StatusCode::SERVICE_UNAVAILABLE, "BUSY");
+        busy.headers_mut()
+            .insert(RETRY_AFTER, axum::http::HeaderValue::from_static("1"));
+        return busy;
+    };
+    next.run(request).await
 }
 
 #[derive(Deserialize)]
