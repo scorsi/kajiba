@@ -122,6 +122,16 @@ async fn main() -> ExitCode {
                 config.git.state_dir.clone(),
                 config.ssh.probe,
             );
+            match transport::webauthn::Passkeys::new(
+                &config.http.public_url,
+                config.auth.session_ttl,
+            ) {
+                Ok(passkeys) => health.set_passkeys(passkeys),
+                Err(err) => {
+                    log::error("config-invalid", &err);
+                    return ExitCode::FAILURE;
+                }
+            }
             let (mut writer, readers) =
                 match db::open(&config.state_dir.join("db/kajiba.sqlite")).await {
                     Ok(database) => database,

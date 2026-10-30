@@ -76,3 +76,338 @@ fn outstanding_ceremonies_are_bounded() {
     // An expired ceremony no longer counts.
     ceremonies.begin(99, start + CEREMONY_TTL).unwrap();
 }
+
+#[test]
+fn user_handle_is_the_public_id_bits() {
+    assert_eq!(
+        user_handle("00000000000000000000000001"),
+        Uuid::from_u128(1)
+    );
+    assert_eq!(
+        user_handle("7ZZZZZZZZZZZZZZZZZZZZZZZZZ"),
+        Uuid::from_u128(u128::MAX)
+    );
+    assert_ne!(
+        user_handle("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+        user_handle("01ARZ3NDEKTSV4RRFFQ69G5FAW")
+    );
+}
+
+mod ceremonies {
+    use super::super::*;
+    use crate::transport::{repos::tests::Fixture, router};
+    use axum::{body::Body, http::Request};
+    use tonic::codegen::Service;
+    use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
+    use webauthn_rs::prelude::CreationChallengeResponse;
+
+    pub(in crate::transport) const ORIGIN: &str = "https://example.org";
+    const TTL: Duration = Duration::from_secs(600);
+
+    pub(in crate::transport) async fn fixture() -> (Fixture, Router) {
+        let fixture = Fixture::new("").await;
+        fixture
+            .repos
+            .0
+            .set_passkeys(Passkeys::new(ORIGIN, Duration::from_secs(3600)).unwrap());
+        let app = router(fixture.repos.0.clone(), false, Default::default()).unwrap();
+        (fixture, app)
+    }
+
+    /// POSTs `body` as JSON: the status, the `Set-Cookie` header and the JSON answer.
+    pub(in crate::transport) async fn post(
+        app: &mut Router,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, Option<String>, serde_json::Value) {
+        let request = Request::post(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.call(request).await.unwrap();
+        let status = response.status();
+        let cookie = response
+            .headers()
+            .get(SET_COOKIE)
+            .map(|value| value.to_str().unwrap().to_owned());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = serde_json::from_slice(&bytes).unwrap_or_default();
+        (status, cookie, json)
+    }
+
+    pub(in crate::transport) async fn issue(fixture: &Fixture, user: &str, now: i64) -> String {
+        crate::db::enrollment::issue(&mut *fixture.writer.lock().await, user, TTL, now)
+            .await
+            .unwrap()
+    }
+
+    pub(in crate::transport) fn epoch_ms() -> i64 {
+        now().unwrap()
+    }
+
+    /// Starts an enrollment: the ceremony id and the options for the authenticator.
+    pub(in crate::transport) async fn start(
+        app: &mut Router,
+        token: &str,
+    ) -> Result<(String, CreationChallengeResponse), (StatusCode, String)> {
+        let (status, _, json) = post(
+            app,
+            "/auth/webauthn/enroll/start",
+            serde_json::json!({ "token": token }),
+        )
+        .await;
+        if status != StatusCode::OK {
+            return Err((status, json["reason"].as_str().unwrap_or_default().into()));
+        }
+        Ok((
+            json["ceremony"].as_str().unwrap().into(),
+            serde_json::from_value(json["options"].clone()).unwrap(),
+        ))
+    }
+
+    pub(in crate::transport) fn authenticator() -> WebauthnAuthenticator<SoftPasskey> {
+        // `true`: claim user verification, which passkey ceremonies require.
+        WebauthnAuthenticator::new(SoftPasskey::new(true))
+    }
+
+    pub(in crate::transport) async fn finish(
+        app: &mut Router,
+        ceremony: &str,
+        authenticator: &mut WebauthnAuthenticator<SoftPasskey>,
+        origin: &str,
+        options: CreationChallengeResponse,
+    ) -> (StatusCode, Option<String>, serde_json::Value) {
+        let credential = authenticator
+            .do_registration(Url::parse(origin).unwrap(), options)
+            .unwrap();
+        post(
+            app,
+            "/auth/webauthn/enroll/finish",
+            serde_json::json!({ "ceremony": ceremony, "credential": credential, "name": "laptop" }),
+        )
+        .await
+    }
+
+    async fn count(fixture: &Fixture, table: &str) -> i64 {
+        sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(fixture.repos.readers().unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn enrollment_stores_the_passkey_and_opens_a_session() {
+        let (fixture, mut app) = fixture().await;
+        let token = issue(&fixture, "alice", epoch_ms()).await;
+        let (ceremony, options) = start(&mut app, &token).await.unwrap();
+        let user = &options.public_key.user;
+        assert_eq!(user.name, "alice");
+        let (public_id,): (String,) =
+            sqlx::query_as("SELECT public_id FROM user WHERE name = 'alice'")
+                .fetch_one(fixture.repos.readers().unwrap())
+                .await
+                .unwrap();
+        assert_eq!(user.id.as_ref(), user_handle(&public_id).as_bytes());
+
+        let mut authenticator = authenticator();
+        let (status, cookie, _) =
+            finish(&mut app, &ceremony, &mut authenticator, ORIGIN, options).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let cookie = cookie.unwrap();
+        assert!(
+            cookie.ends_with("; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Strict"),
+            "{cookie}"
+        );
+        let value = cookie
+            .strip_prefix("kajiba_session=")
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let session = crate::db::sessions::find(
+            fixture.repos.readers().unwrap(),
+            &kajiba_core::sha256(value.as_bytes()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            session.expires_at.unwrap() - session.last_used_at.unwrap(),
+            3_600_000
+        );
+        let (name, passkey): (String, String) =
+            sqlx::query_as("SELECT name, passkey FROM webauthn_credential")
+                .fetch_one(fixture.repos.readers().unwrap())
+                .await
+                .unwrap();
+        assert_eq!(name, "laptop");
+        serde_json::from_str::<webauthn_rs::prelude::Passkey>(&passkey).unwrap();
+        // The link is consumed: neither a new start nor a replayed finish works.
+        assert_eq!(
+            start(&mut app, &token).await.unwrap_err(),
+            (StatusCode::FORBIDDEN, "ENROLLMENT_INVALID".into())
+        );
+        let (_, options) = {
+            let token = issue(&fixture, "bob", epoch_ms()).await;
+            start(&mut app, &token).await.unwrap()
+        };
+        let (status, _, json) =
+            finish(&mut app, &ceremony, &mut authenticator, ORIGIN, options).await;
+        assert_eq!(
+            (status, json["reason"].as_str()),
+            (StatusCode::FORBIDDEN, Some("CEREMONY_INVALID"))
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_links_are_refused() {
+        let (fixture, mut app) = fixture().await;
+        let refused = Err((StatusCode::FORBIDDEN, "ENROLLMENT_INVALID".into()));
+        // Expired: issued long enough ago.
+        let expired = issue(&fixture, "alice", epoch_ms() - TTL.as_millis() as i64).await;
+        assert_eq!(start(&mut app, &expired).await.map(drop), refused);
+        // Superseded by a newer link.
+        let old = issue(&fixture, "alice", epoch_ms()).await;
+        let new = issue(&fixture, "alice", epoch_ms()).await;
+        assert_eq!(start(&mut app, &old).await.map(drop), refused);
+        assert_eq!(start(&mut app, "unknown").await.map(drop), refused);
+        // Disabled before the start, then between start and finish.
+        let (ceremony, options) = start(&mut app, &new).await.unwrap();
+        sqlx::query("UPDATE user SET disabled_at = 1 WHERE name = 'alice'")
+            .execute(&mut *fixture.writer.lock().await)
+            .await
+            .unwrap();
+        assert_eq!(start(&mut app, &new).await.map(drop), refused);
+        let (status, cookie, json) =
+            finish(&mut app, &ceremony, &mut authenticator(), ORIGIN, options).await;
+        assert_eq!(
+            (status, json["reason"].as_str()),
+            (StatusCode::FORBIDDEN, Some("ENROLLMENT_INVALID"))
+        );
+        assert_eq!(cookie, None);
+        assert_eq!(count(&fixture, "webauthn_credential").await, 0);
+        assert_eq!(count(&fixture, "session").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_foreign_origin_is_refused() {
+        let (fixture, mut app) = fixture().await;
+        let token = issue(&fixture, "alice", epoch_ms()).await;
+        let (ceremony, options) = start(&mut app, &token).await.unwrap();
+        let (status, _, json) = finish(
+            &mut app,
+            &ceremony,
+            &mut authenticator(),
+            "https://evil.example.org",
+            options,
+        )
+        .await;
+        assert_eq!(
+            (status, json["reason"].as_str()),
+            (StatusCode::FORBIDDEN, Some("VERIFICATION_FAILED"))
+        );
+        // The link stays usable for a genuine ceremony.
+        assert!(start(&mut app, &token).await.is_ok());
+        assert_eq!(count(&fixture, "webauthn_credential").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_long_or_control_name_is_refused_before_the_ceremony() {
+        let (fixture, mut app) = fixture().await;
+        let token = issue(&fixture, "alice", epoch_ms()).await;
+        let (ceremony, options) = start(&mut app, &token).await.unwrap();
+        let credential = authenticator()
+            .do_registration(Url::parse(ORIGIN).unwrap(), options)
+            .unwrap();
+        for name in ["x".repeat(65), "a\nb".into()] {
+            let (status, _, json) = post(
+                &mut app,
+                "/auth/webauthn/enroll/finish",
+                serde_json::json!({ "ceremony": ceremony, "credential": credential, "name": name }),
+            )
+            .await;
+            assert_eq!(
+                (status, json["reason"].as_str()),
+                (StatusCode::BAD_REQUEST, Some("NAME_INVALID"))
+            );
+        }
+        // Without a name: an empty one is stored.
+        let (status, ..) = post(
+            &mut app,
+            "/auth/webauthn/enroll/finish",
+            serde_json::json!({ "ceremony": ceremony, "credential": credential }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let name: String = sqlx::query_scalar("SELECT name FROM webauthn_credential")
+            .fetch_one(fixture.repos.readers().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(name, "");
+    }
+
+    #[tokio::test]
+    async fn concurrent_finishes_consume_the_link_once() {
+        let (fixture, app) = fixture().await;
+        let token = issue(&fixture, "alice", epoch_ms()).await;
+        let mut started = Vec::new();
+        for _ in 0..2 {
+            started.push(start(&mut app.clone(), &token).await.unwrap());
+        }
+        let mut finishes = Vec::new();
+        for (ceremony, options) in started {
+            let mut app = app.clone();
+            finishes.push(tokio::spawn(async move {
+                finish(&mut app, &ceremony, &mut authenticator(), ORIGIN, options)
+                    .await
+                    .0
+            }));
+        }
+        let mut statuses = Vec::new();
+        for finish in finishes {
+            statuses.push(finish.await.unwrap());
+        }
+        statuses.sort();
+        assert_eq!(statuses, [StatusCode::NO_CONTENT, StatusCode::FORBIDDEN]);
+        assert_eq!(count(&fixture, "webauthn_credential").await, 1);
+        assert_eq!(count(&fixture, "session").await, 1);
+    }
+
+    #[test]
+    fn the_enrollment_token_never_reaches_the_logs() {
+        const CHILD: &str = "KAJIBA_TEST_ENROLL_LOGS";
+        if let Some(path) = std::env::var_os(CHILD) {
+            kajiba_core::log::init("info").unwrap();
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let (fixture, mut app) = fixture().await;
+                let token = issue(&fixture, "alice", epoch_ms()).await;
+                std::fs::write(&path, &token).unwrap();
+                let (ceremony, options) = start(&mut app, &token).await.unwrap();
+                finish(&mut app, &ceremony, &mut authenticator(), ORIGIN, options).await;
+                // Refused: consumed.
+                start(&mut app, &token).await.unwrap_err();
+            });
+            return;
+        }
+        let file = std::env::temp_dir().join(format!("kajiba-enroll-logs-{}", std::process::id()));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "transport::webauthn::tests::ceremonies::the_enrollment_token_never_reaches_the_logs",
+                "--nocapture",
+            ])
+            .env(CHILD, &file)
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let token = std::fs::read_to_string(&file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(token.len(), 64);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(!stderr.contains(&token), "{stderr}");
+        assert!(stderr.contains("\"ENROLLMENT_INVALID\""), "{stderr}");
+    }
+}

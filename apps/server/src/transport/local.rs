@@ -85,10 +85,7 @@ impl AdminService for Admin {
         tracing::info!(event = "enrollment-issued", user);
         Ok(Response::new(EnrollResponse {
             // The fragment keeps the token out of proxy and request logs; J4's page reads it.
-            url: format!(
-                "{}/auth/enroll#{token}",
-                self.public_url.trim_end_matches('/')
-            ),
+            url: format!("{}/-/enroll#{token}", self.public_url.trim_end_matches('/')),
         }))
     }
 

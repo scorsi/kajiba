@@ -28,4 +28,8 @@ tonic-reflection.workspace = true
 tracing.workspace = true
 zlib-rs.workspace = true
 webauthn-rs.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+webauthn-authenticator-rs.workspace = true
 

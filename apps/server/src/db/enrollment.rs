@@ -66,3 +66,43 @@ pub async fn issue(
     tx.commit().await?;
     Ok(token)
 }
+
+/// The user a link enrolls: `(id, public_id, name)` when the token's SHA-256 names an
+/// unexpired, unconsumed link of an active user. Unknown, superseded (replaced by a newer
+/// link), consumed and expired links all read as `None`. `now` is UTC epoch milliseconds.
+pub async fn find(
+    readers: &sqlx::SqlitePool,
+    hash: &[u8],
+    now: i64,
+) -> Result<Option<(i64, String, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT user.id, user.public_id, user.name FROM enrollment_token
+         JOIN user ON user.id = enrollment_token.user_id
+         WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ? AND disabled_at IS NULL",
+    )
+    .bind(hash)
+    .bind(now)
+    .fetch_optional(readers)
+    .await
+}
+
+/// Consumes `user`'s link atomically (ADR 0014): true only for the one caller that finds
+/// it still valid, so concurrent ceremonies on the same link enroll once.
+pub async fn consume(
+    writer: &mut SqliteConnection,
+    user: i64,
+    hash: &[u8],
+    now: i64,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query(
+        "UPDATE enrollment_token SET consumed_at = ?1
+         WHERE user_id = ?2 AND token_hash = ?3 AND consumed_at IS NULL AND expires_at > ?1
+           AND EXISTS (SELECT 1 FROM user WHERE id = ?2 AND disabled_at IS NULL)",
+    )
+    .bind(now)
+    .bind(user)
+    .bind(hash)
+    .execute(writer)
+    .await
+    .map(|done| done.rows_affected() == 1)
+}

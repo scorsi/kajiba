@@ -35,7 +35,7 @@ pkgs.testers.runNixOSTest {
     unit = "kajiba-server.service"
     db = "${stateDir}/db/kajiba.sqlite"
     socket = "/run/kajiba/local.sock"
-    link = re.compile(r"https://forge\.example\.org/auth/enroll#([0-9a-f]{64})")
+    link = re.compile(r"https://forge\.example\.org/-/enroll#([0-9a-f]{64})")
 
 
     def enroll(user="root"):

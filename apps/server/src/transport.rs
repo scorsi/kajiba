@@ -34,6 +34,7 @@ use tonic::{Request, Response, Status, service::Routes};
 pub struct Health {
     database: Arc<OnceLock<SqlitePool>>,
     writer: Arc<OnceLock<crate::db::Writer>>,
+    passkeys: Arc<OnceLock<webauthn::Passkeys>>,
     state_dir: PathBuf,
     git_state_dir: PathBuf,
     local_serving: Arc<local::Serving>,
@@ -52,6 +53,7 @@ impl Health {
         Self {
             database: Arc::default(),
             writer: Arc::default(),
+            passkeys: Arc::default(),
             git_state_dir,
             state_dir,
             local_serving: Arc::default(),
@@ -69,6 +71,11 @@ impl Health {
             self.database.set(database).is_ok() && self.writer.set(writer).is_ok(),
             "startup completed twice"
         );
+    }
+
+    /// The WebAuthn relying party; the ceremony routes answer 503 until it is set.
+    pub fn set_passkeys(&self, passkeys: webauthn::Passkeys) {
+        assert!(self.passkeys.set(passkeys).is_ok(), "passkeys set twice");
     }
 
     async fn ready(&self) -> bool {
@@ -149,6 +156,8 @@ fn router(health: Health, reflection: bool, registry: Arc<Registry>) -> Result<R
             auth::Auth::new(health.clone(), registry.clone())?,
             auth::authenticate,
         ))
+        // Ceremony routes: JSON, outside the gRPC auth layer, protected by their challenge (0020).
+        .merge(webauthn::routes(health.clone()))
         .merge(git_http::routes(repos::Repos(health.clone())))
         .merge(raw::routes(repos::Repos(health.clone())))
         .route("/healthz", get(|| async { "OK" }))
@@ -406,7 +415,7 @@ pub mod raw;
 pub mod repos;
 mod stream;
 mod tokens;
-mod webauthn;
+pub mod webauthn;
 
 #[cfg(test)]
 mod tests;

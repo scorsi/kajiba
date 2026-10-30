@@ -7,6 +7,7 @@ use std::{path::Path, time::Duration};
 
 pub mod credentials;
 pub mod enrollment;
+pub mod passkeys;
 pub mod permissions;
 // Production handlers follow in later milestones.
 #[cfg_attr(not(test), allow(dead_code))]

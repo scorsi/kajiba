@@ -6,8 +6,6 @@ use std::time::Duration;
 
 /// Opens a session for `user` expiring `ttl` after `now` (absolute, ADR 0014) and returns
 /// the cookie value; only its SHA-256 is stored. `now` is UTC epoch milliseconds.
-// Called by the enrollment and login ceremonies (J4 tasks 9-10).
-#[cfg_attr(not(test), allow(dead_code))]
 pub async fn create(
     writer: &mut SqliteConnection,
     user: i64,

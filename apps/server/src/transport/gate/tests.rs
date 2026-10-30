@@ -201,7 +201,7 @@ async fn gate_auth_and_closed_hooks_leave_admin_socket_unchanged() {
         local::enroll(&admin_path, "alice".into())
             .await
             .unwrap()
-            .contains("/auth/enroll#")
+            .contains("/-/enroll#")
     );
     let mut hooks = kajiba_proto::hook::v1::hook_service_client::HookServiceClient::new(
         channel(&admin_path, None).await.unwrap(),
