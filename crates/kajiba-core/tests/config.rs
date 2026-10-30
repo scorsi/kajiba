@@ -1,6 +1,6 @@
 use std::{path::Path, time::Duration};
 
-use kajiba_core::config::{Backend, Role, RunnerConfig, Scope, ServerConfig, Visibility};
+use kajiba_core::config::{Arch, Backend, Os, Role, RunnerConfig, Scope, ServerConfig, Visibility};
 
 const SERVER: &str = include_str!("fixtures/server.toml");
 const RUNNER: &str = include_str!("fixtures/runner.toml");
@@ -32,6 +32,14 @@ owner = "bob"
 description = ""
 "#;
 const MINIMAL: &str = "[http]\npublic_url = 'https://forge.example.org'\n";
+/// The capabilities a declared runner requires, appended after a runner's `token_file`.
+fn capabilities(table: &str) -> &'static str {
+    if table.starts_with("runners.") {
+        "\ncapabilities = { arch = 'x86_64', os = 'linux' }"
+    } else {
+        ""
+    }
+}
 
 fn server_error(input: &str, field: &str) {
     let error = ServerConfig::parse(input).unwrap_err();
@@ -53,6 +61,11 @@ fn adr_examples_load_verbatim() {
     );
     assert_eq!(server.ssh.host.as_deref(), Some("forge.example.org"));
     assert_eq!(server.metrics.listen.unwrap().port(), 9431);
+    let declared = &server.runners["build-1"].capabilities;
+    assert_eq!((declared.arch, declared.os), (Arch::Aarch64, Os::Linux));
+    assert_eq!(declared.backends, [Backend::Nix]);
+    assert_eq!(declared.tags, ["kvm"]);
+    assert_eq!(declared.max_jobs, 2);
     let runner = RunnerConfig::parse(RUNNER).unwrap();
     assert_eq!(runner.name, "build-1");
     assert_eq!(runner.backends, [Backend::Nix]);
@@ -135,6 +148,7 @@ fn unknown_fields_are_rejected_at_every_table() {
         "users.alice",
         "users.alice.tokens.ci",
         "runners.build-1",
+        "runners.build-1.capabilities",
         "mirror",
         "mirror.credentials.github",
         "ci",
@@ -263,10 +277,16 @@ fn all_identity_names_use_shared_validation_and_normalization() {
         ("mirror.credentials", "github"),
         ("users.alice.tokens", "ci"),
     ] {
-        let input = SERVER.replace(
-            &format!("[{table}.{name}]"),
-            &format!("[{table}.\"bad/name\"]"),
-        );
+        // Subtables (a runner's capabilities) move with their parent.
+        let input = SERVER
+            .replace(
+                &format!("[{table}.{name}]"),
+                &format!("[{table}.\"bad/name\"]"),
+            )
+            .replace(
+                &format!("[{table}.{name}."),
+                &format!("[{table}.\"bad/name\"."),
+            );
         server_error(&input, table);
         // A rejected name may be a misplaced secret: never echoed.
         assert!(
@@ -563,8 +583,9 @@ fn server_secrets_reject_known_git_side_gids_for_every_credential() {
     for table in ["runners.build-1", "mirror.credentials.github"] {
         for git_gid in [gid, gid.wrapping_add(1)] {
             let config = ServerConfig::parse(&format!(
-                "{MINIMAL}\n[git]\ngroup_ids=[{git_gid}]\n[{table}]\ntoken_file='{}'",
-                secret.display()
+                "{MINIMAL}\n[git]\ngroup_ids=[{git_gid}]\n[{table}]\ntoken_file='{}'{}",
+                secret.display(),
+                capabilities(table)
             ))
             .unwrap();
             for mode in [0o600, 0o640] {
@@ -601,8 +622,9 @@ fn server_secrets_reject_configured_git_users_primary_group() {
     for table in ["runners.build-1", "mirror.credentials.github"] {
         for path in [&secret, &link] {
             let config = ServerConfig::parse(&format!(
-                "{MINIMAL}\n[git]\nuser='{user}'\n[{table}]\ntoken_file='{}'",
-                path.display()
+                "{MINIMAL}\n[git]\nuser='{user}'\n[{table}]\ntoken_file='{}'{}",
+                path.display(),
+                capabilities(table)
             ))
             .unwrap();
             assert!(config.git.group_ids.is_empty());
@@ -628,8 +650,9 @@ fn server_secret_modes_are_checked_for_every_credential() {
     let secret = dir.private_file("secret");
     for table in ["runners.build-1", "mirror.credentials.github"] {
         let config = ServerConfig::parse(&format!(
-            "{MINIMAL}\n[{table}]\ntoken_file='{}'",
-            secret.display()
+            "{MINIMAL}\n[{table}]\ntoken_file='{}'{}",
+            secret.display(),
+            capabilities(table)
         ))
         .unwrap();
         for mode in [0o600, 0o640, 0o620, 0o660, 0o601, 0o604] {
@@ -741,6 +764,55 @@ fn malformed_key_types_and_toml_do_not_echo_material() {
     let error = ServerConfig::parse("token='DO-NOT-PRINT").unwrap_err();
     assert!(error.contains("invalid TOML"));
     assert!(!error.contains("DO-NOT-PRINT"));
+}
+
+#[test]
+fn declared_runner_capabilities_are_required_and_validated() {
+    let runner = "[runners.build-1]\ntoken_file = '/run/secrets/runner'\n";
+    let minimal = ServerConfig::parse(&format!(
+        "{MINIMAL}{runner}capabilities = {{ arch = 'x86_64', os = 'darwin' }}"
+    ))
+    .unwrap();
+    let declared = &minimal.runners["build-1"].capabilities;
+    assert_eq!((declared.arch, declared.os), (Arch::X86_64, Os::Darwin));
+    assert_eq!(declared.backends, [Backend::Nix]);
+    assert!(declared.tags.is_empty());
+    assert_eq!(declared.max_jobs, 1);
+    server_error(&format!("{MINIMAL}{runner}"), "capabilities");
+    let fixture_capabilities = "arch = \"aarch64\"\nos = \"linux\"";
+    for (replacement, field) in [
+        ("os = \"linux\"", "arch"),
+        ("arch = \"aarch64\"", "os"),
+        ("arch = \"aarch64\"\nos = \"macos\"", "os"),
+        ("arch = \"arm64\"\nos = \"linux\"", "arch"),
+    ] {
+        let input = SERVER.replace(fixture_capabilities, replacement);
+        server_error(&input, "runners.build-1.capabilities");
+        server_error(&input, field);
+    }
+    for (from, to, field) in [
+        (
+            "backends = [\"nix\"]",
+            "backends = [\"docker\"]",
+            "backends",
+        ),
+        ("max_jobs = 2", "max_jobs = 0", "max_jobs"),
+        ("tags = [\"kvm\"]", "tags = [\"kvm\", \"KVM\"]", "tags[1]"),
+        ("tags = [\"kvm\"]", "tags = [\"\"]", "tags[0]"),
+        ("tags = [\"kvm\"]", "tags = [\"-kvm\"]", "tags[0]"),
+        ("tags = [\"kvm\"]", "tags = [\"k vm\"]", "tags[0]"),
+    ] {
+        assert!(SERVER.contains(from), "{from}");
+        server_error(
+            &SERVER.replace(from, to),
+            &format!("runners.build-1.capabilities.{field}"),
+        );
+    }
+    ServerConfig::parse(&SERVER.replace(
+        "tags = [\"kvm\"]",
+        "tags = [\"big-parallel\", \"gccarch-x86-64-v3\", \"nixos_test.1\"]",
+    ))
+    .unwrap();
 }
 
 #[test]

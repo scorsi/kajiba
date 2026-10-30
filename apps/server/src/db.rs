@@ -14,6 +14,7 @@ pub mod permissions;
 pub mod events;
 pub mod pushes;
 pub mod repos;
+pub mod runners;
 pub mod sessions;
 pub mod users;
 
@@ -60,7 +61,7 @@ pub async fn reconcile(
     Ok(revoked)
 }
 
-/// ADR 0026: users, credentials and repositories are reconciled in one transaction;
+/// ADR 0026: users, credentials, repositories and runners are reconciled in one transaction;
 /// a refusal anywhere leaves nothing committed.
 pub async fn reconcile_declared(
     writer: &mut SqliteConnection,
@@ -74,6 +75,11 @@ pub async fn reconcile_declared(
     let revoked = reconcile(&mut transaction, &config.users).await?;
     let applied =
         repos::reconcile_repos(&mut transaction, &config.git.state_dir, git, &config.repos).await?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|err| format!("runner reconciliation: {err}"))?
+        .as_millis() as i64;
+    runners::reconcile_runners(&mut transaction, &config.runners, now).await?;
     transaction
         .commit()
         .await
@@ -162,6 +168,7 @@ mod tests {
     mod pushes;
     mod repos;
     mod repositories;
+    mod runners;
     mod users;
 
     struct TempDir(PathBuf);
@@ -201,7 +208,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(history.len(), MIGRATOR.iter().count());
-        assert_eq!(history.len(), 9);
+        assert_eq!(history.len(), 10);
         for ((row, migration), version) in history.iter().zip(MIGRATOR.iter()).zip(1..) {
             assert_eq!(row.0, version);
             assert!(row.2);
@@ -346,7 +353,7 @@ mod tests {
                 .fetch_all(&mut writer)
                 .await
                 .unwrap();
-        assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         readers.close().await;
         writer.close().await.unwrap();
     }
@@ -378,7 +385,7 @@ mod tests {
                 .inspect(|line| assert_eq!(line["event"], "migration-applied"))
                 .map(|line| line["version"].as_i64().unwrap())
                 .collect();
-            assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+            assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
             return;
         }
         kajiba_core::log::init("info").unwrap();
@@ -406,7 +413,7 @@ mod tests {
                 .fetch_all(&mut writer)
                 .await
                 .unwrap();
-        assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         writer.close().await.unwrap();
     }
 

@@ -37,7 +37,7 @@ pub struct ServerConfig {
     #[serde(default)]
     pub users: BTreeMap<String, UserConfig>,
     #[serde(default)]
-    pub runners: BTreeMap<String, CredentialConfig>,
+    pub runners: BTreeMap<String, RunnerDeclaration>,
     #[serde(default)]
     pub mirror: MirrorConfig,
     #[serde(default)]
@@ -200,6 +200,42 @@ pub struct CredentialConfig {
     pub token_file: PathBuf,
 }
 
+/// A declared runner (0026): its secret and the capabilities it may announce.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerDeclaration {
+    pub token_file: PathBuf,
+    pub capabilities: Capabilities,
+}
+
+/// `arch` and `os` are the two halves of a Nix system name (`aarch64-linux`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Capabilities {
+    pub arch: Arch,
+    pub os: Os,
+    #[serde(default = "backends")]
+    pub backends: Vec<Backend>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default = "max_jobs")]
+    pub max_jobs: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Arch {
+    X86_64,
+    Aarch64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Os {
+    Linux,
+    Darwin,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MirrorConfig {
@@ -320,7 +356,7 @@ pub struct RunnerConfig {
     pub metrics: MetricsConfig,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
     Nix,
@@ -530,6 +566,21 @@ fn normalize<T>(map: &mut BTreeMap<String, T>, field: &str) -> Result<(), String
     }
     *map = normalized;
     Ok(())
+}
+
+/// Tags are matched exactly (0008), like Nix system features: lowercase, never normalized.
+fn validate_tag(tag: &str) -> Result<(), &'static str> {
+    if (1..=63).contains(&tag.len())
+        && tag.as_bytes()[0].is_ascii_alphanumeric()
+        && tag.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+        })
+    {
+        return Ok(());
+    }
+    Err(
+        "tag must be 1 to 63 characters: lowercase ASCII letters, digits, '.', '_' or '-', starting with a letter or digit",
+    )
 }
 
 fn validate_path(path: &Path, field: &str) -> Result<(), String> {
@@ -842,11 +893,15 @@ impl ServerConfig {
                 }
             }
         }
-        for (name, credential) in &config.runners {
-            validate_path(
-                &credential.token_file,
-                &format!("runners.{name}.token_file"),
-            )?;
+        for (name, runner) in &config.runners {
+            validate_path(&runner.token_file, &format!("runners.{name}.token_file"))?;
+            let field = format!("runners.{name}.capabilities");
+            if runner.capabilities.max_jobs == 0 {
+                return Err(format!("{field}.max_jobs: must be greater than zero"));
+            }
+            for (index, tag) in runner.capabilities.tags.iter().enumerate() {
+                validate_tag(tag).map_err(|err| format!("{field}.tags[{index}]: {err}"))?;
+            }
         }
         for (name, credential) in &config.mirror.credentials {
             validate_path(

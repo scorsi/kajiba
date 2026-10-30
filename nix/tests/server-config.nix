@@ -20,7 +20,13 @@ pkgs.testers.runNixOSTest {
       enable = true;
       package = kajibaServerPackage;
       http.publicUrl = "https://forge.example.org";
-      runners.build-1 = { inherit tokenFile; };
+      runners.build-1 = {
+        inherit tokenFile;
+        capabilities = {
+          arch = "x86_64";
+          os = "linux";
+        };
+      };
     };
     users.groups.shared-secret.gid = 4242;
     systemd.services.kajiba-git.serviceConfig.SupplementaryGroups = [ "4242" ];

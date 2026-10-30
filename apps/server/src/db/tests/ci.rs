@@ -70,7 +70,7 @@ async fn ci_valid_rows_columns_nullability_and_indexes() {
     for (table, expected) in [
         (
             "runner",
-            "id public_id name capabilities version connected last_contact_at",
+            "id public_id name capabilities version connected last_contact_at disabled_at hostname",
         ),
         (
             "run",
@@ -116,6 +116,8 @@ async fn ci_valid_rows_columns_nullability_and_indexes() {
                 && !matches!(
                     name.as_str(),
                     "last_contact_at"
+                        | "disabled_at"
+                        | "hostname"
                         | "ref"
                         | "event_id"
                         | "triggered_by"

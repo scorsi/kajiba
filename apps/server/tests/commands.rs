@@ -87,7 +87,7 @@ fn config_check_validates_without_opening_secrets_and_files_checks_access() {
     let path = dir.join("server.toml");
     let secret = dir.join("token");
     let input = format!(
-        "[http]\npublic_url='https://example.org'\n[runners.build-1]\ntoken_file={:?}\n",
+        "[http]\npublic_url='https://example.org'\n[runners.build-1]\ntoken_file={:?}\ncapabilities={{arch='x86_64',os='linux'}}\n",
         secret.to_str().unwrap()
     );
     std::fs::write(&path, input).unwrap();
@@ -162,7 +162,7 @@ fn invalid_config_is_structured_for_check_and_startup() {
             "log.level",
         ),
         (
-            "[http]\npublic_url='https://example.org'\n[runners.build-1]\ntoken_file='/kajiba-test-missing/token'",
+            "[http]\npublic_url='https://example.org'\n[runners.build-1]\ntoken_file='/kajiba-test-missing/token'\ncapabilities={arch='x86_64',os='linux'}",
             "runners.build-1.token_file",
         ),
     ] {
@@ -217,7 +217,7 @@ fn serve_emits_start_migrations_and_refuses_an_unreachable_orphan_writer() {
     let (send, receive) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         let mut reader = std::io::BufReader::new(stderr);
-        for _ in 0..11 {
+        for _ in 0..12 {
             let mut text = String::new();
             reader.read_line(&mut text).unwrap();
             let _ = send.send(text);
@@ -225,7 +225,7 @@ fn serve_emits_start_migrations_and_refuses_an_unreachable_orphan_writer() {
     });
     let line = receive.recv_timeout(std::time::Duration::from_secs(5));
     let migration = receive.recv_timeout(std::time::Duration::from_secs(5));
-    let later: Vec<_> = (0..9)
+    let later: Vec<_> = (0..10)
         .map(|_| receive.recv_timeout(std::time::Duration::from_secs(5)))
         .collect();
     let _ = child.kill();
@@ -246,13 +246,13 @@ fn serve_emits_start_migrations_and_refuses_an_unreachable_orphan_writer() {
         .into_iter()
         .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
         .collect();
-    for (line, version) in later[..8].iter().zip([2, 3, 4, 5, 6, 7, 8, 9]) {
+    for (line, version) in later[..9].iter().zip([2, 3, 4, 5, 6, 7, 8, 9, 10]) {
         assert_eq!(line["event"], "migration-applied");
         assert_eq!(line["version"], version);
     }
-    assert_eq!(later[8]["event"], "fatal");
+    assert_eq!(later[9]["event"], "fatal");
     assert!(
-        later[8]["err"]
+        later[9]["err"]
             .as_str()
             .unwrap()
             .contains("GIT_SIDE_UNAVAILABLE")

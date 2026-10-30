@@ -87,7 +87,15 @@ let
           expires = "2030-01-01T00:00:00Z";
         };
       };
-      runners.build-1.tokenFile = "/run/secrets/kajiba-runner-build-1";
+      runners.build-1 = {
+        tokenFile = "/run/secrets/kajiba-runner-build-1";
+        capabilities = {
+          arch = "aarch64";
+          os = "linux";
+          tags = [ "kvm" ];
+          maxJobs = 2;
+        };
+      };
       mirror = {
         credentials.github.tokenFile = "/run/secrets/kajiba-github-token";
         reconcileInterval = "2h";
@@ -176,7 +184,15 @@ let
         expires = "2030-01-01T00:00:00Z";
       };
     };
-    runners.build-1.token_file = "/run/secrets/kajiba-runner-build-1";
+    runners.build-1 = {
+      token_file = "/run/secrets/kajiba-runner-build-1";
+      capabilities = {
+        arch = "aarch64";
+        os = "linux";
+        tags = [ "kvm" ];
+        max_jobs = 2;
+      };
+    };
     mirror = {
       credentials.github.token_file = "/run/secrets/kajiba-github-token";
       reconcile_interval = "2h";
@@ -710,6 +726,10 @@ in
       ];
     assert evaluationFails { services.kajiba-server.unexpected = true; };
     assert evaluationFails { services.kajiba-server.runners.build-1.token = "inline-secret"; };
+    # Capabilities are required (0107): no default system.
+    assert evaluationFails {
+      services.kajiba-server.runners.build-2.tokenFile = "/run/secrets/kajiba-runner-build-2";
+    };
     assert evaluationFails { services.kajiba-server.repos.demo.unexpected = true; };
     assert evaluationFails {
       services.kajiba-server.repos.demo.mirrors = lib.mkForce [
@@ -795,5 +815,8 @@ in
   };
   module-token-hash = refused "users.alice.tokens.ci.sha256" {
     services.kajiba-server.users.alice.tokens.ci.sha256 = lib.mkForce "not-a-hash";
+  };
+  module-runner-os = refused "runners.build-1.capabilities.os" {
+    services.kajiba-server.runners.build-1.capabilities.os = lib.mkForce "macos";
   };
 }

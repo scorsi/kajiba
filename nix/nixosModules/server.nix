@@ -138,7 +138,18 @@ let
       signing_keys = map lib.trim user.signingKeys;
       inherit (user) tokens;
     }) cfg.users;
-    runners = lib.mapAttrs (_: runner: { token_file = runner.tokenFile; }) cfg.runners;
+    runners = lib.mapAttrs (_: runner: {
+      token_file = runner.tokenFile;
+      capabilities = {
+        inherit (runner.capabilities)
+          arch
+          os
+          backends
+          tags
+          ;
+        max_jobs = runner.capabilities.maxJobs;
+      };
+    }) cfg.runners;
     mirror = {
       credentials = lib.mapAttrs (_: cred: { token_file = cred.tokenFile; }) cfg.mirror.credentials;
       reconcile_interval = cfg.mirror.reconcileInterval;
@@ -397,7 +408,32 @@ in
       default = { };
       description = "Declared users, by name (0014).";
     };
-    runners = credentials "the runner's shared secret (0008)";
+    runners = mkOption {
+      type = types.attrsOf (
+        types.submodule {
+          options = {
+            tokenFile = secretFile "the runner's shared secret (0008)";
+            capabilities = {
+              arch = mkOption {
+                type = types.str;
+                description = "CPU half of the runner's Nix system name: x86_64 or aarch64.";
+              };
+              os = mkOption {
+                type = types.str;
+                description = "Kernel half of the runner's Nix system name: linux or darwin.";
+              };
+              backends =
+                optional (types.listOf types.str) ''[ "nix" ]''
+                  "Execution backends the runner may announce (0009).";
+              tags = optional (types.listOf types.str) "[ ]" "Tags the runner may announce (0008).";
+              maxJobs = optional types.ints.positive "1" "Concurrency the runner may announce.";
+            };
+          };
+        }
+      );
+      default = { };
+      description = "Declared runners, by name, and the capabilities each may announce (0026).";
+    };
     mirror = {
       credentials = credentials "the GitHub personal access token (0011)";
       reconcileInterval = optional types.str "1h" "Mirror reconciliation interval (0011).";
