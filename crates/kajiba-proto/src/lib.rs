@@ -108,6 +108,30 @@ mod tests {
     }
 
     #[test]
+    fn the_runner_protocol_is_neither_scoped_nor_reflected() {
+        assert!(
+            method_access()
+                .unwrap()
+                .keys()
+                .all(|path| !path.starts_with("/kajiba.runner."))
+        );
+        let pool = DescriptorPool::decode(FILE_DESCRIPTOR_SET).unwrap();
+        assert!(
+            pool.get_service_by_name("kajiba.v1.HealthService")
+                .is_some()
+        );
+        assert!(
+            pool.files()
+                .all(|file| !file.package_name().starts_with("kajiba.runner"))
+        );
+        // The generated service exists all the same.
+        assert_eq!(
+            runner::v1::runner_service_server::SERVICE_NAME,
+            "kajiba.runner.v1.RunnerService"
+        );
+    }
+
+    #[test]
     fn a_method_without_the_option_is_refused() {
         let mut pool = DescriptorPool::decode(FILE_DESCRIPTOR_SET).unwrap();
         pool.add_file_descriptor_proto(FileDescriptorProto {
@@ -157,5 +181,11 @@ pub mod git {
 pub mod gate {
     pub mod v1 {
         tonic::include_proto!("kajiba.gate.v1");
+    }
+}
+
+pub mod runner {
+    pub mod v1 {
+        tonic::include_proto!("kajiba.runner.v1");
     }
 }

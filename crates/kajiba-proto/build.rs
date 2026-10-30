@@ -27,5 +27,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
         &["../../proto"],
     )?;
+    // Outside the kajiba.v1 descriptor set: no scope entry, no reflection (ADR 0105). No
+    // `connect` constructor: it would clash with the `Connect` method; use `new(channel)`.
+    tonic_build::configure()
+        .build_transport(false)
+        .compile_protos(
+            &["../../proto/kajiba/runner/v1/runner.proto"],
+            &["../../proto"],
+        )?;
     Ok(())
 }

@@ -1,0 +1,162 @@
+syntax = "proto3";
+
+package kajiba.runner.v1;
+
+// Forge ↔ runner protocol (0008), on the public port, outside the `kajiba.v1` API: no
+// scope option, no reflection (ADR 0105). Every call carries the runner's shared secret
+// as `authorization: Bearer <secret>` metadata; the runner's name travels in the Hello.
+// Constants (ADR 0105): lease 30 s from the server's clock, heartbeat every 10 s, log
+// chunks of at most 64 KiB, reconnection backoff from 1 s doubling to 30 s.
+service RunnerService {
+  // One stream per runner. The first runner message is a Hello; a refused runner gets a
+  // status (0020), an admitted one keeps the stream. A second connection under the same
+  // name replaces the first.
+  rpc Connect(stream ConnectRequest) returns (stream ConnectResponse);
+  // The sources of an attempt the calling runner holds a lease on, as one git bundle
+  // (ADR 0106): the attempt's commit, minus what the runner's cache already holds.
+  rpc FetchRunBundle(FetchRunBundleRequest) returns (stream FetchRunBundleResponse);
+}
+
+// Runner → forge.
+message ConnectRequest {
+  oneof message {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    Accept accept = 3;
+    LogChunk log_chunk = 4;
+    StepStatus step_status = 5;
+    Result result = 6;
+  }
+}
+
+// Forge → runner.
+message ConnectResponse {
+  oneof message {
+    Assignment assignment = 1;
+    CancelAttempt cancel_attempt = 2;
+    ContinueAttempt continue_attempt = 3;
+    LogAck log_ack = 4;
+    ResultAck result_ack = 5;
+  }
+}
+
+message Hello {
+  // The declared runner name (0026).
+  string name = 1;
+  // The runner's version (0023).
+  string version = 2;
+  Capabilities capabilities = 3;
+  // Informational, never used for authorization: the OS hostname or the configured one.
+  string hostname = 4;
+  // Attempts still running on the runner after a reconnection; each is answered with
+  // ContinueAttempt or CancelAttempt.
+  repeated string in_flight_attempt_ids = 5;
+}
+
+// What the runner announces; never more than its declaration (0026).
+message Capabilities {
+  // The two halves of a Nix system name, e.g. `x86_64` and `linux`, `aarch64` and `darwin`.
+  string arch = 1;
+  string os = 2;
+  // Execution backends, e.g. `nix` (0009).
+  repeated string backends = 3;
+  repeated string tags = 4;
+  uint32 max_jobs = 5;
+}
+
+// Renews the leases of the runner's running attempts.
+message Heartbeat {}
+
+// The runner starts the assigned attempt.
+message Accept {
+  string attempt_id = 1;
+}
+
+// Log bytes of an attempt, in order. Sequences start at 1 per attempt; a chunk holds at
+// most 64 KiB.
+message LogChunk {
+  string attempt_id = 1;
+  uint64 sequence = 2;
+  uint32 step_index = 3;
+  bytes data = 4;
+}
+
+enum StepState {
+  STEP_STATE_UNSPECIFIED = 0;
+  STEP_STATE_RUNNING = 1;
+  STEP_STATE_SUCCEEDED = 2;
+  STEP_STATE_FAILED = 3;
+  STEP_STATE_SKIPPED = 4;
+}
+
+message StepStatus {
+  string attempt_id = 1;
+  uint32 step_index = 2;
+  string name = 3;
+  StepState state = 4;
+  // Set once the step's process has exited.
+  optional int32 exit_code = 5;
+}
+
+enum ResultState {
+  RESULT_STATE_UNSPECIFIED = 0;
+  RESULT_STATE_SUCCEEDED = 1;
+  RESULT_STATE_FAILED = 2;
+  RESULT_STATE_CANCELLED = 3;
+}
+
+// The attempt's terminal state; the first one recorded wins (0008).
+message Result {
+  string attempt_id = 1;
+  ResultState state = 2;
+  optional int32 exit_code = 3;
+  // The failing check, only when the backend knows it structurally (a selected check);
+  // empty otherwise.
+  string failing_check = 4;
+  // Why the attempt failed, e.g. the exit status; empty on success.
+  string reason = 5;
+}
+
+// A job attempt for this runner.
+message Assignment {
+  string attempt_id = 1;
+  string repo_public_id = 2;
+  // The commit to check out.
+  string sha = 3;
+  // The Nix system to build for, e.g. `x86_64-linux`.
+  string system = 4;
+}
+
+// Stop the attempt: it is not current, or it was cancelled.
+message CancelAttempt {
+  string attempt_id = 1;
+}
+
+// After a reconnection: the attempt is still current and leased; the runner resends its
+// logs from the last acknowledged sequence.
+message ContinueAttempt {
+  string attempt_id = 1;
+}
+
+// Every chunk of the attempt up to `sequence` is stored.
+message LogAck {
+  string attempt_id = 1;
+  uint64 sequence = 2;
+}
+
+// The attempt's result is recorded (or was already).
+message ResultAck {
+  string attempt_id = 1;
+}
+
+message FetchRunBundleRequest {
+  string attempt_id = 1;
+  // Commit ids the runner's cache already holds for the repository; ids the repository
+  // lacks are ignored.
+  repeated string have = 2;
+}
+
+// Consecutive pieces of one git bundle.
+message FetchRunBundleResponse {
+  bytes data = 1;
+}
