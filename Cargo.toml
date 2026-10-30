@@ -41,6 +41,8 @@ tonic = "0.12"
 tonic-types = "0.12"
 # grpc-web on the kajiba.v1 routes (0005, 0076).
 tonic-web = { version = "0.12", default-features = false }
+# Already transitive (tonic): applies the grpc-web layer to the kajiba.v1 routes (0088).
+tower-layer = "0.3"
 tonic-build = "0.12"
 tonic-reflection = { version = "0.12", default-features = false, features = ["server"] }
 

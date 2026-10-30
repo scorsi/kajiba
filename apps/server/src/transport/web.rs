@@ -23,11 +23,7 @@ use webauthn_rs::prelude::Url;
 pub(super) type GrpcWeb = tonic_web::GrpcWebService<Routes>;
 
 pub(super) fn grpc_web(api: axum::Router) -> GrpcWeb {
-    // `Server::layer` is the only public way to apply the layer without `tower-layer`.
-    tonic::transport::Server::builder()
-        .layer(tonic_web::GrpcWebLayer::new())
-        .add_routes(Routes::from(api))
-        .into_service::<tonic::body::BoxBody>()
+    tower_layer::Layer::layer(&tonic_web::GrpcWebLayer::new(), Routes::from(api))
 }
 
 /// grpc-web calls go through the translation; plain gRPC (HTTP/2 or test HTTP/1) and

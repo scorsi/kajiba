@@ -2238,6 +2238,7 @@ dependencies = [
  "tonic-reflection",
  "tonic-types",
  "tonic-web",
+ "tower-layer",
  "tracing",
  "webauthn-authenticator-rs",
  "webauthn-rs",
