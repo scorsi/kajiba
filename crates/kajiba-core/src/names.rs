@@ -222,6 +222,12 @@ mod tests {
     }
 
     #[test]
+    fn dash_is_never_a_name() {
+        // `/-/` is the application prefix (ADR 0086).
+        assert_eq!(validate_name("-"), Err(NameError::InvalidCharacters));
+    }
+
+    #[test]
     fn length_boundaries() {
         // The minimum minus one is empty; the maximum plus one is 64.
         for length in [0, 1, 2, 62, 63, 64] {
