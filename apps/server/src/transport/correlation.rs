@@ -20,27 +20,14 @@ pub(super) async fn request(
             .and_then(|value| value.to_str().ok())
             .unwrap_or(""),
     );
-    let method = match request.uri().path() {
-        "/healthz" => "healthz",
-        "/readyz" => "readyz",
-        "/kajiba.admin.v1.AdminService/Enroll" => "/kajiba.admin.v1.AdminService/Enroll",
-        "/kajiba.admin.v1.AdminService/ListRepos" => "/kajiba.admin.v1.AdminService/ListRepos",
-        "/kajiba.admin.v1.AdminService/Import" => "/kajiba.admin.v1.AdminService/Import",
-        "/kajiba.v1.HealthService/Check" => "/kajiba.v1.HealthService/Check",
-        "/kajiba.v1.RepoService/GetRepo" => "/kajiba.v1.RepoService/GetRepo",
-        "/kajiba.v1.RepoService/ListRepos" => "/kajiba.v1.RepoService/ListRepos",
-        "/kajiba.v1.RepoService/GetTree" => "/kajiba.v1.RepoService/GetTree",
-        "/kajiba.v1.RepoService/GetBlob" => "/kajiba.v1.RepoService/GetBlob",
-        "/kajiba.v1.RepoService/ListCommits" => "/kajiba.v1.RepoService/ListCommits",
-        "/kajiba.v1.RepoService/GetCommitDiff" => "/kajiba.v1.RepoService/GetCommitDiff",
-        "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo" => {
-            "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
-        }
+    let path = request.uri().path();
+    let method = match known(path) {
+        Some(method) => method,
         // Route classes, never the raw path (0022).
-        path if path.starts_with("/raw/") => "raw",
-        path if path.ends_with(".git/info/refs") => "git-info-refs",
-        path if path.ends_with(".git/git-upload-pack") => "git-upload-pack",
-        _ if matches!(content_kind, Kind::Other)
+        None if path.starts_with("/raw/") => "raw",
+        None if path.ends_with(".git/info/refs") => "git-info-refs",
+        None if path.ends_with(".git/git-upload-pack") => "git-upload-pack",
+        None if matches!(content_kind, Kind::Other)
             && request
                 .extensions()
                 .get::<MatchedPath>()
@@ -48,7 +35,7 @@ pub(super) async fn request(
         {
             "ui"
         }
-        _ => "other",
+        None => "other",
     };
     let kind = match method {
         "git-info-refs" | "git-upload-pack" => Kind::GitHttp,
@@ -64,6 +51,33 @@ pub(super) async fn request(
         move |status, duration| metrics.observe(kind, status, duration),
     )
     .await
+}
+
+/// Paths logged as themselves: closed `method` labels (0022).
+fn known(path: &str) -> Option<&'static str> {
+    Some(match path {
+        "/healthz" => "healthz",
+        "/readyz" => "readyz",
+        "/kajiba.admin.v1.AdminService/Enroll" => "/kajiba.admin.v1.AdminService/Enroll",
+        "/kajiba.admin.v1.AdminService/ListRepos" => "/kajiba.admin.v1.AdminService/ListRepos",
+        "/kajiba.admin.v1.AdminService/Import" => "/kajiba.admin.v1.AdminService/Import",
+        "/kajiba.v1.AuthService/Logout" => "/kajiba.v1.AuthService/Logout",
+        "/kajiba.v1.AuthService/GetViewer" => "/kajiba.v1.AuthService/GetViewer",
+        "/kajiba.v1.HealthService/Check" => "/kajiba.v1.HealthService/Check",
+        "/kajiba.v1.RepoService/GetRepo" => "/kajiba.v1.RepoService/GetRepo",
+        "/kajiba.v1.RepoService/ListRepos" => "/kajiba.v1.RepoService/ListRepos",
+        "/kajiba.v1.RepoService/GetTree" => "/kajiba.v1.RepoService/GetTree",
+        "/kajiba.v1.RepoService/GetBlob" => "/kajiba.v1.RepoService/GetBlob",
+        "/kajiba.v1.RepoService/ListCommits" => "/kajiba.v1.RepoService/ListCommits",
+        "/kajiba.v1.RepoService/GetCommitDiff" => "/kajiba.v1.RepoService/GetCommitDiff",
+        "/kajiba.v1.TokenService/CreateToken" => "/kajiba.v1.TokenService/CreateToken",
+        "/kajiba.v1.TokenService/ListTokens" => "/kajiba.v1.TokenService/ListTokens",
+        "/kajiba.v1.TokenService/RevokeToken" => "/kajiba.v1.TokenService/RevokeToken",
+        "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo" => {
+            "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
+        }
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -89,6 +103,13 @@ mod tests {
             } else {
                 Poll::Pending
             }
+        }
+    }
+
+    #[test]
+    fn every_public_method_is_logged_by_name() {
+        for path in kajiba_proto::method_access().unwrap().keys() {
+            assert_eq!(known(path), Some(path.as_str()));
         }
     }
 
