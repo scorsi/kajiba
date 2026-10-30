@@ -11,3 +11,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 kajiba-proto = { path = "../../crates/kajiba-proto" }
+tokio.workspace = true
+# TLS for an https forge URL, with the system certificate store (0076).
+tonic = { workspace = true, features = ["tls-native-roots"] }
+tonic-types.workspace = true

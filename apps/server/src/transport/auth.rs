@@ -36,6 +36,8 @@ pub fn set_cookie(value: &str, max_age: Duration) -> String {
 
 /// The client version a CLI sends on every call (ADR 0080).
 pub const CLIENT_VERSION: &str = "kajiba-client-version";
+/// The server version on every `kajiba.v1` response, for the CLI's warning (ADR 0090).
+pub const SERVER_VERSION: &str = "kajiba-server-version";
 
 /// `X.Y.Z`, optionally followed by a `-` pre-release or `+` build suffix.
 fn semver(version: &str) -> Option<(u64, u64, u64)> {
@@ -257,9 +259,18 @@ impl Auth {
 
 pub(super) async fn authenticate(
     State(auth): State<Auth>,
-    mut request: Request,
+    request: Request,
     next: Next,
 ) -> Response {
+    let mut response = guard(auth, request, next).await;
+    response.headers_mut().insert(
+        SERVER_VERSION,
+        axum::http::HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+    );
+    response
+}
+
+async fn guard(auth: Auth, mut request: Request, next: Next) -> Response {
     // Before credential resolution: an incompatible client learns why, whatever its token.
     if let Err(status) = version_check(request.headers(), env!("CARGO_PKG_VERSION")) {
         return status.into_http().map(Body::new);

@@ -100,6 +100,12 @@ pub(in crate::transport) async fn send(
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    // Every kajiba.v1 answer, refusals included, names the server version (ADR 0090).
+    assert_eq!(
+        response.headers().get(super::SERVER_VERSION).is_some(),
+        path.starts_with("/kajiba.v1."),
+        "{path}"
+    );
     Status::from_header_map(response.headers()).filter(|status| status.code() != Code::Ok)
 }
 
