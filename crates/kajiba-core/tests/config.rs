@@ -583,6 +583,45 @@ fn server_secrets_reject_known_git_side_gids_for_every_credential() {
 }
 
 #[test]
+fn server_secrets_reject_configured_git_users_primary_group() {
+    use std::os::unix::fs::{PermissionsExt, chown};
+
+    let output = std::process::Command::new("id")
+        .arg("-un")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let user = std::str::from_utf8(&output.stdout).unwrap().trim();
+    let (_, gid) = kajiba_core::local::named_user(user).unwrap();
+    let dir = TempDir::new("server-secret-primary-gid");
+    let secret = dir.private_file("secret");
+    chown(&secret, None, Some(gid)).unwrap();
+    let link = dir.0.join("link");
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    for table in ["runners.build-1", "mirror.credentials.github"] {
+        for path in [&secret, &link] {
+            let config = ServerConfig::parse(&format!(
+                "{MINIMAL}\n[git]\nuser='{user}'\n[{table}]\ntoken_file='{}'",
+                path.display()
+            ))
+            .unwrap();
+            assert!(config.git.group_ids.is_empty());
+            for mode in [0o600, 0o640] {
+                std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
+                if mode == 0o640 {
+                    let error = config.check_files().unwrap_err();
+                    assert!(error.contains(table), "{error}");
+                    assert!(error.contains("readable by a git-side group"), "{error}");
+                    assert!(!error.contains("DO-NOT-PRINT"), "{error}");
+                } else {
+                    config.check_files().unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn server_secret_modes_are_checked_for_every_credential() {
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new("server-secret-modes");

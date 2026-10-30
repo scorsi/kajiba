@@ -859,18 +859,25 @@ impl ServerConfig {
 
     /// Check access as the current user, without reading or returning secret contents.
     pub fn check_files(&self) -> Result<(), String> {
+        let mut git_group_ids = self.git.group_ids.clone();
+        match crate::local::named_user(&self.git.user) {
+            Ok((_, gid)) => git_group_ids.push(gid),
+            // Offline checks may run on a host without the service identities.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("git.user: cannot resolve primary group: {err}")),
+        }
         for (name, credential) in &self.runners {
             open_server_secret(
                 &credential.token_file,
                 &format!("runners.{name}.token_file"),
-                &self.git.group_ids,
+                &git_group_ids,
             )?;
         }
         for (name, credential) in &self.mirror.credentials {
             open_server_secret(
                 &credential.token_file,
                 &format!("mirror.credentials.{name}.token_file"),
-                &self.git.group_ids,
+                &git_group_ids,
             )?;
         }
         Ok(())
