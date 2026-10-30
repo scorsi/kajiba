@@ -6,6 +6,7 @@ pub mod local;
 pub mod log;
 pub mod names;
 pub mod state;
+pub mod transport;
 pub mod version;
 
 /// SHA-256 of a secret, the form stored in the database (docs/schema.md).

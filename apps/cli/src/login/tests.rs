@@ -12,6 +12,7 @@ async fn login(token_file: &Path, url: &str, input: &str) -> (Result<(), Error>,
     let result = run(
         token_file,
         Some(url),
+        true,
         &no_env,
         &mut input.as_bytes(),
         false,
@@ -184,6 +185,7 @@ async fn the_url_comes_from_the_environment_or_the_previous_login() {
     run(
         &token_file,
         None,
+        true,
         &env,
         &mut TOKEN.as_bytes(),
         false,
@@ -195,6 +197,7 @@ async fn the_url_comes_from_the_environment_or_the_previous_login() {
     run(
         &token_file,
         None,
+        true,
         &no_env,
         &mut TOKEN.as_bytes(),
         false,
@@ -218,6 +221,7 @@ async fn token_files_in_one_directory_keep_their_own_forge() {
         run(
             file,
             None,
+            true,
             &no_env,
             &mut TOKEN.as_bytes(),
             false,
@@ -239,6 +243,7 @@ async fn without_url_or_previous_login_nothing_is_called() {
     let err = run(
         &token_file,
         None,
+        true,
         &no_env,
         &mut TOKEN.as_bytes(),
         false,
@@ -254,16 +259,34 @@ async fn without_url_or_previous_login_nothing_is_called() {
 }
 
 #[tokio::test]
-async fn login_refuses_plain_http_to_another_machine_before_any_call() {
+async fn login_refuses_plain_http_before_any_call() {
+    let fake = Fake::default();
+    let loopback = fake.serve().await;
     let dir = TempDir::new();
     let token_file = dir.0.join("token");
-    let (result, out) = login(&token_file, "http://forge.example.org", TOKEN).await;
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .starts_with("refusing to send a token to http://forge.example.org: "),
-    );
-    assert!(out.is_empty());
+    for (url, development) in [
+        ("http://forge.example.org", true),
+        (loopback.as_str(), false),
+    ] {
+        let mut out = Vec::new();
+        let result = run(
+            &token_file,
+            Some(url),
+            development,
+            &no_env,
+            &mut TOKEN.as_bytes(),
+            false,
+            &mut out,
+        )
+        .await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .starts_with(&format!("refusing to send a credential to {url}: ")),
+        );
+        assert!(out.is_empty());
+    }
+    assert!(fake.0.lock().unwrap().calls.is_empty());
     assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 0);
 }

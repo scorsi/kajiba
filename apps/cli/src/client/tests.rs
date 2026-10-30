@@ -224,7 +224,7 @@ fn no_env(_: &str) -> Option<OsString> {
 async fn every_call_sends_the_token_and_the_client_version() {
     let fake = Fake::default();
     let url = fake.serve().await;
-    let mut repos = RepoServiceClient::new(connect(&url, TOKEN).unwrap());
+    let mut repos = RepoServiceClient::new(connect(&url, TOKEN, true).unwrap());
     for _ in 0..2 {
         answer(repos.list_repos(ListReposRequest::default()).await).unwrap();
     }
@@ -248,7 +248,7 @@ async fn errors_carry_the_reason_and_the_request_id() {
         "credential expired",
     ));
     let url = fake.serve().await;
-    let mut repos = RepoServiceClient::new(connect(&url, TOKEN).unwrap());
+    let mut repos = RepoServiceClient::new(connect(&url, TOKEN, true).unwrap());
     let err = answer(repos.list_repos(ListReposRequest::default()).await).unwrap_err();
     assert_eq!(
         err.to_string(),
@@ -296,7 +296,7 @@ fn credential_file_missing_unreadable_or_malformed() {
         (saved.url.as_str(), saved.token.as_str()),
         ("https://example.org", TOKEN)
     );
-    assert!(connect("http://127.0.0.1:1", "kjb_\n").is_err());
+    assert!(connect("http://127.0.0.1:1", "kjb_\n", true).is_err());
 }
 
 #[test]
@@ -378,7 +378,7 @@ async fn the_server_version_is_read_from_answers_and_refusals() {
     let fake = Fake::default();
     fake.0.lock().unwrap().server_version = Some("9.9.9");
     let url = fake.serve().await;
-    let mut repos = RepoServiceClient::new(connect(&url, TOKEN).unwrap());
+    let mut repos = RepoServiceClient::new(connect(&url, TOKEN, true).unwrap());
     let response = repos.list_repos(ListReposRequest::default()).await.unwrap();
     assert_eq!(server_version(response.metadata()).unwrap(), "9.9.9");
     fake.0.lock().unwrap().refusal = Some(Status::not_found("gone"));
@@ -387,33 +387,4 @@ async fn the_server_version_is_read_from_answers_and_refusals() {
         .await
         .unwrap_err();
     assert_eq!(server_version(status.metadata()).unwrap(), "9.9.9");
-}
-
-#[test]
-fn a_token_goes_only_over_https_or_to_loopback() {
-    for (url, tls) in [
-        ("https://forge.example.org", true),
-        ("HTTPS://forge.example.org", true),
-        ("http://localhost:8080", false),
-        ("http://LOCALHOST", false),
-        ("http://127.0.0.1:1", false),
-        ("http://[::1]:8080", false),
-    ] {
-        assert_eq!(secure(url).unwrap(), tls, "{url}");
-    }
-    for url in [
-        "http://forge.example.org",
-        "http://127.0.0.2:8080",
-        "http://localhost.example.org",
-        "http://[::2]",
-        "ftp://forge.example.org",
-    ] {
-        assert_eq!(
-            secure(url).unwrap_err().to_string(),
-            format!(
-                "refusing to send a token to {url}: the forge URL must be https \
-                 (http only for localhost, 127.0.0.1 or [::1])"
-            )
-        );
-    }
 }

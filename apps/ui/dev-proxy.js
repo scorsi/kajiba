@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 
 export const DEFAULT_URL = "http://127.0.0.1:8080";
 
-/** `https`, or plain `http` to this machine (ADR 0099). */
+/** `https`, or plain `http` to this machine: `pnpm dev` is development mode (ADRs 0099, 0104). */
 function secure(url) {
   return (
     url.protocol === "https:" ||
@@ -15,10 +15,15 @@ function secure(url) {
 }
 
 /**
- * Vite's `server.proxy` for `env`; throws on a token it must not send.
+ * Vite's `server.proxy` for `env`; throws on a token it must not send, warns once when it
+ * sends one over plain http.
  * @returns {Record<string, import("vite").ProxyOptions>}
  */
-export function devProxy(env, read = (path) => readFileSync(path, "utf8")) {
+export function devProxy(
+  env,
+  read = (path) => readFileSync(path, "utf8"),
+  warn = console.warn,
+) {
   const target = env.KAJIBA_DEV_URL || DEFAULT_URL;
   const tokenFile = env.KAJIBA_DEV_TOKEN_FILE;
   let token;
@@ -30,9 +35,15 @@ export function devProxy(env, read = (path) => readFileSync(path, "utf8")) {
         `KAJIBA_DEV_TOKEN_FILE ${tokenFile} is for ${url.trim()}, not KAJIBA_DEV_URL ${target}`,
       );
     }
-    if (!secure(new URL(target))) {
+    const parsed = new URL(target);
+    if (!secure(parsed)) {
       throw new Error(
-        `refusing to send a token to ${target}: the URL must be https (http only for localhost, 127.0.0.1 or [::1])`,
+        `refusing to send a credential to ${target}: the URL must be https (http only to localhost, 127.0.0.1 or [::1], in development mode)`,
+      );
+    }
+    if (parsed.protocol === "http:") {
+      warn(
+        `warning: development mode: sending the token over plain http to ${target}`,
       );
     }
     token = saved.trim();

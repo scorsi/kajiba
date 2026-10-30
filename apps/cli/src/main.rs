@@ -28,6 +28,10 @@ struct Args {
     /// Print protojson instead of text.
     #[arg(long, global = true)]
     json: bool,
+    /// Development mode: also accept a plain http forge URL on localhost, 127.0.0.1 or
+    /// [::1] (otherwise only https), with a warning.
+    #[arg(long, global = true)]
+    development: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -75,12 +79,23 @@ async fn run(
 ) -> Result<(), client::Error> {
     let token_file = client::token_path(args.token_file.as_deref(), env)?;
     match args.command {
-        Command::Login => login::run(&token_file, args.url.as_deref(), env, input, tty, out).await,
+        Command::Login => {
+            login::run(
+                &token_file,
+                args.url.as_deref(),
+                args.development,
+                env,
+                input,
+                tty,
+                out,
+            )
+            .await
+        }
         Command::Repo { command } => {
             let saved = client::credentials(args.url.as_deref(), &token_file, env)?;
             repo::run(
                 command,
-                client::connect(&saved.url, &saved.token)?,
+                client::connect(&saved.url, &saved.token, args.development)?,
                 args.json,
                 out,
             )

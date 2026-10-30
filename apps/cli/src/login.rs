@@ -12,6 +12,7 @@ use std::{
 pub async fn run(
     token_file: &Path,
     url: Option<&str>,
+    development: bool,
     env: Env<'_>,
     input: &mut dyn BufRead,
     tty: bool,
@@ -32,7 +33,7 @@ pub async fn run(
         }
     };
     let viewer = client::answer(
-        AuthServiceClient::new(client::connect(&url, &token)?)
+        AuthServiceClient::new(client::connect(&url, &token, development)?)
             .get_viewer(GetViewerRequest {})
             .await,
     )?;

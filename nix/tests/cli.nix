@@ -65,11 +65,12 @@ pkgs.testers.runNixOSTest {
     import json
 
     base = "http://forge:8080"
-    # The CLI runs on the forge: loopback is the URL its token files name (ADR 0098).
+    # The CLI runs on the forge: loopback is the URL its token files name (ADR 0098), over
+    # plain http in development mode (ADR 0104).
     api = "http://127.0.0.1:8080"
     bundle = "/var/lib/kajiba-fixtures/demo.bundle"
-    cli = "kajiba --token-file /root/token"
-    other_cli = "${otherCli}/bin/kajiba --token-file /root/token"
+    cli = "kajiba --development --token-file /root/token"
+    other_cli = "${otherCli}/bin/kajiba --development --token-file /root/token"
 
 
     def cli_refusal(command, reason):
@@ -91,7 +92,7 @@ pkgs.testers.runNixOSTest {
     )
 
     with subtest("login checks the token and saves it with the forge URL in one file"):
-        assert forge.succeed(f"printf '%s\\n' '${pat}' | kajiba login --url {api} --token-file /root/token") == f"logged in to {api} as alice\n"
+        assert forge.succeed(f"printf '%s\\n' '${pat}' | kajiba login --development --url {api} --token-file /root/token") == f"logged in to {api} as alice\n"
         assert forge.succeed("cat /root/token") == f"{api}\n${pat}\n"
         assert forge.succeed("stat -c %a /root/token").strip() == "600"
         forge.fail("test -e /root/url")
@@ -124,9 +125,9 @@ pkgs.testers.runNixOSTest {
             assert forge.succeed(f"cat {directory}/README.md") == "main readme\n"
 
     with subtest("expired and absent credentials are refused"):
-        cli_refusal("kajiba --token-file /root/expired-token repo list", "CREDENTIAL_EXPIRED")
+        cli_refusal("kajiba --development --token-file /root/expired-token repo list", "CREDENTIAL_EXPIRED")
         # An empty token reaches server authentication; a missing file fails locally.
-        cli_refusal("kajiba --token-file /root/no-token repo list", "CREDENTIAL_INVALID")
+        cli_refusal("kajiba --development --token-file /root/no-token repo list", "CREDENTIAL_INVALID")
         cli_refusal("kajiba --token-file /root/missing-token repo list", "no token file")
 
     with subtest("a token file's token never goes to another forge"):
@@ -134,11 +135,19 @@ pkgs.testers.runNixOSTest {
         cli_refusal(f"env KAJIBA_URL=http://127.0.0.1:9 {cli} repo list", f"is for {api}, not http://127.0.0.1:9")
 
     with subtest("a token is never sent over plain HTTP to another machine"):
-        refused = f"refusing to send a token to {base}: the forge URL must be https"
-        cli_refusal(f"printf '%s\\n' '${pat}' | kajiba login --url {base} --token-file /root/remote-token", refused)
+        refused = f"refusing to send a credential to {base}: the URL must be https"
+        cli_refusal(f"printf '%s\\n' '${pat}' | kajiba login --development --url {base} --token-file /root/remote-token", refused)
         forge.fail("test -e /root/remote-token")
         forge.succeed(f"umask 077; printf '%s\\n%s\\n' {base} '${pat}' > /root/remote-token")
-        cli_refusal("kajiba --token-file /root/remote-token repo list", refused)
+        cli_refusal("kajiba --development --token-file /root/remote-token repo list", refused)
+
+    with subtest("loopback http is refused outside development mode"):
+        refused = f"refusing to send a credential to {api}: the URL must be https"
+        cli_refusal(f"printf '%s\\n' '${pat}' | kajiba login --url {api} --token-file /root/plain-token", refused)
+        forge.fail("test -e /root/plain-token")
+        cli_refusal("kajiba --token-file /root/token repo list", refused)
+        warning = f"kajiba: warning: development mode: sending the token over plain http to {api}\n"
+        assert forge.succeed(f"{cli} repo list 2>&1 >/dev/null") == warning
 
     with subtest("another compiled 0.minor is refused and names both versions"):
         assert forge.succeed("kajiba --version").strip() == "kajiba ${version}"

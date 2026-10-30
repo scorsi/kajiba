@@ -60,7 +60,7 @@ async fn fake() -> (Fake, String) {
 
 async fn output(url: &str, command: Command, json: bool) -> Result<String, Error> {
     let mut out = Vec::new();
-    run(command, connect(url, TOKEN).unwrap(), json, &mut out).await?;
+    run(command, connect(url, TOKEN, true).unwrap(), json, &mut out).await?;
     Ok(String::from_utf8(out).unwrap())
 }
 

@@ -85,15 +85,30 @@ test("a token file for another URL or over remote http is refused", () => {
         },
         file(`http://forge.example.org\n${TOKEN}\n`),
       ),
-    /refusing to send a token to http:\/\/forge\.example\.org/,
+    /refusing to send a credential to http:\/\/forge\.example\.org/,
   );
+  const warnings = [];
   devProxy(
     {
       KAJIBA_DEV_URL: "https://forge.example.org",
       KAJIBA_DEV_TOKEN_FILE: "/t",
     },
     file(`https://forge.example.org\n${TOKEN}\n`),
+    (line) => warnings.push(line),
   );
+  assert.deepEqual(warnings, []);
+});
+
+test("a token over loopback http is development mode and warns once", () => {
+  const warnings = [];
+  devProxy(
+    { KAJIBA_DEV_URL: "http://127.0.0.1:8080", KAJIBA_DEV_TOKEN_FILE: "/t" },
+    () => `http://127.0.0.1:8080\n${TOKEN}\n`,
+    (line) => warnings.push(line),
+  );
+  assert.deepEqual(warnings, [
+    "warning: development mode: sending the token over plain http to http://127.0.0.1:8080",
+  ]);
 });
 
 test("pnpm dev proxies grpc-web and ceremonies to the local server as the browser sent them", async (t) => {

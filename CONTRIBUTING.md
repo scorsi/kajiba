@@ -46,7 +46,8 @@ sees one origin (ADRs 0006, 0102):
   ```
 
   The file's URL must be `KAJIBA_DEV_URL`, and a token goes only over HTTPS
-  (or plain HTTP to loopback), as with the CLI (ADRs 0098, 0099).
+  (or plain HTTP to loopback, since `pnpm dev` is development mode, with a
+  warning), as with the CLI's `--development` (ADRs 0098, 0099, 0104).
 
 ## Checks
 
