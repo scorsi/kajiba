@@ -45,6 +45,7 @@ async function enroll(page: Page, link: string) {
   await expect(
     page.getByRole("heading", { name: "Welcome, alice" }),
   ).toBeVisible();
+  await expect(page).toHaveURL(/\/-\/enroll$/);
   await page.getByLabel("Passkey name").fill("virtual");
   await page.getByRole("button", { name: "Create passkey" }).click();
   await expect(

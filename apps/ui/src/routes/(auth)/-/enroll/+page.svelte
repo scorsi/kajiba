@@ -1,6 +1,6 @@
 <!--
 	First enrollment from the one-time link `/-/enroll#<token>` (ADR 0084): the token
-	stays in the fragment, never sent as a path or query. Check the link, register the
+	is captured from the fragment and removed from history. Check the link, register the
 	first passkey, then continue signed in.
 -->
 <script lang="ts">
@@ -8,8 +8,9 @@
 	import Icon from '#lib/components/Icon.svelte';
 	import Skeleton from '#lib/components/Skeleton.svelte';
 	import { resource } from '#lib/resource.svelte.ts';
+	import { takeEnrollmentToken } from '#lib/enrollment.ts';
 
-	const token = location.hash.slice(1);
+	const token = takeEnrollmentToken();
 	const link = resource(() =>
 		token ? getEnrollment({ token }) : Promise.reject(new Error('This link has no token.'))
 	);
