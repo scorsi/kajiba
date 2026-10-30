@@ -1,6 +1,6 @@
 # ADR 0095 — Configurable service identities
 
-Status: Proposed — 2026-10-30
+Status: Accepted — 2026-10-30
 
 ## Context
 
