@@ -1,10 +1,13 @@
 //! `kajiba`, the forge's command-line client (0007).
-use clap::Parser;
-use std::{path::PathBuf, process::ExitCode};
+use clap::{Parser, Subcommand};
+use std::{
+    io::{BufRead, IsTerminal, Write},
+    path::PathBuf,
+    process::ExitCode,
+};
 
-// shortcut: unused outside tests until `login` and `repo` (J4 tasks 13-14) call it.
-#[cfg_attr(not(test), allow(dead_code))]
 mod client;
+mod login;
 
 #[derive(Parser)]
 #[command(
@@ -22,11 +25,31 @@ struct Args {
     /// Print protojson instead of text.
     #[arg(long, global = true)]
     json: bool,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Read a personal access token from stdin, check it with the forge, and save it
+    /// with the forge URL.
+    Login,
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    match run(Args::parse(), &|name| std::env::var_os(name)).await {
+    let stdin = std::io::stdin();
+    let tty = stdin.is_terminal();
+    let env = |name: &str| std::env::var_os(name);
+    match run(
+        Args::parse(),
+        &env,
+        &mut stdin.lock(),
+        tty,
+        &mut std::io::stdout(),
+    )
+    .await
+    {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("kajiba: {err}");
@@ -35,6 +58,15 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(_args: Args, _env: client::Env<'_>) -> Result<(), client::Error> {
-    Ok(())
+async fn run(
+    args: Args,
+    env: client::Env<'_>,
+    input: &mut dyn BufRead,
+    tty: bool,
+    out: &mut dyn Write,
+) -> Result<(), client::Error> {
+    let token_file = client::token_path(args.token_file.as_deref(), env)?;
+    match args.command {
+        Command::Login => login::run(&token_file, args.url.as_deref(), env, input, tty, out).await,
+    }
 }

@@ -2159,6 +2159,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "kajiba-proto",
+ "libc",
  "tokio",
  "tonic",
  "tonic-types",

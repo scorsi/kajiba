@@ -88,6 +88,8 @@ pub fn forge_url(option: Option<&str>, token: &Path, env: Env) -> Result<String,
     }
 }
 
+// shortcut: unused outside tests until `repo` (J4 task 14) reads the token file.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn read_token(path: &Path) -> Result<String, Error> {
     match std::fs::read_to_string(path) {
         Ok(token) => Ok(token.trim().into()),

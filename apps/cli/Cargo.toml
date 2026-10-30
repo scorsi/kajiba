@@ -11,6 +11,8 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 kajiba-proto = { path = "../../crates/kajiba-proto" }
+# Already transitive: terminal echo off while `login` reads a token (ADR 0091).
+libc.workspace = true
 tokio.workspace = true
 # TLS for an https forge URL, with the system certificate store (0076).
 tonic = { workspace = true, features = ["tls-native-roots"] }
