@@ -22,6 +22,32 @@ shares the workspace's version and Cargo dependency artifacts. Its commands
 are `kajiba-git --version`, `kajiba-git config check <path>` and
 `kajiba-git serve --config <path>`; the daemon runtime is added in J3 task 9.
 
+### Web application (`pnpm dev`)
+
+```sh
+cd apps/ui && pnpm dev   # http://localhost:5173, hot reload, no Rust rebuild
+```
+
+Vite proxies grpc-web (`/kajiba.v1.*`) and `/auth/webauthn/*` to the server
+named by `KAJIBA_DEV_URL` (default `http://127.0.0.1:8080`), so the browser
+sees one origin (ADRs 0006, 0102):
+
+- **Local server**: run it with `http.public_url = "http://localhost:5173"`
+  (the Vite origin) and open that URL; passkey enrollment and login work as in
+  production.
+- **Remote instance**: passkeys cannot work there (the relying party is the
+  remote host). Log in with the CLI into a file of your own, then point Vite
+  at it; the proxy sends that PAT and drops the browser's `Origin` and
+  cookies:
+
+  ```sh
+  kajiba login --url https://forge.example.org --token-file ~/.config/kajiba/dev
+  KAJIBA_DEV_URL=https://forge.example.org KAJIBA_DEV_TOKEN_FILE=~/.config/kajiba/dev pnpm dev
+  ```
+
+  The file's URL must be `KAJIBA_DEV_URL`, and a token goes only over HTTPS
+  (or plain HTTP to loopback), as with the CLI (ADRs 0098, 0099).
+
 ## Checks
 
 ```sh

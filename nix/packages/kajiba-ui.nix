@@ -21,6 +21,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
       ../../pnpm-lock.yaml
       ../../apps/ui/package.json
       ../../apps/ui/vite.config.ts
+      ../../apps/ui/dev-proxy.js
       ../../apps/ui/tsconfig.json
       ../../apps/ui/src
       ../../apps/ui/tests
