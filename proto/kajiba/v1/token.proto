@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package kajiba.v1;
+
+import "google/protobuf/timestamp.proto";
+import "kajiba/v1/options.proto";
+
+// The caller's personal access tokens (0014, 0081). Only a browser session may call
+// these methods: a PAT is refused with PERMISSION_DENIED / SESSION_REQUIRED. Declared
+// tokens are listed but read-only (DECLARED_IN_CONFIG).
+service TokenService {
+  // A runtime token; its secret is in this response only.
+  rpc CreateToken(CreateTokenRequest) returns (CreateTokenResponse) {
+    option (kajiba.v1.scope) = SCOPE_ADMIN;
+  }
+  // The caller's declared and runtime tokens, revoked ones included, ordered by name.
+  rpc ListTokens(ListTokensRequest) returns (ListTokensResponse) {
+    option (kajiba.v1.scope) = SCOPE_ADMIN;
+  }
+  // Revokes a runtime token of the caller; revoking it again changes nothing.
+  // TOKEN_NOT_FOUND otherwise.
+  rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse) {
+    option (kajiba.v1.scope) = SCOPE_ADMIN;
+  }
+}
+
+message CreateTokenRequest {
+  // A name under the shared name rule, unique among the caller's tokens.
+  string name = 1;
+  // At least one, none unspecified.
+  repeated Scope scopes = 2;
+  // In the future; unset for a token that never expires.
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message CreateTokenResponse {
+  Token token = 1;
+  // `kjb_` followed by 32 random bytes in base64url; never shown again.
+  string secret = 2;
+}
+
+message ListTokensRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListTokensResponse {
+  repeated Token tokens = 1;
+  string next_page_token = 2;
+}
+
+message RevokeTokenRequest {
+  string public_id = 1;
+}
+
+message RevokeTokenResponse {
+  Token token = 1;
+}
+
+// A token's metadata, never its secret or hash.
+message Token {
+  string public_id = 1;
+  string name = 2;
+  repeated Scope scopes = 3;
+  TokenSource source = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp expires_at = 6;
+  google.protobuf.Timestamp last_used_at = 7;
+  google.protobuf.Timestamp revoked_at = 8;
+}
+
+enum TokenSource {
+  TOKEN_SOURCE_UNSPECIFIED = 0;
+  // Declared in the configuration: read-only.
+  TOKEN_SOURCE_CONFIG = 1;
+  TOKEN_SOURCE_RUNTIME = 2;
+}

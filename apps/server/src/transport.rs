@@ -17,6 +17,7 @@ use kajiba_proto::v1::{
     check_response::ServingStatus,
     health_service_server::{HealthService, HealthServiceServer},
     repo_service_server::RepoServiceServer,
+    token_service_server::TokenServiceServer,
 };
 use sqlx::SqlitePool;
 use std::{
@@ -134,6 +135,7 @@ impl HealthService for Health {
 fn router(health: Health, reflection: bool, registry: Arc<Registry>) -> Result<Router, String> {
     let mut app = Routes::new(HealthServiceServer::new(health.clone()))
         .add_service(AuthServiceServer::new(auth::Sessions(health.clone())))
+        .add_service(TokenServiceServer::new(tokens::Tokens(health.clone())))
         .add_service(
             RepoServiceServer::new(repos::Repos(health.clone()))
                 // Bound inbound work before handler admission (ADR 0057).
@@ -403,6 +405,7 @@ pub mod local;
 pub mod raw;
 pub mod repos;
 mod stream;
+mod tokens;
 
 #[cfg(test)]
 mod tests;

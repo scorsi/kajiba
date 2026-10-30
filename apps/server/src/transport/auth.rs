@@ -77,6 +77,8 @@ fn version_check(headers: &HeaderMap, server: &str) -> Result<(), Status> {
 pub struct Principal {
     pub user_id: i64,
     pub scopes: Vec<Scope>,
+    /// A browser session rather than a PAT: only a session manages PATs (ADR 0081).
+    pub session: bool,
 }
 
 #[derive(Clone)]
@@ -176,12 +178,12 @@ pub(super) fn admit(found: Option<Found>, now: i64) -> Result<Found, Refusal> {
     Ok(found)
 }
 
-/// The scopes a credential holds: a session every scope, a token those it lists.
-fn scopes(found: &Found) -> Vec<Scope> {
+/// The scopes a credential holds: a session (`None`) every scope, a token those it lists.
+pub(super) fn scopes(listed: Option<&str>) -> Vec<Scope> {
     (1..)
         .map_while(|value| Scope::try_from(value).ok())
         .filter(|scope| {
-            found.scopes.as_deref().is_none_or(|listed| {
+            listed.is_none_or(|listed| {
                 listed
                     .split_whitespace()
                     .any(|name| name == scope_name(*scope))
@@ -190,7 +192,7 @@ fn scopes(found: &Found) -> Vec<Scope> {
         .collect()
 }
 
-fn now() -> Result<i64, Status> {
+pub(super) fn now() -> Result<i64, Status> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
@@ -228,7 +230,7 @@ impl Auth {
             ),
         };
         let found = admit(found, now).map_err(refuse)?;
-        let scopes = scopes(&found);
+        let scopes = scopes(found.scopes.as_deref());
         if !scopes.contains(&scope) {
             return Err(refuse(Refusal::ScopeMissing));
         }
@@ -245,6 +247,7 @@ impl Auth {
         Ok(Principal {
             user_id: found.user_id,
             scopes,
+            session,
         })
     }
 }

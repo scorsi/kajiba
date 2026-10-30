@@ -13,6 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "../../proto/kajiba/v1/auth.proto",
                 "../../proto/kajiba/v1/health.proto",
                 "../../proto/kajiba/v1/repo.proto",
+                "../../proto/kajiba/v1/token.proto",
                 "google/protobuf/timestamp.proto",
             ],
             &["../../proto"],

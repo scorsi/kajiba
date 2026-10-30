@@ -198,6 +198,7 @@ fn as_user<T>(user_id: i64, message: T) -> Request<T> {
         .insert(crate::transport::auth::Principal {
             user_id,
             scopes: vec![kajiba_proto::v1::Scope::RepoRead],
+            session: false,
         });
     request
 }

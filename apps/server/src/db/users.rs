@@ -76,7 +76,7 @@ pub async fn reconcile_users(
     result.map_err(|err: sqlx::Error| format!("user reconciliation: {err}"))
 }
 
-pub(super) async fn new_public_id(
+pub(crate) async fn new_public_id(
     writer: &mut SqliteConnection,
     now: u128,
 ) -> Result<String, sqlx::Error> {
