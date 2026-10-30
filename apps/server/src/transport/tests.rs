@@ -261,7 +261,11 @@ async fn readiness_tracks_sshd_and_git_link_and_skips_disabled_ssh() {
     assert_eq!(serving_status(&mut app).await, ServingStatus::NotServing);
     assert_eq!(get(&mut app, "/healthz").await, StatusCode::OK);
 
-    let sshd = start(TcpListener::bind(address).await.unwrap());
+    // sshd back, on a fresh port: rebinding the old one races other tests' ephemeral ports.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    state.health.ssh_probe = Some(listener.local_addr().unwrap());
+    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    let sshd = start(listener);
     assert_eq!(
         get(&mut app, "/readyz").await,
         StatusCode::SERVICE_UNAVAILABLE
@@ -271,20 +275,16 @@ async fn readiness_tracks_sshd_and_git_link_and_skips_disabled_ssh() {
     state.health.ssh_status.lock().await.as_mut().unwrap().0 -= SSH_PROBE_TTL;
     assert_eq!(get(&mut app, "/readyz").await, StatusCode::OK);
     assert_eq!(connections.load(Ordering::Relaxed), 2);
-    sshd.abort();
-    let _ = sshd.await;
 
-    // A live listener records any unwanted connection when the subsystem is disabled.
-    let listener = TcpListener::bind(address).await.unwrap();
+    // The live listener records any unwanted connection when the subsystem is disabled.
     state.health.ssh_probe = None;
     let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
     assert_eq!(get(&mut app, "/readyz").await, StatusCode::OK);
     assert_eq!(serving_status(&mut app).await, ServingStatus::Serving);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), listener.accept())
-            .await
-            .is_err()
-    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(connections.load(Ordering::Relaxed), 2);
+    sshd.abort();
+    let _ = sshd.await;
 }
 
 #[tokio::test]
