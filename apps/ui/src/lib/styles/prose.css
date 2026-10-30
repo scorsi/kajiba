@@ -1,0 +1,109 @@
+/* Rendered Markdown (README, .md files). Token-driven; no typography plugin. */
+
+.prose {
+  font-family: var(--k-font-prose);
+  font-size: 0.9375rem;
+  line-height: 1.65;
+  color: var(--k-fg);
+  overflow-wrap: anywhere;
+  max-width: 80ch;
+}
+.prose > :first-child {
+  margin-top: 0;
+}
+.prose > :last-child {
+  margin-bottom: 0;
+}
+.prose :where(p, ul, ol, blockquote, pre, table) {
+  margin: 0 0 1em;
+}
+.prose :where(h1, h2, h3, h4) {
+  font-family: var(--k-font-sans);
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 1.6em 0 0.6em;
+  letter-spacing: -0.01em;
+}
+.prose h1 {
+  font-size: 1.6em;
+}
+.prose h2 {
+  font-size: 1.25em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--k-border);
+}
+.prose h3 {
+  font-size: 1.05em;
+}
+.prose a {
+  color: var(--k-link);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+.prose a:hover {
+  text-decoration-thickness: 2px;
+}
+.prose :where(ul, ol) {
+  padding-left: 1.4em;
+}
+.prose ul {
+  list-style: disc;
+}
+.prose ol {
+  list-style: decimal;
+}
+.prose li + li {
+  margin-top: 0.2em;
+}
+.prose li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-left: -1.4em;
+}
+.prose input[type="checkbox"] {
+  margin-right: 0.5em;
+  accent-color: var(--k-accent);
+}
+.prose blockquote {
+  padding: 0.1em 1em;
+  border-left: 3px solid var(--k-border-strong);
+  color: var(--k-fg-muted);
+}
+.prose :not(pre) > code {
+  padding: 0.1em 0.35em;
+  border-radius: var(--k-radius);
+  background: var(--k-surface-2);
+  font-size: 0.85em;
+}
+.prose pre {
+  padding: 0.85em 1em;
+  border: 1px solid var(--k-border);
+  border-radius: var(--k-radius);
+  background: var(--k-surface-2);
+  overflow-x: auto;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+.prose table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+.prose :where(th, td) {
+  padding: 0.35em 0.8em;
+  border: 1px solid var(--k-border);
+  text-align: left;
+}
+.prose th {
+  background: var(--k-surface-2);
+  font-weight: 600;
+}
+.prose hr {
+  border: 0;
+  border-top: 1px solid var(--k-border);
+  margin: 2em 0;
+}
+.prose img {
+  max-width: 100%;
+}

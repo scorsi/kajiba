@@ -1,9 +1,11 @@
+import tailwindcss from "@tailwindcss/vite";
 import adapter from "@sveltejs/adapter-static";
 import { sveltekit } from "@sveltejs/kit/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [
+    tailwindcss(),
     sveltekit({
       compilerOptions: {
         // Force runes mode for the project, except for libraries. Can be removed in svelte 6.
@@ -14,7 +16,7 @@ export default defineConfig({
       // Static SPA (0006): no Node at runtime, the bundle is embedded in kajiba-server's
       // binary. index.html as fallback is the one SvelteKit warns against for prerendering,
       // but there is nothing prerendered here — every route is served client-side.
-      adapter: adapter({ fallback: "index.html" }),
+      adapter: adapter({ fallback: "index.html", precompress: true }),
     }),
   ],
 });

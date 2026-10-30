@@ -1,0 +1,57 @@
+/* highlight.js token classes → syntax tokens. No highlight.js theme file. */
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag {
+  color: var(--k-syn-keyword);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-template-tag,
+.hljs-symbol {
+  color: var(--k-syn-string);
+}
+.hljs-number,
+.hljs-bullet {
+  color: var(--k-syn-number);
+}
+.hljs-comment,
+.hljs-quote {
+  color: var(--k-syn-comment);
+  font-style: italic;
+}
+.hljs-title,
+.hljs-section,
+.hljs-name {
+  color: var(--k-syn-title);
+}
+.hljs-type,
+.hljs-title.class_,
+.hljs-selector-class {
+  color: var(--k-syn-type);
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-property {
+  color: var(--k-syn-attr);
+}
+.hljs-built_in,
+.hljs-meta,
+.hljs-selector-id {
+  color: var(--k-syn-builtin);
+}
+.hljs-addition {
+  background: var(--k-syn-add-bg);
+}
+.hljs-deletion {
+  background: var(--k-syn-del-bg);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}

@@ -1,0 +1,79 @@
+/*
+ * kajiba design tokens — the single source of colour, type and shape.
+ * Direction: C — "Ai" (藍, indigo). Cool neutrals, indigo accent.
+ *
+ * Raw values live in `--k-*` custom properties. `app.css` maps them into
+ * Tailwind's theme (`bg-surface`, `text-fg-muted`, `font-mono`…), so components
+ * never hard-code a colour.
+ *
+ * Themes: every colour is `light-dark(<light>, <dark>)`. The active scheme comes
+ * from `color-scheme`: the OS preference by default, forced by
+ * `data-theme="light|dark"` on <html> (manual toggle). One definition per token.
+ *
+ * Contrast notes are measured against `--k-bg` (WCAG AA: 4.5:1 for text).
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* Type — bundled variable fonts first (see fonts.css), system fallbacks after */
+  --k-font-sans:
+    "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --k-font-mono:
+    "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SF Mono", Menlo,
+    "DejaVu Sans Mono", monospace;
+  --k-font-ui: var(--k-font-sans);
+  --k-font-prose: var(--k-font-sans);
+
+  /* Shape */
+  --k-radius: 6px;
+  --k-radius-lg: 8px;
+
+  /* Neutrals */
+  --k-bg: light-dark(#f6f7f9, #101217);
+  --k-surface: light-dark(#ffffff, #161921);
+  --k-surface-2: light-dark(#eef0f4, #1d212b);
+  --k-border: light-dark(#dde1e8, #2a2f3b);
+  --k-border-strong: light-dark(#c3c9d3, #3b4251);
+  --k-fg: light-dark(#161a22, #e3e6ec); /* 16.5:1 / 14.6:1 */
+  --k-fg-muted: light-dark(#4f5868, #a8afbd); /* 6.9:1 / 8.4:1 */
+  --k-fg-subtle: light-dark(#5f6878, #8a93a3); /* 5.3:1 / 5.9:1 */
+
+  /* Accent — ai (藍), indigo */
+  --k-accent: light-dark(#2f4f8f, #8fa9e6); /* 7.6:1 / 7.9:1 */
+  --k-accent-fg: light-dark(#ffffff, #0d1426);
+  --k-accent-soft: light-dark(#e3e9f6, #1f2a44);
+  --k-link: light-dark(#2a4a8a, #9db4ec);
+  --k-focus: light-dark(#3a5fb0, #8fa9e6);
+
+  /* Status */
+  --k-ok: light-dark(#2d6a3e, #79c48f);
+  --k-ok-soft: light-dark(#e1f0e5, #17301f);
+  --k-warn: light-dark(#7a5000, #e0b45a);
+  --k-warn-soft: light-dark(#f7ecd2, #362b14);
+  --k-danger: light-dark(#a12a2a, #ee8a8a);
+  --k-danger-soft: light-dark(#f6dddd, #3a1c1c);
+
+  --k-selection: light-dark(#cdd8f0, #2c3b60);
+  --k-line-highlight: light-dark(#fff4cc, #3a3418);
+
+  /* Syntax (highlight.js classes, see syntax.css) — all ≥ 4.5:1 on --k-surface */
+  --k-syn-keyword: light-dark(#8a3b9e, #d4a2e6);
+  --k-syn-string: light-dark(#2f6b2f, #9ed09a);
+  --k-syn-number: light-dark(#8f5300, #e5bb77);
+  --k-syn-comment: light-dark(#6b7280, #8b93a3);
+  --k-syn-title: light-dark(#2f4f8f, #9db4ec);
+  --k-syn-type: light-dark(#0f6870, #7fcfd3);
+  --k-syn-attr: light-dark(#7a4b12, #e3b98a);
+  --k-syn-builtin: light-dark(#a3353b, #f0a0a0);
+  --k-syn-add-bg: light-dark(#e6f4ea, #15301e);
+  --k-syn-del-bg: light-dark(#fbe9eb, #3a1c20);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}

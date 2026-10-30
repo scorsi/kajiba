@@ -1,56 +1,25 @@
-# sv
+# kajiba-ui
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
-
-## Creating a project
-
-If you're seeing this, you've probably already done this step. Congrats!
+Web interface of kajiba: a SvelteKit 3 SPA (Svelte 5, TypeScript, Tailwind 4),
+built as static files and served by kajiba-server (ADR 0006). See `DESIGN.md`
+for the design, the route map and what the remaining mock assumes.
 
 ```sh
-# create a new project
-npx sv create my-app
+pnpm install
+pnpm dev      # dev server on http://localhost:5173
+pnpm check    # svelte-check (0 errors, 0 warnings)
+pnpm build    # static SPA in build/ (fallback index.html, precompressed)
 ```
 
-To recreate this project with the same configuration:
+Try `?mock=slow`, `?mock=error`, `?mock=unauth` or `?mock=empty` on a page still
+served by the mock.
 
-```sh
-# recreate this project
-npx sv@1.1.1 create --template minimal --types ts --no-install frontend
-```
+Layout:
 
-## Adding features
-
-Add features to your project with `sv add`:
-
-```sh
-npx sv add
-```
-
-For example, to add Tailwind CSS:
-
-```sh
-npx sv add tailwindcss
-```
-
-## Developing
-
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
-
-```sh
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
-```
-
-## Building
-
-To create a production version of your app:
-
-```sh
-npm run build
-```
-
-You can preview the production build with `npm run preview`.
-
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+- `src/lib/api.ts` — the only data module (auth wired to the server, the rest mock)
+- `src/lib/mock.ts` — mock data, imported by `api.ts` only
+- `src/lib/gen/` — connect-web client generated from `proto/` (`buf generate`)
+- `src/lib/styles/tokens.css` — design tokens (colours, fonts, radii)
+- `src/lib/components/` — UI components
+- `src/routes/(app)/` — signed-in pages with the sidebar shell
+- `src/routes/(auth)/` — sign-in (`/-/login`) and enrollment (`/-/enroll#<token>`)

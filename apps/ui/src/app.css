@@ -1,0 +1,89 @@
+@import "tailwindcss";
+@import "./lib/styles/fonts.css";
+@import "./lib/styles/tokens.css";
+@import "./lib/styles/prose.css";
+@import "./lib/styles/syntax.css";
+
+/* Expose tokens to Tailwind utilities. `inline` keeps the var() reference so
+   theme switches apply without rebuilding. */
+@theme inline {
+  --color-bg: var(--k-bg);
+  --color-surface: var(--k-surface);
+  --color-surface-2: var(--k-surface-2);
+  --color-border: var(--k-border);
+  --color-border-strong: var(--k-border-strong);
+  --color-fg: var(--k-fg);
+  --color-fg-muted: var(--k-fg-muted);
+  --color-fg-subtle: var(--k-fg-subtle);
+  --color-accent: var(--k-accent);
+  --color-accent-fg: var(--k-accent-fg);
+  --color-accent-soft: var(--k-accent-soft);
+  --color-link: var(--k-link);
+  --color-focus: var(--k-focus);
+  --color-ok: var(--k-ok);
+  --color-ok-soft: var(--k-ok-soft);
+  --color-warn: var(--k-warn);
+  --color-warn-soft: var(--k-warn-soft);
+  --color-danger: var(--k-danger);
+  --color-danger-soft: var(--k-danger-soft);
+
+  --font-sans: var(--k-font-sans);
+  --font-mono: var(--k-font-mono);
+  --font-ui: var(--k-font-ui);
+  --font-prose: var(--k-font-prose);
+
+  --radius-sm: var(--k-radius);
+  --radius-md: var(--k-radius-lg);
+}
+
+@layer base {
+  html {
+    background: var(--k-bg);
+    color: var(--k-fg);
+    font-family: var(--k-font-ui);
+    font-size: 100%;
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+    font-feature-settings:
+      "cv11", "ss01"; /* Inter: single-storey a, open digits */
+  }
+  body {
+    min-height: 100dvh;
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+  ::selection {
+    background: var(--k-selection);
+  }
+  /* Visible, consistent focus for keyboard users only. */
+  :focus-visible {
+    outline: 2px solid var(--k-focus);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--k-font-mono);
+    font-size: 0.92em;
+  }
+}
+
+@layer utilities {
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  .sr-only-focusable:not(:focus) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}

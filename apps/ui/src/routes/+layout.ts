@@ -1,2 +1,3 @@
-// Static SPA (0006): no server-side rendering, every route served by the fallback page.
+// Pure client-side SPA: no SSR, no prerendering (adapter-static fallback page).
 export const ssr = false;
+export const prerender = false;
