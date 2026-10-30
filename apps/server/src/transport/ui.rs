@@ -34,6 +34,11 @@ pub(super) async fn file(dir: &Path, method: &Method, path: &str) -> Option<Resp
     } else {
         (dir.join("index.html"), Path::new("index.html"))
     };
+    let dir = tokio::fs::canonicalize(dir).await.ok()?;
+    let file = tokio::fs::canonicalize(file).await.ok()?;
+    if !file.starts_with(&dir) {
+        return None;
+    }
     let Ok(bytes) = tokio::fs::read(&file).await else {
         return Some(StatusCode::NOT_FOUND.into_response());
     };
@@ -102,5 +107,36 @@ mod tests {
         assert!(get(&dir, Method::POST, "/-/login").await.is_none());
         assert!(get(&dir, Method::GET, "/../index.html").await.is_none());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refuses_symlinks_outside_the_bundle() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("kajiba-ui-{}", kajiba_core::new_id().unwrap()));
+        let dir = root.join("bundle");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(dir.join("index.html"), "page").unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        symlink(outside.join("secret.txt"), dir.join("secret.txt")).unwrap();
+        symlink(&outside, dir.join("assets")).unwrap();
+
+        for method in [Method::GET, Method::HEAD] {
+            for path in ["/secret.txt", "/assets/secret.txt"] {
+                assert!(file(&dir, &method, path).await.is_none());
+            }
+        }
+
+        std::fs::remove_file(dir.join("index.html")).unwrap();
+        symlink(outside.join("secret.txt"), dir.join("index.html")).unwrap();
+        for method in [Method::GET, Method::HEAD] {
+            for path in ["/index.html", "/", "/-/login"] {
+                assert!(file(&dir, &method, path).await.is_none());
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
