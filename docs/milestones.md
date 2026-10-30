@@ -4,6 +4,8 @@ Technical milestones, no calendar. Each milestone has a verifiable **deliverable
 
 ADR references in parentheses. nixosTest names are flake attributes `checks.<linux system>.<name>`.
 
+**Delivery order** (owner decision, 2026-10-30): J6 is delivered before J5. Milestone numbers stay as they are because ADRs reference them; the CI pages of the UI belong to J5.
+
 ---
 
 ## J0 — Skeleton: a green repository at the first commit (done)
@@ -204,15 +206,18 @@ Ordered tasks; each is one feature, closable in one sitting with its tests, in o
 
 ## J5 — Frontend v1
 
-**Deliverable**: the embedded SvelteKit interface: repository list, tree/file navigation, history, refs, account page (passkeys, tokens).
+Delivered after J6 (see the delivery order above).
 
-Content: adapter-static SPA, connect-web client, bundle injected into the server build, `--ui-dir` for troubleshooting, Vite proxy and development origins (0006); UI routes from 0021, application pages under `/-/` (0086); code rendering with highlighting, Markdown for READMEs.
+**Deliverable**: the embedded SvelteKit interface: repository list, tree/file navigation, history, refs, account page (passkeys, tokens), CI run list and run pages with live logs.
+
+Content: adapter-static SPA, connect-web client, bundle injected into the server build, `--ui-dir` for troubleshooting, Vite proxy and development origins (0006); UI routes from 0021, application pages under `/-/` (0086); code rendering with highlighting, Markdown for READMEs; CI run list and run page with live logs at `/-/runs/<id>` (0086) over J6's `RunService`, worktree runs (0097) shown with their trigger and triggering user and no commit link.
 
 **Acceptance criteria**
 
 - `nix build .#kajiba-server` contains the bundle; the server serves the UI on `/` with no external directory.
 - `e2e`: after login, browse `alice/demo`, open a file, view a branch's history, switch ref; declared keys and tokens, repository settings, permissions and mirror configuration shown read-only, with no edit control (0026).
 - In the devShell, `pnpm dev` against a local server (passkey login) and against a remote URL (PAT injected by the proxy) works without recompiling Rust (documented in CONTRIBUTING).
+- `e2e`: the run page shows a J6 run's live logs.
 - Budget: initial bundle < 300 KB compressed, measured in CI.
 
 **Delegable**: repetitive components, list pages, e2e tests.
@@ -221,9 +226,21 @@ Content: adapter-static SPA, connect-web client, bundle injected into the server
 
 ## J6 — Runners and CI by Nix convention
 
-**Deliverable**: a runner declared in Nix runs `nix flake check` on every trusted push; live logs in the UI and the CLI; manual trigger.
+Delivered before J5 (see the delivery order above): the CLI is J6's only client; the UI's CI pages are J5's.
 
-Content: `kajiba.runner.v1` bidirectional stream, declarative enrollment by shared secret, runner rows and capabilities declared in the server configuration (0026), attempts, server-owned leases, sequenced logs, reconnection (0008); `kajiba-runner` with the `Executor` trait and the `nix` backend, runner-host requirements checked at startup (0009); `run/job/job_attempt/step/log_chunk` model; `ci` bus handler: push on a trusted ref by `local` → run; manual `TriggerRun(sha)`; `RunService` with log streaming; CLI `ci run|watch|logs`; UI: run list, run page with logs at `/-/runs/<id>` (0086); short retention (0010); `nixosModules.runner`; `darwinModules.runner` exported and evaluated by `module-eval` (darwin execution is J13).
+**Deliverable**: a runner declared in Nix runs `nix flake check` on every trusted push; live logs in the CLI; manual trigger; ephemeral runs from a working tree without a push (0097).
+
+Content: `kajiba.runner.v1` bidirectional stream, declarative enrollment by shared secret, runner rows and capabilities declared in the server configuration (0026), attempts, server-owned leases, sequenced logs, reconnection (0008); `kajiba-runner` with the `Executor` trait and the `nix` backend, runner-host requirements checked at startup (0009); `run/job/job_attempt/step/log_chunk` model; `ci` bus handler: push on a trusted ref by `local` → run; manual `TriggerRun(sha)`; `RunService` with log streaming; CLI `ci run|watch|logs`; short retention (0010); ephemeral working-tree runs (0097, ordered tasks below); `nixosModules.runner`; `darwinModules.runner` exported and evaluated by `module-eval` (darwin execution is J13).
+
+Ordered tasks for ephemeral working-tree runs (0097); they come after the core content above (`RunService`, the `nix` backend, `ci run|watch|logs`) and each is one feature, closable in one sitting with its tests, in one commit, leaving `nix flake check` green.
+
+1. **Worktree run model** (0010, 0013, 0019, 0097): migration adding `worktree` to `run.trigger` and the run's checks column (NULL = whole `nix flake check`), `docs/schema.md` updated; `ci.worktree_retention` (default `1d`) in the configuration and the module. Tests: migration on a populated database, a `worktree` run without ref or event, configuration default and invalid duration refused.
+2. **`GetWorktreeBase` and the creation checks** (0014, 0020, 0097): `RunService.GetWorktreeBase` returns the ids of `refs/heads/*` and `refs/tags/*`; one shared check for both methods, in 0097's order: `ci:trigger`, read then `write` role, archived, CI disabled, check and system names, no declared runner matching the requirements, 4 active worktree runs per user. Tests: every refusal row of 0097 up to `WORKTREE_RUNS_LIMIT` with its code and reason, empty repository returns no id.
+3. **`CreateWorktreeRun`** (0012, 0032, 0052, 0097): client-streaming upload; task 2's checks on the first message before any byte is written; bundle streamed to `tmp/`, counted against 64 MiB, renamed to `ci/bundles/<run public id>.bundle`; exactly one head, prerequisites reachable from the trusted refs; run and one replayable job created with `arch`/`os`, backend `nix` and the features as required tags. Tests on Git fixtures: valid bundle accepted, `BUNDLE_TOO_LARGE` at 64 MiB + 1 byte with nothing left on disk, not a bundle or two heads → `BUNDLE_INVALID`, prerequisite only in `refs/contrib/*` or absent → `BUNDLE_PREREQUISITE_MISSING`, the captured commit never readable through smart HTTP or browsing (`REVISION_NOT_FOUND`).
+4. **Runner bundle fetch and scratch build** (0008, 0009, 0097): `RunnerService.FetchRunBundle` answered only for the current, leased attempt of the calling runner; the runner fetches the trusted refs into a scratch repository under its `state_dir`, unbundles, builds `checks.<system>.<name>` for each selected check or runs `nix flake check`, and deletes the scratch repository when the attempt ends. Tests: another runner's or a stale attempt's fetch refused, selected checks only are built, scratch directory gone after success, failure and cancellation, a replayed attempt fetches the bundle again.
+5. **Worktree retention** (0010, 0016, 0097): the retention timer cancels then purges worktree runs older than `ci.worktree_retention`, with jobs, logs and bundle; dumps skip `ci/bundles/`; a non-terminal worktree run without its bundle after a restore fails with `bundle-missing`. Tests: purge at the boundary, a running run cancelled before purge, normal runs untouched, dump content.
+6. **`kajiba ci run --worktree`** (0007, 0021, 0089, 0097): repository from the remote addressing the configured forge or `--repo`; capture with `git stash create` or `HEAD`, transient `refs/kajiba/worktree/` ref deleted before return, stash list untouched; `GetWorktreeBase`, bundle `--not` the ids present locally; `requiredSystemFeatures` of the selected checks as features; upload, one renegotiation on `BUNDLE_PREREQUISITE_MISSING`; then `ci run`'s output, following and exit status. Tests against the fake server: dirty tree, clean tree, staged new file included and untracked file excluded, unborn `HEAD`, no or ambiguous forge remote, minimal bundle, renegotiation, refusals printed with their reason.
+7. **`nixos-ci-worktree`** (0008, 0009, 0010, 0014, 0015, 0097): `nix/tests/ci-worktree.nix`, attribute `checks.<linux system>.nixos-ci-worktree`, nodes `forge`, `runner` (tags `kvm`), `client`; covers the acceptance criteria below marked worktree.
 
 **Acceptance criteria** (`nixos-ci`, nodes `forge` + `runner`, Nix closure preloaded)
 
@@ -233,8 +250,11 @@ Content: `kajiba.runner.v1` bidirectional stream, declarative enrollment by shar
 - `kajiba-server` restart during a job → the runner reconnects, the job finishes, the result is recorded exactly once; no log chunk lost or duplicated.
 - Runner killed during a job → lease expired → attempt `lost`, then a new attempt on a compatible runner if replayable; a late result from the old attempt is ignored.
 - Job requiring an absent backend → stays "pending" with a visible reason.
-- CLI `ci watch` shows the stream and exits with the run's code; `e2e`: the run page shows live logs.
+- CLI `ci watch` shows the stream and exits with the run's code.
 - Runner journal passes `nisshi validate --logs`.
+- Worktree (`nixos-ci-worktree`): from `client`, with uncommitted changes, `kajiba ci run --worktree` as a `write` user with a `ci:trigger` PAT → run on `runner`, logs streamed, exit 0; a change that breaks a check → exit non-zero with logs; no new ref, branch or stash on the forge or the clone, and the captured commit is not fetchable over git transport.
+- Worktree: `--check a` builds only `checks.<system>.a`; a check with `requiredSystemFeatures = [ "kvm" ]` runs only on a runner tagged `kvm`.
+- Worktree: `read` user → `ROLE_MISSING`; PAT without `ci:trigger` → `SCOPE_MISSING`; bundle above 64 MiB → `BUNDLE_TOO_LARGE`; no declared runner for the system → `NO_MATCHING_RUNNER`; the run and its bundle are gone after `ci.worktree_retention`.
 
 **Delegable**: test machinery (minimal flake with a trivial check, store preloading), lease/reconnection tests, proto message boilerplate.
 
