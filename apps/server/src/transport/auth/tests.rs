@@ -460,3 +460,149 @@ async fn client_version_is_checked_before_credentials() {
         }
     }
 }
+
+const LOGOUT: &str = "/kajiba.v1.AuthService/Logout";
+
+async fn alice(fixture: &Fixture) -> i64 {
+    sqlx::query_scalar("SELECT id FROM user WHERE name = 'alice'")
+        .fetch_one(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap()
+}
+
+/// Logout's `Set-Cookie` header, the call having ended OK.
+async fn logout(app: &mut axum::Router, cookie: Option<&str>) -> String {
+    let mut request = http::Request::post(LOGOUT).header("content-type", "application/grpc");
+    if let Some(cookie) = cookie {
+        request = request.header("cookie", cookie);
+    }
+    let response = app
+        .call(request.body(Body::from(vec![0; 5])).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let set_cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], &[0; 5], "an empty LogoutResponse");
+    set_cookie
+}
+
+#[test]
+fn session_cookie_attributes() {
+    assert_eq!(
+        set_cookie("abc", Duration::from_secs(600)),
+        "kajiba_session=abc; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Strict"
+    );
+}
+
+#[tokio::test]
+async fn sessions_are_created_resolved_and_logged_out_one_at_a_time() {
+    use crate::db::sessions;
+    let fixture = Fixture::new(DEMO).await;
+    let mut app = router(fixture.repos.0.clone(), false, Arc::default()).unwrap();
+    let user = alice(&fixture).await;
+    let ttl = Duration::from_secs(3600);
+    let (first, second) = {
+        let mut writer = fixture.writer.lock().await;
+        (
+            sessions::create(&mut writer, user, ttl, now())
+                .await
+                .unwrap(),
+            sessions::create(&mut writer, user, ttl, now())
+                .await
+                .unwrap(),
+        )
+    };
+    assert_eq!(first.len(), 64);
+    assert_ne!(first, second);
+    let stored: Vec<Vec<u8>> = sqlx::query_scalar("SELECT token_hash FROM session ORDER BY id")
+        .fetch_all(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored,
+        [first.as_bytes(), second.as_bytes()].map(|value| kajiba_core::sha256(value).to_vec())
+    );
+    let (first, second) = (
+        format!("kajiba_session={first}"),
+        format!("kajiba_session={second}"),
+    );
+    for cookie in [&first, &second] {
+        assert!(call(&mut app, LIST, &[("cookie", cookie)]).await.is_none());
+    }
+
+    let cleared = "kajiba_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict";
+    assert_eq!(logout(&mut app, Some(&first)).await, cleared);
+    let status = call(&mut app, LIST, &[("cookie", &first)]).await.unwrap();
+    assert_eq!(reason(&status), "CREDENTIAL_INVALID");
+    assert!(call(&mut app, LIST, &[("cookie", &second)]).await.is_none());
+    // Without a cookie, or with a stale one, logout still clears it and deletes nothing else.
+    assert_eq!(logout(&mut app, None).await, cleared);
+    assert_eq!(logout(&mut app, Some(&first)).await, cleared);
+    assert!(call(&mut app, LIST, &[("cookie", &second)]).await.is_none());
+}
+
+#[tokio::test]
+async fn session_expiry_is_absolute_and_expired_rows_are_purged() {
+    use crate::db::sessions;
+    let fixture = Fixture::new(DEMO).await;
+    let mut app = router(fixture.repos.0.clone(), false, Arc::default()).unwrap();
+    let user = alice(&fixture).await;
+    let ttl = Duration::from_secs(60);
+    let started = now();
+    let (live, stale) = {
+        let mut writer = fixture.writer.lock().await;
+        (
+            sessions::create(&mut writer, user, ttl, started)
+                .await
+                .unwrap(),
+            sessions::create(&mut writer, user, ttl, started - 60_000)
+                .await
+                .unwrap(),
+        )
+    };
+    let expires = || async {
+        sqlx::query_scalar::<_, i64>("SELECT expires_at FROM session ORDER BY id")
+            .fetch_all(&mut *fixture.writer.lock().await)
+            .await
+            .unwrap()
+    };
+    assert_eq!(expires().await, [started + 60_000, started]);
+    // Activity records last_seen_at but never extends the expiry.
+    sqlx::query("UPDATE session SET last_seen_at = 0")
+        .execute(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    let live = format!("kajiba_session={live}");
+    assert!(call(&mut app, LIST, &[("cookie", &live)]).await.is_none());
+    assert_eq!(expires().await, [started + 60_000, started]);
+    let status = call(
+        &mut app,
+        LIST,
+        &[("cookie", &format!("kajiba_session={stale}"))],
+    )
+    .await
+    .unwrap();
+    assert_eq!(reason(&status), "CREDENTIAL_EXPIRED");
+
+    let mut writer = fixture.writer.lock().await;
+    assert_eq!(sessions::purge(&mut writer, started).await.unwrap(), 1);
+    assert_eq!(sessions::purge(&mut writer, started).await.unwrap(), 0);
+    drop(writer);
+    assert_eq!(expires().await, [started + 60_000]);
+
+    // An unrepresentable expiry writes nothing (ADR 0029).
+    let mut writer = fixture.writer.lock().await;
+    assert!(
+        sessions::create(&mut writer, user, Duration::MAX, started)
+            .await
+            .is_err()
+    );
+    drop(writer);
+    assert_eq!(expires().await.len(), 1);
+}

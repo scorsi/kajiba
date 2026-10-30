@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package kajiba.v1;
+
+import "kajiba/v1/options.proto";
+
+// Browser sessions (0014, 0079); opened by the WebAuthn ceremonies under /auth/webauthn/.
+service AuthService {
+  // Deletes the session named by the `kajiba_session` cookie, if any, and clears the
+  // cookie. Public: an expired or unknown cookie is still cleared, and only the holder
+  // of a session's secret can name it.
+  rpc Logout(LogoutRequest) returns (LogoutResponse) {
+    option (kajiba.v1.public_access) = true;
+  }
+}
+
+message LogoutRequest {}
+
+message LogoutResponse {}

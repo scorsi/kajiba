@@ -13,6 +13,7 @@ use axum::{
 use kajiba_core::config::{HttpConfig, MetricsConfig};
 use kajiba_proto::v1::{
     CheckRequest, CheckResponse,
+    auth_service_server::AuthServiceServer,
     check_response::ServingStatus,
     health_service_server::{HealthService, HealthServiceServer},
     repo_service_server::RepoServiceServer,
@@ -132,6 +133,7 @@ impl HealthService for Health {
 
 fn router(health: Health, reflection: bool, registry: Arc<Registry>) -> Result<Router, String> {
     let mut app = Routes::new(HealthServiceServer::new(health.clone()))
+        .add_service(AuthServiceServer::new(auth::Sessions(health.clone())))
         .add_service(
             RepoServiceServer::new(repos::Repos(health.clone()))
                 // Bound inbound work before handler admission (ADR 0057).

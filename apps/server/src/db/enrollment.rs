@@ -1,5 +1,5 @@
 use sqlx::{Connection, SqliteConnection};
-use std::{io::Read, time::Duration};
+use std::time::Duration;
 
 #[derive(Debug)]
 pub enum Error {
@@ -26,10 +26,7 @@ pub async fn issue(
     now: i64,
 ) -> Result<String, Error> {
     // Checked before any write: a wrapped expiry could store a link already expired or eternal.
-    let expires_at = i64::try_from(ttl.as_millis())
-        .ok()
-        .and_then(|ttl| now.checked_add(ttl))
-        .ok_or(Error::Expiry)?;
+    let expires_at = super::expiry(now, ttl).ok_or(Error::Expiry)?;
     let mut tx = writer.begin().await?;
     let (id, disabled_at) =
         sqlx::query_as::<_, (i64, Option<i64>)>("SELECT id, disabled_at FROM user WHERE name = ?")
@@ -55,11 +52,7 @@ pub async fn issue(
     ] {
         sqlx::query(statement).bind(id).execute(&mut *tx).await?;
     }
-    // A bearer secret: 32 bytes from the kernel CSPRNG (SQLite's randomblob is only pseudo-random).
-    let mut bytes = [0u8; 32];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut bytes))
-        .map_err(sqlx::Error::Io)?;
+    let bytes = super::secret_bytes().map_err(sqlx::Error::Io)?;
     let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     sqlx::query(
         "INSERT INTO enrollment_token (user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",

@@ -13,12 +13,24 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use kajiba_proto::{Access, v1::Scope};
-use std::{collections::BTreeMap, sync::Arc};
+use kajiba_proto::{
+    Access,
+    v1::{LogoutRequest, LogoutResponse, Scope, auth_service_server::AuthService},
+};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tonic::Status;
 
 /// The session cookie (ADR 0079).
 pub const SESSION_COOKIE: &str = "kajiba_session";
+/// The `Set-Cookie` value of a session cookie living `max_age` (ADR 0014, 0020); a zero
+/// `max_age` clears it.
+pub fn set_cookie(value: &str, max_age: Duration) -> String {
+    format!(
+        "{SESSION_COOKIE}={value}; Path=/; Max-Age={}; HttpOnly; Secure; SameSite=Strict",
+        max_age.as_secs()
+    )
+}
+
 /// The client version a CLI sends on every call (ADR 0080).
 pub const CLIENT_VERSION: &str = "kajiba-client-version";
 
@@ -138,17 +150,17 @@ fn presented(headers: &HeaderMap) -> Option<Presented<'_>> {
         let token = value.to_str().ok()?.strip_prefix("Bearer ")?;
         return token.starts_with("kjb_").then_some(Presented::Token(token));
     }
+    cookie(headers).map(Presented::Session)
+}
+
+/// The session cookie's value, whatever the authorization header.
+fn cookie(headers: &HeaderMap) -> Option<&str> {
     headers
         .get_all(axum::http::header::COOKIE)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(';'))
-        .find_map(|pair| {
-            pair.trim()
-                .strip_prefix(SESSION_COOKIE)?
-                .strip_prefix('=')
-                .map(Presented::Session)
-        })
+        .find_map(|pair| pair.trim().strip_prefix(SESSION_COOKIE)?.strip_prefix('='))
 }
 
 /// Unknown, revoked or disabled-user credentials are invalid; a credential is expired
@@ -256,6 +268,41 @@ pub(super) async fn authenticate(
             next.run(request).await
         }
         Err(status) => status.into_http().map(Body::new),
+    }
+}
+
+/// `AuthService` (ADR 0079).
+pub(super) struct Sessions(pub(super) Health);
+
+#[tonic::async_trait]
+impl AuthService for Sessions {
+    /// Public (proto): deletes the cookie's session, if any, and always clears the cookie.
+    async fn logout(
+        &self,
+        request: tonic::Request<LogoutRequest>,
+    ) -> Result<tonic::Response<LogoutResponse>, Status> {
+        let headers = request.metadata().clone().into_headers();
+        if let Some(value) = cookie(&headers) {
+            let writer = self
+                .0
+                .writer
+                .get()
+                .ok_or_else(|| Status::unavailable("starting"))?;
+            crate::db::sessions::delete(
+                &mut *writer.lock().await,
+                &kajiba_core::sha256(value.as_bytes()),
+            )
+            .await
+            .map_err(|err| Status::internal(format!("sessions: {err}")))?;
+        }
+        let mut response = tonic::Response::new(LogoutResponse {});
+        response.metadata_mut().insert(
+            "set-cookie",
+            set_cookie("", Duration::ZERO)
+                .parse()
+                .map_err(|_| Status::internal("cookie"))?,
+        );
+        Ok(response)
     }
 }
 

@@ -182,6 +182,7 @@ async fn main() -> ExitCode {
             return match tokio::select! {
                 result = transport::serve(&config.http, &config.metrics, &config.git, health, readers, bus.clone(), admin) => result,
                 () = dispatcher.run(&bus, &writer) => unreachable!("dispatcher runs until shutdown"),
+                () = db::sessions::purge_periodically(&writer) => unreachable!("purge runs until shutdown"),
                 () = gate.recover_periodically(&db::events::SystemClock, &writer, &bus, &config.git.state_dir, &store) => unreachable!("recovery runs until shutdown"),
             } {
                 Ok(()) => ExitCode::SUCCESS,

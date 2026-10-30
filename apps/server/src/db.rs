@@ -16,6 +16,22 @@ pub mod repos;
 pub mod sessions;
 pub mod users;
 
+/// A bearer secret: 32 bytes from the kernel CSPRNG (SQLite's randomblob is only pseudo-random).
+pub fn secret_bytes() -> std::io::Result<[u8; 32]> {
+    use std::io::Read;
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// `now + ttl` in epoch milliseconds with ADR 0029's checked conversion and addition;
+/// `None` when not representable, never a wrapped value.
+pub fn expiry(now: i64, ttl: Duration) -> Option<i64> {
+    i64::try_from(ttl.as_millis())
+        .ok()
+        .and_then(|ttl| now.checked_add(ttl))
+}
+
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 /// The single writer, shared by the event dispatcher and request handlers. Lock it
