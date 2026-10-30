@@ -2,9 +2,13 @@ syntax = "proto3";
 
 package kajiba.v1;
 
+import "kajiba/v1/options.proto";
+
 // Liveness/readiness probe, usable from any of the three clients (0005, 0020).
 service HealthService {
-  rpc Check(CheckRequest) returns (CheckResponse);
+  rpc Check(CheckRequest) returns (CheckResponse) {
+    option (kajiba.v1.public_access) = true;
+  }
 }
 
 message CheckRequest {}

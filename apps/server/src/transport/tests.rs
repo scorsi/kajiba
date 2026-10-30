@@ -1006,3 +1006,27 @@ fn only_persistent_accept_errors_back_off() {
         Some(Duration::from_secs(1))
     );
 }
+
+#[test]
+fn proto_and_configuration_scope_names_agree() {
+    use kajiba_core::config::Scope;
+    // Fails to compile when a configuration scope is added without updating this test.
+    let all = |s: &Scope| match s {
+        Scope::RepoRead | Scope::RepoWrite | Scope::CiTrigger | Scope::Admin => (),
+    };
+    let mut seen = Vec::new();
+    for value in 1.. {
+        let Ok(scope) = kajiba_proto::v1::Scope::try_from(value) else {
+            break;
+        };
+        // SCOPE_REPO_READ → repo:read, SCOPE_ADMIN → admin.
+        let name = scope.as_str_name()["SCOPE_".len()..]
+            .to_lowercase()
+            .replace('_', ":");
+        let config: Scope = serde_json::from_value(serde_json::json!(name)).unwrap();
+        all(&config);
+        assert!(!seen.contains(&config), "{name}");
+        seen.push(config);
+    }
+    assert_eq!(seen.len(), 4);
+}

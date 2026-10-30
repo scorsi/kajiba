@@ -4,13 +4,14 @@
 
 import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import { file_kajiba_v1_options } from "./options_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file kajiba/v1/health.proto.
  */
 export const file_kajiba_v1_health: GenFile = /*@__PURE__*/
-  fileDesc("ChZrYWppYmEvdjEvaGVhbHRoLnByb3RvEglrYWppYmEudjEiDgoMQ2hlY2tSZXF1ZXN0IrQBCg1DaGVja1Jlc3BvbnNlEjYKBnN0YXR1cxgBIAEoDjImLmthamliYS52MS5DaGVja1Jlc3BvbnNlLlNlcnZpbmdTdGF0dXMiawoNU2VydmluZ1N0YXR1cxIeChpTRVJWSU5HX1NUQVRVU19VTlNQRUNJRklFRBAAEhoKFlNFUlZJTkdfU1RBVFVTX1NFUlZJTkcQARIeChpTRVJWSU5HX1NUQVRVU19OT1RfU0VSVklORxACMksKDUhlYWx0aFNlcnZpY2USOgoFQ2hlY2sSFy5rYWppYmEudjEuQ2hlY2tSZXF1ZXN0Ghgua2FqaWJhLnYxLkNoZWNrUmVzcG9uc2ViBnByb3RvMw");
+  fileDesc("ChZrYWppYmEvdjEvaGVhbHRoLnByb3RvEglrYWppYmEudjEiDgoMQ2hlY2tSZXF1ZXN0IrQBCg1DaGVja1Jlc3BvbnNlEjYKBnN0YXR1cxgBIAEoDjImLmthamliYS52MS5DaGVja1Jlc3BvbnNlLlNlcnZpbmdTdGF0dXMiawoNU2VydmluZ1N0YXR1cxIeChpTRVJWSU5HX1NUQVRVU19VTlNQRUNJRklFRBAAEhoKFlNFUlZJTkdfU1RBVFVTX1NFUlZJTkcQARIeChpTRVJWSU5HX1NUQVRVU19OT1RfU0VSVklORxACMlEKDUhlYWx0aFNlcnZpY2USQAoFQ2hlY2sSFy5rYWppYmEudjEuQ2hlY2tSZXF1ZXN0Ghgua2FqaWJhLnYxLkNoZWNrUmVzcG9uc2UiBIi1GAFiBnByb3RvMw", [file_kajiba_v1_options]);
 
 /**
  * @generated from message kajiba.v1.CheckRequest

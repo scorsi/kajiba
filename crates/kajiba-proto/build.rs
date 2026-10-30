@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compile_well_known_types(true)
         .compile_protos(
             &[
+                "../../proto/kajiba/v1/options.proto",
                 "../../proto/kajiba/v1/health.proto",
                 "../../proto/kajiba/v1/repo.proto",
                 "google/protobuf/timestamp.proto",

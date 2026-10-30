@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package kajiba.v1;
+
+import "google/protobuf/descriptor.proto";
+
+// Token scopes (0014), the names of the configuration's `scopes`: repo:read, repo:write,
+// ci:trigger, admin.
+enum Scope {
+  SCOPE_UNSPECIFIED = 0;
+  SCOPE_REPO_READ = 1;
+  SCOPE_REPO_WRITE = 2;
+  SCOPE_CI_TRIGGER = 3;
+  SCOPE_ADMIN = 4;
+}
+
+// Every kajiba.v1 method sets exactly one of these (0014, 0077).
+extend google.protobuf.MethodOptions {
+  // The scope the caller's credential must hold.
+  Scope scope = 50000;
+  // Callable without a credential.
+  bool public_access = 50001;
+}

@@ -21,6 +21,8 @@ http-body = "1"
 libc = "0.2"
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "server-auto", "service"] }
 prost = "0.13"
+# Reads custom method options from the encoded descriptor set (0076).
+prost-reflect = { version = "0.15", default-features = false }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }

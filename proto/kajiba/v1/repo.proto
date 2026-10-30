@@ -3,29 +3,42 @@ syntax = "proto3";
 package kajiba.v1;
 
 import "google/protobuf/timestamp.proto";
+import "kajiba/v1/options.proto";
 
 // Declared repositories, read-only (0026): no method creates, renames or deletes
 // one. Public repositories only until private ones exist (0013).
 service RepoService {
   // By public id, or by <owner>/<name>: the repository holding the name (active or
   // archived), then a redirect. REPO_NOT_FOUND otherwise.
-  rpc GetRepo(GetRepoRequest) returns (GetRepoResponse);
+  rpc GetRepo(GetRepoRequest) returns (GetRepoResponse) {
+    option (kajiba.v1.scope) = SCOPE_REPO_READ;
+  }
   // Active and archived repositories, ordered by <owner>/<name> (0020).
-  rpc ListRepos(ListReposRequest) returns (ListReposResponse);
+  rpc ListRepos(ListReposRequest) returns (ListReposResponse) {
+    option (kajiba.v1.scope) = SCOPE_REPO_READ;
+  }
 
   // Code browsing, active and archived repositories alike (0026). `repo` is a public
   // id or <owner>/<name>, current or previous; `revision` is a branch, a tag or a
   // full commit id. REPO_NOT_FOUND, REVISION_NOT_FOUND, PATH_NOT_FOUND otherwise.
 
   // The entries of a directory.
-  rpc GetTree(GetTreeRequest) returns (GetTreeResponse);
+  rpc GetTree(GetTreeRequest) returns (GetTreeResponse) {
+    option (kajiba.v1.scope) = SCOPE_REPO_READ;
+  }
   // A file's content; above 1 MiB, RESOURCE_EXHAUSTED / BLOB_TOO_LARGE: /raw/ serves larger files.
-  rpc GetBlob(GetBlobRequest) returns (GetBlobResponse);
+  rpc GetBlob(GetBlobRequest) returns (GetBlobResponse) {
+    option (kajiba.v1.scope) = SCOPE_REPO_READ;
+  }
   // The commits reachable from `revision`, newest first (0020 pagination).
-  rpc ListCommits(ListCommitsRequest) returns (ListCommitsResponse);
+  rpc ListCommits(ListCommitsRequest) returns (ListCommitsResponse) {
+    option (kajiba.v1.scope) = SCOPE_REPO_READ;
+  }
   // The files a commit changes against its first parent (the empty tree for a root
   // commit); renames are not detected.
-  rpc GetCommitDiff(GetCommitDiffRequest) returns (GetCommitDiffResponse);
+  rpc GetCommitDiff(GetCommitDiffRequest) returns (GetCommitDiffResponse) {
+    option (kajiba.v1.scope) = SCOPE_REPO_READ;
+  }
 }
 
 message GetRepoRequest {

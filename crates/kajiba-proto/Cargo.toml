@@ -10,6 +10,7 @@ doctest = false
 
 [dependencies]
 prost.workspace = true
+prost-reflect.workspace = true
 tonic.workspace = true
 
 [build-dependencies]
