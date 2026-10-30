@@ -302,6 +302,48 @@ mod ceremonies {
     }
 
     #[tokio::test]
+    async fn a_link_expiring_while_finish_waits_for_the_writer_is_refused() {
+        let (fixture, mut app) = fixture().await;
+        let token = issue(&fixture, "alice", epoch_ms()).await;
+        let (ceremony, options) = start(&mut app, &token).await.unwrap();
+        let mut authenticator = authenticator();
+        let mut writer = fixture.writer.lock().await;
+        let finish = finish(&mut app, &ceremony, &mut authenticator, ORIGIN, options);
+        tokio::pin!(finish);
+        // Poll through attestation verification until finish blocks on the held writer.
+        tokio::select! {
+            biased;
+            _ = &mut finish => panic!("finish must wait for the writer"),
+            _ = std::future::ready(()) => {}
+        }
+        let expires_at = epoch_ms() + 20;
+        sqlx::query("UPDATE enrollment_token SET expires_at = ?")
+            .bind(expires_at)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        while epoch_ms() < expires_at {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        drop(writer);
+
+        let (status, cookie, json) = finish.await;
+        assert_eq!(
+            (status, json["reason"].as_str()),
+            (StatusCode::FORBIDDEN, Some("ENROLLMENT_INVALID"))
+        );
+        assert_eq!(cookie, None);
+        assert_eq!(count(&fixture, "webauthn_credential").await, 0);
+        assert_eq!(count(&fixture, "session").await, 0);
+        let consumed_at: Option<i64> =
+            sqlx::query_scalar("SELECT consumed_at FROM enrollment_token")
+                .fetch_one(fixture.repos.readers().unwrap())
+                .await
+                .unwrap();
+        assert_eq!(consumed_at, None);
+    }
+
+    #[tokio::test]
     async fn a_foreign_origin_is_refused() {
         let (fixture, mut app) = fixture().await;
         let token = issue(&fixture, "alice", epoch_ms()).await;

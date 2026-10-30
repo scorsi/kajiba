@@ -259,14 +259,14 @@ async fn enroll_finish(State(health): State<Health>, Json(body): Json<EnrollFini
         Ok(passkey) => passkey,
         Err(_) => return refused("VERIFICATION_FAILED"),
     };
-    let Ok(now) = now() else {
-        return internal("clock");
-    };
     let serialized = match serde_json::to_string(&passkey) {
         Ok(serialized) => serialized,
         Err(err) => return internal(err),
     };
     let mut writer = writer.lock().await;
+    let Ok(now) = now() else {
+        return internal("clock");
+    };
     let opened = async {
         let mut tx = writer.begin().await?;
         if !crate::db::enrollment::consume(&mut tx, user, &token_hash, now).await? {
