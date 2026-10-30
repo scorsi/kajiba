@@ -72,7 +72,7 @@ fn a_failed_save_cleans_up_only_its_temporary_file() {
 }
 
 #[tokio::test]
-async fn saves_a_checked_token_and_the_url_mode_0600() {
+async fn saves_the_url_and_the_checked_token_in_one_file_mode_0600() {
     let fake = Fake::default();
     fake.0.lock().unwrap().viewer = "alice".into();
     let url = fake.serve().await;
@@ -84,12 +84,14 @@ async fn saves_a_checked_token_and_the_url_mode_0600() {
     assert!(!out.contains(TOKEN));
     assert_eq!(
         fs::read_to_string(&token_file).unwrap(),
-        format!("{TOKEN}\n")
+        format!("{url}\n{TOKEN}\n")
     );
     assert_eq!(mode(&token_file), 0o600);
     assert_eq!(mode(token_file.parent().unwrap()), 0o700);
-    let saved = token_file.with_file_name("url");
-    assert_eq!(fs::read_to_string(&saved).unwrap(), format!("{url}\n"));
+    assert_eq!(
+        fs::read_dir(token_file.parent().unwrap()).unwrap().count(),
+        1
+    );
     // The check call carried the new token.
     let calls = &fake.0.lock().unwrap().calls;
     assert_eq!(calls.len(), 1);
@@ -111,13 +113,13 @@ async fn overwrites_a_previous_token_with_mode_0600() {
     login(&token_file, &url, TOKEN).await.0.unwrap();
     assert_eq!(
         fs::read_to_string(&token_file).unwrap(),
-        format!("{TOKEN}\n")
+        format!("{url}\n{TOKEN}\n")
     );
     assert_eq!(mode(&token_file), 0o600);
     assert_eq!(
         fs::read_dir(&dir.0).unwrap().count(),
-        2,
-        "token and url only"
+        1,
+        "the token file only"
     );
 }
 
@@ -157,7 +159,7 @@ async fn a_refused_token_leaves_the_files_unchanged() {
     let url = fake.serve().await;
     let dir = TempDir::new();
     let token_file = dir.0.join("token");
-    fs::write(&token_file, "kjb_previous\n").unwrap();
+    fs::write(&token_file, "https://example.org\nkjb_previous\n").unwrap();
     let (result, out) = login(&token_file, &url, TOKEN).await;
     let err = result.unwrap_err().to_string();
     assert!(
@@ -165,8 +167,11 @@ async fn a_refused_token_leaves_the_files_unchanged() {
         "{err}"
     );
     assert!(!err.contains(TOKEN) && out.is_empty());
-    assert_eq!(fs::read_to_string(&token_file).unwrap(), "kjb_previous\n");
-    assert!(!token_file.with_file_name("url").exists());
+    assert_eq!(
+        fs::read_to_string(&token_file).unwrap(),
+        "https://example.org\nkjb_previous\n"
+    );
+    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
 }
 
 #[tokio::test]
@@ -198,4 +203,52 @@ async fn the_url_comes_from_the_environment_or_the_previous_login() {
     .await
     .unwrap();
     assert_eq!(fake.0.lock().unwrap().calls.len(), 2);
+}
+
+#[tokio::test]
+async fn token_files_in_one_directory_keep_their_own_forge() {
+    let (a, b) = (Fake::default(), Fake::default());
+    let (url_a, url_b) = (a.serve().await, b.serve().await);
+    let dir = TempDir::new();
+    let (file_a, file_b) = (dir.0.join("a"), dir.0.join("b"));
+    login(&file_a, &url_a, TOKEN).await.0.unwrap();
+    login(&file_b, &url_b, TOKEN).await.0.unwrap();
+    // Re-login without --url reuses each file's own forge.
+    for file in [&file_a, &file_b] {
+        run(
+            file,
+            None,
+            &no_env,
+            &mut TOKEN.as_bytes(),
+            false,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(a.0.lock().unwrap().calls.len(), 2);
+    assert_eq!(b.0.lock().unwrap().calls.len(), 2);
+    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 2);
+}
+
+#[tokio::test]
+async fn without_url_or_previous_login_nothing_is_called() {
+    let dir = TempDir::new();
+    let token_file = dir.0.join("token");
+    let mut out = Vec::new();
+    let err = run(
+        &token_file,
+        None,
+        &no_env,
+        &mut TOKEN.as_bytes(),
+        false,
+        &mut out,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "no forge URL: pass --url or set KAJIBA_URL"
+    );
+    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 0);
 }

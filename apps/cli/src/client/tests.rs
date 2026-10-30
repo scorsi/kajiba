@@ -266,18 +266,36 @@ async fn errors_carry_the_reason_and_the_request_id() {
 }
 
 #[test]
-fn token_file_missing_or_unreadable() {
+fn credential_file_missing_unreadable_or_malformed() {
     let dir = TempDir::new();
     let path = dir.0.join("token");
     assert_eq!(
-        read_token(&path).unwrap_err().to_string(),
+        credentials(None, &path, &no_env).err().unwrap().to_string(),
         format!("no token file at {}; run kajiba login", path.display())
     );
     // A directory cannot be read as a file.
-    let err = read_token(&dir.0).unwrap_err().to_string();
+    let err = credentials(None, &dir.0, &no_env)
+        .err()
+        .unwrap()
+        .to_string();
     assert!(err.starts_with("cannot read token file "), "{err}");
-    std::fs::write(&path, format!("{TOKEN}\n")).unwrap();
-    assert_eq!(read_token(&path).unwrap(), TOKEN);
+    // A token-only file (the pre-0098 layout) holds no forge URL.
+    for malformed in [format!("{TOKEN}\n"), "https://example.org".into()] {
+        std::fs::write(&path, malformed).unwrap();
+        assert_eq!(
+            credentials(None, &path, &no_env).err().unwrap().to_string(),
+            format!(
+                "token file {} does not hold a forge URL and a token; run kajiba login",
+                path.display()
+            )
+        );
+    }
+    std::fs::write(&path, format!("https://example.org\n{TOKEN}\n")).unwrap();
+    let saved = credentials(None, &path, &no_env).unwrap();
+    assert_eq!(
+        (saved.url.as_str(), saved.token.as_str()),
+        ("https://example.org", TOKEN)
+    );
     assert!(connect("http://127.0.0.1:1", "kjb_\n").is_err());
 }
 
@@ -305,27 +323,37 @@ fn token_path_follows_xdg() {
 }
 
 #[test]
-fn forge_url_option_then_environment_then_saved() {
+fn another_forge_than_the_token_files_is_refused() {
     let dir = TempDir::new();
     let token = dir.0.join("token");
-    let env = |name: &str| (name == "KAJIBA_URL").then(|| "https://env.example.org".into());
-    assert_eq!(
-        forge_url(Some("https://option.example.org"), &token, &env).unwrap(),
-        "https://option.example.org"
+    std::fs::write(&token, format!("https://a.example.org\n{TOKEN}\n")).unwrap();
+    let env = |name: &str| (name == "KAJIBA_URL").then(|| "https://b.example.org".into());
+    let refused = format!(
+        "token file {} is for https://a.example.org, not https://b.example.org; \
+         log in to https://b.example.org with another --token-file",
+        token.display()
     );
     assert_eq!(
-        forge_url(None, &token, &env).unwrap(),
-        "https://env.example.org"
+        credentials(Some("https://b.example.org"), &token, &no_env)
+            .err()
+            .unwrap()
+            .to_string(),
+        refused
     );
     assert_eq!(
-        forge_url(None, &token, &no_env).unwrap_err().to_string(),
-        "no forge URL: pass --url, set KAJIBA_URL or run kajiba login"
+        credentials(None, &token, &env).err().unwrap().to_string(),
+        refused
     );
-    std::fs::write(url_path(&token), "https://saved.example.org\n").unwrap();
-    assert_eq!(
-        forge_url(None, &token, &no_env).unwrap(),
-        "https://saved.example.org"
-    );
+    // The same forge, or none requested: the file's pair.
+    for (option, env) in [
+        (Some("https://a.example.org"), &env as Env),
+        (None, &no_env),
+    ] {
+        assert_eq!(
+            credentials(option, &token, env).unwrap().url,
+            "https://a.example.org"
+        );
+    }
 }
 
 #[test]

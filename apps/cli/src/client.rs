@@ -64,42 +64,65 @@ pub fn token_path(option: Option<&Path>, env: Env) -> Result<PathBuf, Error> {
     Ok(config.join("kajiba/token"))
 }
 
-/// The `url` file `kajiba login` writes beside the token file (ADR 0089).
-pub fn url_path(token: &Path) -> PathBuf {
-    token.with_file_name("url")
+/// A credential file (ADR 0098): the forge URL on the first line, its token on the second.
+pub struct Credentials {
+    pub url: String,
+    pub token: String,
 }
 
-/// `--url`, else `KAJIBA_URL`, else the URL saved by `kajiba login` (ADR 0089).
-pub fn forge_url(option: Option<&str>, token: &Path, env: Env) -> Result<String, Error> {
+/// The credential file at `path`; `None` when it does not exist.
+pub fn read_credentials(path: &Path) -> Result<Option<Credentials>, Error> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(Error(format!(
+                "cannot read token file {}: {err}",
+                path.display()
+            )));
+        }
+    };
+    match content.split_once('\n') {
+        Some((url, token)) if url.contains("://") => Ok(Some(Credentials {
+            url: url.trim().into(),
+            token: token.trim().into(),
+        })),
+        _ => Err(Error(format!(
+            "token file {} does not hold a forge URL and a token; run kajiba login",
+            path.display()
+        ))),
+    }
+}
+
+/// `--url`, else `KAJIBA_URL`: the forge a command asks for, if any.
+pub fn requested_url(option: Option<&str>, env: Env) -> Result<Option<String>, Error> {
     if let Some(url) = option {
-        return Ok(url.into());
+        return Ok(Some(url.into()));
     }
-    if let Some(url) = env("KAJIBA_URL") {
-        return url
-            .into_string()
-            .map_err(|_| Error("KAJIBA_URL is not UTF-8".into()));
-    }
-    let saved = url_path(token);
-    match std::fs::read_to_string(&saved) {
-        Ok(url) => Ok(url.trim().into()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(Error(
-            "no forge URL: pass --url, set KAJIBA_URL or run kajiba login".into(),
-        )),
-        Err(err) => Err(Error(format!("cannot read {}: {err}", saved.display()))),
-    }
+    env("KAJIBA_URL")
+        .map(|url| {
+            url.into_string()
+                .map_err(|_| Error("KAJIBA_URL is not UTF-8".into()))
+        })
+        .transpose()
 }
 
-pub fn read_token(path: &Path) -> Result<String, Error> {
-    match std::fs::read_to_string(path) {
-        Ok(token) => Ok(token.trim().into()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(Error(format!(
+/// The saved credentials; a `--url` or `KAJIBA_URL` naming another forge is refused, so a
+/// token only ever goes to the forge it was saved for (ADR 0098).
+pub fn credentials(option: Option<&str>, path: &Path, env: Env) -> Result<Credentials, Error> {
+    let saved = read_credentials(path)?.ok_or_else(|| {
+        Error(format!(
             "no token file at {}; run kajiba login",
             path.display()
+        ))
+    })?;
+    match requested_url(option, env)? {
+        Some(url) if url != saved.url => Err(Error(format!(
+            "token file {} is for {}, not {url}; log in to {url} with another --token-file",
+            path.display(),
+            saved.url
         ))),
-        Err(err) => Err(Error(format!(
-            "cannot read token file {}: {err}",
-            path.display()
-        ))),
+        _ => Ok(saved),
     }
 }
 

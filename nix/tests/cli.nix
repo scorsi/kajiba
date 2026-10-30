@@ -65,9 +65,11 @@ pkgs.testers.runNixOSTest {
     import json
 
     base = "http://forge:8080"
+    # The CLI runs on the forge: loopback is the URL its token files name (ADR 0098).
+    api = "http://127.0.0.1:8080"
     bundle = "/var/lib/kajiba-fixtures/demo.bundle"
-    cli = f"kajiba --url {base} --token-file /root/token"
-    other_cli = f"${otherCli}/bin/kajiba --url {base} --token-file /root/token"
+    cli = "kajiba --token-file /root/token"
+    other_cli = "${otherCli}/bin/kajiba --token-file /root/token"
 
 
     def cli_refusal(command, reason):
@@ -84,10 +86,15 @@ pkgs.testers.runNixOSTest {
     source = make_demo(forge, bundle)
     forge.succeed(
         f"kajiba-server admin import alice/demo {bundle}",
-        "umask 077; printf '%s' '${pat}' > /root/token",
-        "umask 077; printf '%s' '${expiredPat}' > /root/expired-token",
-        "install -m 600 /dev/null /root/no-token",
+        f"umask 077; printf '%s\\n%s\\n' {api} '${expiredPat}' > /root/expired-token",
+        f"umask 077; printf '%s\\n\\n' {api} > /root/no-token",
     )
+
+    with subtest("login checks the token and saves it with the forge URL in one file"):
+        assert forge.succeed(f"printf '%s\\n' '${pat}' | kajiba login --url {api} --token-file /root/token") == f"logged in to {api} as alice\n"
+        assert forge.succeed("cat /root/token") == f"{api}\n${pat}\n"
+        assert forge.succeed("stat -c %a /root/token").strip() == "600"
+        forge.fail("test -e /root/url")
 
     with subtest("declared PAT lists and gets the declared repository in text and protojson"):
         assert forge.succeed(f"{cli} repo list") == "alice/demo  CLI fixture\n"
@@ -117,10 +124,14 @@ pkgs.testers.runNixOSTest {
             assert forge.succeed(f"cat {directory}/README.md") == "main readme\n"
 
     with subtest("expired and absent credentials are refused"):
-        cli_refusal(f"kajiba --url {base} --token-file /root/expired-token repo list", "CREDENTIAL_EXPIRED")
-        # An empty file reaches server authentication; a missing file fails locally.
-        cli_refusal(f"kajiba --url {base} --token-file /root/no-token repo list", "CREDENTIAL_INVALID")
-        cli_refusal(f"kajiba --url {base} --token-file /root/missing-token repo list", "no token file")
+        cli_refusal("kajiba --token-file /root/expired-token repo list", "CREDENTIAL_EXPIRED")
+        # An empty token reaches server authentication; a missing file fails locally.
+        cli_refusal("kajiba --token-file /root/no-token repo list", "CREDENTIAL_INVALID")
+        cli_refusal("kajiba --token-file /root/missing-token repo list", "no token file")
+
+    with subtest("a token file's token never goes to another forge"):
+        cli_refusal(f"{cli} --url http://127.0.0.1:9 repo list", f"is for {api}, not http://127.0.0.1:9")
+        cli_refusal(f"env KAJIBA_URL=http://127.0.0.1:9 {cli} repo list", f"is for {api}, not http://127.0.0.1:9")
 
     with subtest("another compiled 0.minor is refused and names both versions"):
         assert forge.succeed("kajiba --version").strip() == "kajiba ${version}"

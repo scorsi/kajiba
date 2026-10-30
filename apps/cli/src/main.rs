@@ -17,10 +17,12 @@ mod repo;
     about = "Command-line client of the kajiba forge"
 )]
 struct Args {
-    /// The personal access token file [default: $XDG_CONFIG_HOME/kajiba/token].
+    /// The credential file: forge URL and personal access token
+    /// [default: $XDG_CONFIG_HOME/kajiba/token].
     #[arg(long, global = true, value_name = "PATH")]
     token_file: Option<PathBuf>,
-    /// The forge URL [default: $KAJIBA_URL, then the URL saved by `kajiba login`].
+    /// The forge URL for `login` [default: $KAJIBA_URL, then the token file's]; other
+    /// commands refuse one differing from the token file's.
     #[arg(long, global = true)]
     url: Option<String>,
     /// Print protojson instead of text.
@@ -33,7 +35,7 @@ struct Args {
 #[derive(Subcommand)]
 enum Command {
     /// Read a personal access token from stdin, check it with the forge, and save it
-    /// with the forge URL.
+    /// with the forge URL in the token file.
     Login,
     /// Read repositories.
     Repo {
@@ -75,9 +77,14 @@ async fn run(
     match args.command {
         Command::Login => login::run(&token_file, args.url.as_deref(), env, input, tty, out).await,
         Command::Repo { command } => {
-            let token = client::read_token(&token_file)?;
-            let url = client::forge_url(args.url.as_deref(), &token_file, env)?;
-            repo::run(command, client::connect(&url, &token)?, args.json, out).await
+            let saved = client::credentials(args.url.as_deref(), &token_file, env)?;
+            repo::run(
+                command,
+                client::connect(&saved.url, &saved.token)?,
+                args.json,
+                out,
+            )
+            .await
         }
     }
 }

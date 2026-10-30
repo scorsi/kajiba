@@ -1,4 +1,5 @@
-//! `kajiba login` (0007, ADR 0089): checks a PAT read from stdin, then saves it.
+//! `kajiba login` (0007, ADR 0089): checks a PAT read from stdin, then saves it with the
+//! forge URL in one credential file (ADR 0098).
 use crate::client::{self, Env, Error};
 use kajiba_proto::v1::{GetViewerRequest, auth_service_client::AuthServiceClient};
 use std::{
@@ -22,14 +23,21 @@ pub async fn run(
             "not a personal access token: expected kjb_ and 43 base64url characters".into(),
         ));
     }
-    let url = client::forge_url(url, token_file, env)?;
+    let url = match client::requested_url(url, env)? {
+        Some(url) => url,
+        None => {
+            client::read_credentials(token_file)?
+                .ok_or_else(|| Error("no forge URL: pass --url or set KAJIBA_URL".into()))?
+                .url
+        }
+    };
     let viewer = client::answer(
         AuthServiceClient::new(client::connect(&url, &token)?)
             .get_viewer(GetViewerRequest {})
             .await,
     )?;
-    save(token_file, &token)?;
-    save(&client::url_path(token_file), &url)?;
+    // One file for the pair: the token can never be read back with another forge's URL.
+    save(token_file, &format!("{url}\n{token}"))?;
     writeln!(out, "logged in to {url} as {}", viewer.user)
         .map_err(|err| Error(format!("stdout: {err}")))
 }
