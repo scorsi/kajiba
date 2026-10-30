@@ -388,3 +388,32 @@ async fn the_server_version_is_read_from_answers_and_refusals() {
         .unwrap_err();
     assert_eq!(server_version(status.metadata()).unwrap(), "9.9.9");
 }
+
+#[test]
+fn a_token_goes_only_over_https_or_to_loopback() {
+    for (url, tls) in [
+        ("https://forge.example.org", true),
+        ("HTTPS://forge.example.org", true),
+        ("http://localhost:8080", false),
+        ("http://LOCALHOST", false),
+        ("http://127.0.0.1:1", false),
+        ("http://[::1]:8080", false),
+    ] {
+        assert_eq!(secure(url).unwrap(), tls, "{url}");
+    }
+    for url in [
+        "http://forge.example.org",
+        "http://127.0.0.2:8080",
+        "http://localhost.example.org",
+        "http://[::2]",
+        "ftp://forge.example.org",
+    ] {
+        assert_eq!(
+            secure(url).unwrap_err().to_string(),
+            format!(
+                "refusing to send a token to {url}: the forge URL must be https \
+                 (http only for localhost, 127.0.0.1 or [::1])"
+            )
+        );
+    }
+}

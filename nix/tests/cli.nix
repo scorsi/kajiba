@@ -133,6 +133,13 @@ pkgs.testers.runNixOSTest {
         cli_refusal(f"{cli} --url http://127.0.0.1:9 repo list", f"is for {api}, not http://127.0.0.1:9")
         cli_refusal(f"env KAJIBA_URL=http://127.0.0.1:9 {cli} repo list", f"is for {api}, not http://127.0.0.1:9")
 
+    with subtest("a token is never sent over plain HTTP to another machine"):
+        refused = f"refusing to send a token to {base}: the forge URL must be https"
+        cli_refusal(f"printf '%s\\n' '${pat}' | kajiba login --url {base} --token-file /root/remote-token", refused)
+        forge.fail("test -e /root/remote-token")
+        forge.succeed(f"umask 077; printf '%s\\n%s\\n' {base} '${pat}' > /root/remote-token")
+        cli_refusal("kajiba --token-file /root/remote-token repo list", refused)
+
     with subtest("another compiled 0.minor is refused and names both versions"):
         assert forge.succeed("kajiba --version").strip() == "kajiba ${version}"
         assert forge.succeed("${otherCli}/bin/kajiba --version").strip() == "kajiba ${otherVersion}"

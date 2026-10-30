@@ -252,3 +252,18 @@ async fn without_url_or_previous_login_nothing_is_called() {
     );
     assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 0);
 }
+
+#[tokio::test]
+async fn login_refuses_plain_http_to_another_machine_before_any_call() {
+    let dir = TempDir::new();
+    let token_file = dir.0.join("token");
+    let (result, out) = login(&token_file, "http://forge.example.org", TOKEN).await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .starts_with("refusing to send a token to http://forge.example.org: "),
+    );
+    assert!(out.is_empty());
+    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 0);
+}

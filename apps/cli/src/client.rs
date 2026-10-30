@@ -141,14 +141,16 @@ impl Interceptor for Headers {
 
 pub type Api = InterceptedService<Channel, Headers>;
 
-/// A lazily connected channel to `url` carrying `token`.
+/// A lazily connected channel to `url` carrying `token`; an `http` URL other than
+/// loopback is refused before anything is sent (ADR 0099).
 pub fn connect(url: &str, token: &str) -> Result<Api, Error> {
     let bearer = format!("Bearer {token}")
         .parse()
         .map_err(|_| Error("the token file holds characters a header cannot carry".into()))?;
+    let tls = secure(url)?;
     let mut endpoint = Endpoint::from_shared(url.to_string())
         .map_err(|err| Error(format!("invalid forge URL {url}: {err}")))?;
-    if url.starts_with("https://") {
+    if tls {
         endpoint = endpoint
             .tls_config(ClientTlsConfig::new().with_native_roots())
             .map_err(|err| Error(format!("TLS for {url}: {err}")))?;
@@ -157,6 +159,25 @@ pub fn connect(url: &str, token: &str) -> Result<Api, Error> {
         endpoint.connect_lazy(),
         Headers(bearer),
     ))
+}
+
+/// `https` (true: TLS), or plain `http` to this machine for development (ADR 0099).
+fn secure(url: &str) -> Result<bool, Error> {
+    let uri: tonic::codegen::http::Uri = url
+        .parse()
+        .map_err(|err| Error(format!("invalid forge URL {url}: {err}")))?;
+    let loopback = uri.scheme_str() == Some("http")
+        && uri.host().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]"
+        });
+    let https = uri.scheme_str() == Some("https");
+    if https || loopback {
+        return Ok(https);
+    }
+    Err(Error(format!(
+        "refusing to send a token to {url}: the forge URL must be https \
+         (http only for localhost, 127.0.0.1 or [::1])"
+    )))
 }
 
 /// A call's outcome: the 0023 warning on stderr, then the message or the error.
