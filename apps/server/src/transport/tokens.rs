@@ -67,6 +67,9 @@ fn timestamp(millis: i64) -> Timestamp {
 
 /// Epoch milliseconds of a valid timestamp, with checked arithmetic (ADR 0029).
 fn millis(timestamp: &Timestamp) -> Option<i64> {
+    (-62_135_596_800..=253_402_300_799)
+        .contains(&timestamp.seconds)
+        .then_some(())?;
     (0..1_000_000_000)
         .contains(&timestamp.nanos)
         .then_some(())?;

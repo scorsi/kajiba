@@ -54,6 +54,20 @@ async fn list(service: &Tokens, user: i64) -> Vec<Token> {
 
 const LIST: &str = "/kajiba.v1.RepoService/ListRepos";
 
+#[test]
+fn expiry_timestamp_respects_protobuf_bounds() {
+    for (seconds, nanos, expected) in [
+        (-62_135_596_800, 0, Some(-62_135_596_800_000)),
+        (253_402_300_799, 999_999_999, Some(253_402_300_799_999)),
+        (-62_135_596_801, 999_999_999, None),
+        (253_402_300_800, 0, None),
+        (0, -1, None),
+        (0, 1_000_000_000, None),
+    ] {
+        assert_eq!(millis(&Timestamp { seconds, nanos }), expected);
+    }
+}
+
 #[tokio::test]
 async fn created_token_is_shown_once_stored_hashed_and_authenticates() {
     let fixture = fixture().await;
@@ -156,6 +170,14 @@ async fn created_token_is_shown_once_stored_hashed_and_authenticates() {
             &read[..],
             Some(Timestamp {
                 seconds: 1,
+                nanos: 0,
+            }),
+        ),
+        (
+            "x",
+            &read[..],
+            Some(Timestamp {
+                seconds: 253_402_300_800,
                 nanos: 0,
             }),
         ),
