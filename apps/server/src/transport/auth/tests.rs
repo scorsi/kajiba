@@ -380,3 +380,70 @@ fn credentials_never_reach_the_logs() {
         assert_eq!(line["request_id"].as_str().unwrap().len(), 26, "{line}");
     }
 }
+
+#[test]
+fn version_rule_before_and_from_one_zero() {
+    for (server, client, expected) in [
+        ("0.4.2", "0.4.2", true),
+        ("0.4.2", "0.4.0", true),
+        ("0.4.2", "0.4.9-rc.1", true),
+        ("0.4.2", "0.5.2", false),
+        ("0.4.2", "0.3.2", false),
+        ("0.4.2", "1.4.2", false),
+        ("1.2.0", "1.3.5", true),
+        ("1.2.0", "1.0.0+build", true),
+        ("1.2.0", "2.2.0", false),
+        ("1.2.0", "0.2.0", false),
+        ("0.4.2", "", false),
+        ("0.4.2", "0.4", false),
+        ("0.4.2", "0.4.2.1", false),
+        ("0.4.2", "v0.4.2", false),
+        ("0.4.2", "0.4.x", false),
+        ("0.4.2", "0..2", false),
+        ("0.4.2", "0.+4.2", false),
+    ] {
+        assert_eq!(compatible(server, client), expected, "{server} vs {client}");
+    }
+}
+
+#[tokio::test]
+async fn client_version_is_checked_before_credentials() {
+    let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
+    let mut app = router(fixture.repos.0.clone(), false, Arc::default()).unwrap();
+    let server = env!("CARGO_PKG_VERSION");
+    let (major, minor, patch) = semver(server).unwrap();
+    let bearer = format!("Bearer {READ}");
+    let patched = format!("{major}.{minor}.{}", patch + 1);
+    for client in [server, patched.as_str()] {
+        assert!(
+            call(
+                &mut app,
+                LIST,
+                &[("authorization", &bearer), (CLIENT_VERSION, client)]
+            )
+            .await
+            .is_none(),
+            "{client}"
+        );
+    }
+    let other_minor = format!("{major}.{}.{patch}", minor + 1);
+    for (client, headers) in [
+        (
+            other_minor.as_str(),
+            vec![("authorization", bearer.as_str())],
+        ),
+        // No credential at all: the version refusal still comes first.
+        (other_minor.as_str(), vec![]),
+        ("not-a-version", vec![("authorization", bearer.as_str())]),
+    ] {
+        let mut headers = headers;
+        headers.push((CLIENT_VERSION, client));
+        for path in [LIST, "/kajiba.v1.HealthService/Check"] {
+            let status = call(&mut app, path, &headers).await.unwrap();
+            assert_eq!(status.code(), Code::FailedPrecondition, "{client}");
+            assert_eq!(reason(&status), "VERSION_INCOMPATIBLE");
+            assert!(status.message().contains(client), "{status:?}");
+            assert!(status.message().contains(server), "{status:?}");
+        }
+    }
+}

@@ -19,6 +19,46 @@ use tonic::Status;
 
 /// The session cookie (ADR 0079).
 pub const SESSION_COOKIE: &str = "kajiba_session";
+/// The client version a CLI sends on every call (ADR 0080).
+pub const CLIENT_VERSION: &str = "kajiba-client-version";
+
+/// `X.Y.Z`, optionally followed by a `-` pre-release or `+` build suffix.
+fn semver(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version.split(['-', '+']).next()?;
+    let mut parts = core.split('.').map(|part| {
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse().ok())
+            .flatten()
+    });
+    let version = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some(version)
+}
+
+/// ADR 0023's server ↔ CLI row: before 1.0 the same `0.minor`, from 1.0 the same major
+/// (the CLI warns about another minor); patch may differ. A malformed version is refused.
+pub(super) fn compatible(server: &str, client: &str) -> bool {
+    match (semver(server), semver(client)) {
+        (Some((0, server, _)), Some((0, client, _))) => server == client,
+        (Some((server, ..)), Some((client, ..))) => server != 0 && server == client,
+        _ => false,
+    }
+}
+
+/// A call without the header (browser, grpcurl) passes (ADR 0080).
+fn version_check(headers: &HeaderMap, server: &str) -> Result<(), Status> {
+    let Some(value) = headers.get(CLIENT_VERSION) else {
+        return Ok(());
+    };
+    let client = String::from_utf8_lossy(value.as_bytes());
+    if compatible(server, &client) {
+        return Ok(());
+    }
+    Err(refused(
+        tonic::Code::FailedPrecondition,
+        "VERSION_INCOMPATIBLE",
+        format!("client version {client} is incompatible with server version {server}"),
+    ))
+}
 
 /// The authenticated caller of a scoped method, in its request extensions.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -202,6 +242,10 @@ pub(super) async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
+    // Before credential resolution: an incompatible client learns why, whatever its token.
+    if let Err(status) = version_check(request.headers(), env!("CARGO_PKG_VERSION")) {
+        return status.into_http().map(Body::new);
+    }
     // Public methods pass; an unknown method reaches tonic, which answers UNIMPLEMENTED.
     let Some(&Access::Scope(scope)) = auth.access.get(request.uri().path()) else {
         return next.run(request).await;
