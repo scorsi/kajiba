@@ -85,7 +85,8 @@ pkgs.testers.runNixOSTest {
         return out
 
     def direct(command, user=None):
-        return forge.execute(f"runuser -u kajiba-git -- env SSH_ORIGINAL_COMMAND={shlex.quote(command)} kajiba-git serve-ssh --user {user or alice} </dev/null 2>&1")
+        # An empty pipe, as sshd hands over: the relays cannot poll /dev/null (epoll EPERM).
+        return forge.execute(f": | runuser -u kajiba-git -- env SSH_ORIGINAL_COMMAND={shlex.quote(command)} kajiba-git serve-ssh --user {user or alice} 2>&1")
 
     def started():
         forge.succeed("journalctl --sync")
