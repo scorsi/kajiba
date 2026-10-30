@@ -145,11 +145,14 @@ pkgs.testers.runNixOSTest {
     for key in ["daemon", "server", "both", "timeout"]:
         with subtest(f"mid-fetch {key}: child lifetime, durable recovery and next admission"):
             if key == "timeout":
+                previous = generation()
                 forge.succeed(
                     "install -Dm644 ${deadlineUnit} /run/systemd/system/kajiba-git.service.d/deadline.conf",
                     "systemctl daemon-reload",
                     f"systemctl restart {git_unit}",
                 )
+                # readyz stays OK across a fast restart; admission needs the new generation's snapshot.
+                retry(lambda _: generation() != previous)
                 ready()
             before = events()
             pid = forge.succeed(f"systemctl show -P MainPID {git_unit}").strip()
