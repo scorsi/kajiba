@@ -83,7 +83,7 @@ pub(super) async fn cors(
                 (ACCESS_CONTROL_ALLOW_METHODS, "POST"),
                 (
                     ACCESS_CONTROL_ALLOW_HEADERS,
-                    "content-type, x-grpc-web, x-user-agent, grpc-timeout, kajiba-client-version",
+                    "authorization, content-type, x-grpc-web, x-user-agent, grpc-timeout, kajiba-client-version",
                 ),
                 (ACCESS_CONTROL_MAX_AGE, "600"),
             ],

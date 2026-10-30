@@ -113,7 +113,10 @@ async fn only_the_forge_origin_passes_cors() {
             .uri(LIST)
             .header("origin", origin)
             .header("access-control-request-method", "POST")
-            .header("access-control-request-headers", "content-type,x-grpc-web")
+            .header(
+                "access-control-request-headers",
+                "authorization,content-type,x-grpc-web",
+            )
             .body(Body::empty())
             .unwrap()
     };
@@ -124,12 +127,17 @@ async fn only_the_forge_origin_passes_cors() {
         allowed.headers()["access-control-allow-credentials"],
         "true"
     );
-    assert!(
-        allowed.headers()["access-control-allow-headers"]
-            .to_str()
-            .unwrap()
-            .contains("x-grpc-web")
-    );
+    let allowed_headers = allowed.headers()["access-control-allow-headers"]
+        .to_str()
+        .unwrap();
+    for header in ["authorization", "content-type", "x-grpc-web"] {
+        assert!(
+            allowed_headers
+                .split(',')
+                .any(|allowed| allowed.trim().eq_ignore_ascii_case(header)),
+            "{header} missing from {allowed_headers}"
+        );
+    }
     for origin in ["https://evil.example.org", "http://example.org", "null"] {
         let refused = app.call(preflight(origin)).await.unwrap();
         assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{origin}");
