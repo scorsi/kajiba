@@ -11,6 +11,7 @@ use crate::{
     metrics::Registry,
 };
 use kajiba_core::config::{Capabilities, RunnerDeclaration};
+use kajiba_gitstore::{GitStore, Gix};
 use kajiba_proto::runner::v1::{
     Assignment, CancelAttempt, ConnectRequest, ConnectResponse, ContinueAttempt,
     FetchRunBundleRequest, FetchRunBundleResponse, Hello, LogAck, ResultAck, ResultState,
@@ -43,6 +44,8 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HOSTNAME: usize = 253;
 /// ADR 0105: a log chunk holds at most 64 KiB.
 const MAX_CHUNK: usize = 64 * 1024;
+/// `have` ids considered per bundle request (0106).
+const MAX_HAVE: usize = 64;
 
 type Outbound = mpsc::Sender<Result<ConnectResponse, Status>>;
 
@@ -743,10 +746,117 @@ impl RunnerService for Runners {
 
     async fn fetch_run_bundle(
         &self,
-        _: Request<FetchRunBundleRequest>,
+        request: Request<FetchRunBundleRequest>,
     ) -> Result<Response<Self::FetchRunBundleStream>, Status> {
-        // Delivered by J6 task 10.
-        Err(Status::unimplemented("FetchRunBundle"))
+        let secret = bearer(request.metadata()).map(<[u8]>::to_vec);
+        let FetchRunBundleRequest {
+            attempt_id,
+            mut have,
+        } = request.into_inner();
+        let (repo, sha) = self.leased(secret, &attempt_id).await?;
+        // The runner's cache keeps 16 commits (0106): more ids only make a smaller bundle.
+        have.truncate(MAX_HAVE);
+        let repos = self.health.git_state_dir.join("repos");
+        let (sender, receiver) = mpsc::channel(4);
+        tokio::task::spawn_blocking(move || {
+            let mut out = std::io::BufWriter::with_capacity(MAX_CHUNK, Chunks(sender.clone()));
+            let path = repos.join(format!("{repo}.git"));
+            let written = Gix::shared(&repos)
+                .bundle(&path, &sha, &have, &mut out)
+                .map_err(|err| err.to_string())
+                .and_then(|()| std::io::Write::flush(&mut out).map_err(|err| err.to_string()));
+            if let Err(err) = written {
+                // A runner gone mid-transfer closed the channel: nothing to report to it.
+                let _ = sender.blocking_send(Err(internal(format!("bundle of {repo}: {err}"))));
+            }
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
+    }
+}
+
+/// Bundle bytes as consecutive `FetchRunBundleResponse` messages.
+struct Chunks(mpsc::Sender<Result<FetchRunBundleResponse, Status>>);
+
+impl std::io::Write for Chunks {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .blocking_send(Ok(FetchRunBundleResponse {
+                data: data.to_vec(),
+            }))
+            .map_err(|_| std::io::ErrorKind::BrokenPipe)?;
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Runners {
+    /// The repository public id and commit of an attempt that is its job's current one,
+    /// still leased and held by the runner whose secret is presented (0106).
+    async fn leased(
+        &self,
+        secret: Option<Vec<u8>>,
+        attempt: &str,
+    ) -> Result<(String, String), Status> {
+        let unauthenticated = || {
+            refused(
+                tonic::Code::Unauthenticated,
+                "CREDENTIAL_INVALID",
+                "unknown runner or wrong secret".into(),
+            )
+        };
+        let (Some(declared), Some(database)) =
+            (self.health.runners.get(), self.health.database.get())
+        else {
+            return Err(refused(
+                tonic::Code::Unavailable,
+                "MAINTENANCE",
+                "starting".into(),
+            ));
+        };
+        let mut connection = database.acquire().await.map_err(internal)?;
+        let holder: Option<(i64, String)> = sqlx::query_as(
+            "SELECT n.id, n.name FROM job_attempt a JOIN runner n ON n.id = a.runner_id WHERE a.public_id = ?",
+        )
+        .bind(attempt)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(internal)?;
+        let Some((id, name)) = holder.filter(|(_, name)| declared.runners.contains_key(name))
+        else {
+            self.refuse("", Reason::Unknown);
+            return Err(unauthenticated());
+        };
+        let declaration = &declared.runners[&name];
+        let expected = tokio::fs::read(&declaration.token_file)
+            .await
+            .map_err(|err| internal(format!("runners.{name}.token_file: {err}")))?;
+        if !secret.is_some_and(|secret| same_secret(&secret, expected.trim_ascii())) {
+            self.refuse(&name, Reason::Secret);
+            return Err(unauthenticated());
+        }
+        let current = attempts::current(&mut connection, id, attempt)
+            .await
+            .map_err(internal)?
+            .filter(|current| {
+                current.state == "running" && current.lease_expires_at > crate::db::runs::now()
+            })
+            .ok_or_else(|| {
+                refused(
+                    tonic::Code::FailedPrecondition,
+                    "INVALID_STATE",
+                    "the attempt is not current and leased".into(),
+                )
+            })?;
+        sqlx::query_as(
+            "SELECT repo.public_id, run.sha FROM run JOIN repo ON repo.id = run.repo_id WHERE run.id = ?",
+        )
+        .bind(current.run_id)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(internal)
     }
 }
 

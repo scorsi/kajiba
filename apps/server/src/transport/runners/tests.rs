@@ -8,6 +8,7 @@ use tokio::sync::watch;
 use tonic::transport::Channel;
 
 const SECRET: &str = "runner-secret";
+const OTHER_SECRET: &str = "other-runner-secret";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const SHA: &str = "1111111111111111111111111111111111111111";
 
@@ -20,20 +21,23 @@ struct Forge {
 }
 
 impl Forge {
-    /// `build-1` (aarch64-linux, nix and process, tag kvm, 2 jobs) is declared; `gone`
-    /// was declared once and is disabled.
+    /// `build-1` (aarch64-linux, nix and process, tag kvm, 2 jobs) and `build-2` (same,
+    /// another secret) are declared; `gone` was declared once and is disabled.
     async fn start() -> Self {
         let state = State::new();
         state.start().await;
         let dir = &state.health.state_dir;
         let token = dir.join("runner-token");
         std::fs::write(&token, format!("{SECRET}\n")).unwrap();
-        let runner = |name: &str| {
+        let other = dir.join("other-token");
+        std::fs::write(&other, OTHER_SECRET).unwrap();
+        let runner_with = |name: &str, token: &std::path::Path| {
             format!(
                 "[runners.{name}]\ntoken_file = {:?}\n[runners.{name}.capabilities]\narch = 'aarch64'\nos = 'linux'\nbackends = ['nix', 'process']\ntags = ['kvm']\nmax_jobs = 2\n",
                 token.display()
             )
         };
+        let runner = |name: &str| runner_with(name, &token);
         let config = |runners: &str| {
             ServerConfig::parse(&format!(
                 "[http]\npublic_url = 'https://example.org'\n{runners}"
@@ -41,7 +45,11 @@ impl Forge {
             .unwrap()
         };
         let before = config(&format!("{}{}", runner("build-1"), runner("gone")));
-        let config = config(&runner("build-1"));
+        let config = config(&format!(
+            "{}{}",
+            runner("build-1"),
+            runner_with("build-2", &other)
+        ));
         {
             let mut writer = state.health.writer.get().unwrap().lock().await;
             crate::db::runners::reconcile_runners(&mut writer, &before.runners, 1)
@@ -141,13 +149,18 @@ impl Forge {
     async fn run(&self) -> String {
         self.exec("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
             INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')").await;
+        self.run_at(SHA).await
+    }
+
+    /// Another pushed run of `demo`.
+    async fn run_at(&self, sha: &str) -> String {
         let mut writer = self.state.health.writer.get().unwrap().lock().await;
         let mut tx = writer.begin().await.unwrap();
         let run = crate::db::runs::create_run(
             &mut tx,
             &crate::db::runs::NewRun {
                 repo_id: 1,
-                sha: SHA,
+                sha,
                 reference: Some("refs/heads/main"),
                 trigger: "push",
                 event_id: None,
@@ -435,7 +448,7 @@ async fn admission_records_the_runner_and_a_newer_connection_replaces_the_older(
 }
 
 #[tokio::test]
-async fn a_stream_must_open_with_a_hello_and_bundles_wait_for_their_task() {
+async fn a_stream_must_open_with_a_hello() {
     let forge = Forge::start().await;
     let (sender, receiver) = mpsc::channel(1);
     sender
@@ -456,7 +469,7 @@ async fn a_stream_must_open_with_a_hello_and_bundles_wait_for_their_task() {
         .fetch_run_bundle(FetchRunBundleRequest::default())
         .await
         .unwrap_err();
-    assert_eq!(status.code(), tonic::Code::Unimplemented);
+    assert_eq!(status.code(), tonic::Code::Unauthenticated);
 }
 
 #[tokio::test]
@@ -794,4 +807,193 @@ async fn a_reconnected_runner_continues_its_attempt_and_resends_unacknowledged_l
     assert_eq!(std::fs::read(&log).unwrap(), b"1\n2\n3\n");
     let attempts: Vec<(i64, String)> = forge.sql("SELECT number, state FROM job_attempt").await;
     assert_eq!(attempts, [(1, "running".into())]);
+}
+
+impl Forge {
+    async fn bundle(
+        &self,
+        secret: Option<&str>,
+        attempt: &str,
+        have: &[&str],
+    ) -> Result<String, Status> {
+        let mut request = Request::new(FetchRunBundleRequest {
+            attempt_id: attempt.into(),
+            have: have.iter().map(|id| id.to_string()).collect(),
+        });
+        if let Some(secret) = secret {
+            request
+                .metadata_mut()
+                .insert("authorization", format!("Bearer {secret}").parse().unwrap());
+        }
+        let mut stream = self
+            .client
+            .clone()
+            .fetch_run_bundle(request)
+            .await?
+            .into_inner();
+        let mut bundle = Vec::new();
+        while let Some(message) = stream.message().await? {
+            bundle.extend(message.data);
+        }
+        // The pack is binary: the header is what the tests read.
+        Ok(String::from_utf8_lossy(&bundle).into_owned())
+    }
+}
+
+/// `git` with an isolated configuration in `dir`; its trimmed output.
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Alice")
+        .env("GIT_AUTHOR_EMAIL", "alice@example.org")
+        .env("GIT_COMMITTER_NAME", "Alice")
+        .env("GIT_COMMITTER_EMAIL", "alice@example.org")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[tokio::test]
+async fn bundles_serve_only_the_current_leased_attempt_of_the_calling_runner() {
+    let forge = Forge::start().await;
+    // `demo`: `first` then `second` on main, `contrib` only under `refs/contrib/*`.
+    let repo = forge
+        .state
+        .health
+        .git_state_dir
+        .join("repos/00000000000000000000000001.git");
+    git(
+        &forge.state.health.git_state_dir,
+        &["init", "-q", "--bare", repo.to_str().unwrap()],
+    );
+    let commit = |message: &str| {
+        git(
+            &repo,
+            &[
+                "commit-tree",
+                "-m",
+                message,
+                "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            ],
+        )
+    };
+    let first = commit("first");
+    let second = git(
+        &repo,
+        &[
+            "commit-tree",
+            "-p",
+            &first,
+            "-m",
+            "second",
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        ],
+    );
+    let contrib = git(
+        &repo,
+        &[
+            "commit-tree",
+            "-p",
+            &second,
+            "-m",
+            "contrib",
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        ],
+    );
+    git(&repo, &["update-ref", "refs/heads/main", &second]);
+    git(&repo, &["update-ref", "refs/contrib/alice/x", &contrib]);
+
+    forge.exec("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
+        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')").await;
+    forge.run_at(&second).await;
+    let (_sender, mut stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
+        panic!("expected an assignment");
+    };
+    let attempt = assignment.attempt_id.as_str();
+
+    // An empty cache gets the full history; a cache holding the parent only the new
+    // commit; unknown and malformed ids are ignored.
+    let full = forge.bundle(Some(SECRET), attempt, &[]).await.unwrap();
+    assert!(
+        full.starts_with(&format!("# v2 git bundle\n{second} refs/kajiba/run\n\n")),
+        "{full}"
+    );
+    let incremental = forge
+        .bundle(
+            Some(SECRET),
+            attempt,
+            &[&first, "zz", "ffffffffffffffffffffffffffffffffffffffff"],
+        )
+        .await
+        .unwrap();
+    assert!(
+        incremental.starts_with(&format!(
+            "# v2 git bundle\n-{first}\n{second} refs/kajiba/run\n\n"
+        )),
+        "{incremental}"
+    );
+    assert!(incremental.len() < full.len());
+
+    // Another runner's secret, no secret and an unknown attempt are not this runner.
+    for (secret, attempt) in [
+        (Some(OTHER_SECRET), attempt),
+        (None, attempt),
+        (Some(SECRET), "7ZZZZZZZZZZZZZZZZZZZZZZZZZ"),
+    ] {
+        let status = forge.bundle(secret, attempt, &[]).await.unwrap_err();
+        assert_eq!(
+            (status.code(), reason(&status).as_str()),
+            (tonic::Code::Unauthenticated, "CREDENTIAL_INVALID")
+        );
+    }
+
+    // A lost attempt is refused; its capacity goes to a manual run of a contribution.
+    forge
+        .exec(&format!(
+            "UPDATE job_attempt SET state = 'lost' WHERE public_id = '{attempt}'"
+        ))
+        .await;
+    let status = forge.bundle(Some(SECRET), attempt, &[]).await.unwrap_err();
+    assert_eq!(
+        (status.code(), reason(&status).as_str()),
+        (tonic::Code::FailedPrecondition, "INVALID_STATE")
+    );
+    forge.run_at(&contrib).await;
+    let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
+        panic!("expected an assignment");
+    };
+    let attempt = assignment.attempt_id.as_str();
+    let served = forge
+        .bundle(Some(SECRET), attempt, &[&second])
+        .await
+        .unwrap();
+    assert!(
+        served.starts_with(&format!(
+            "# v2 git bundle\n-{second}\n{contrib} refs/kajiba/run\n\n"
+        )),
+        "{served}"
+    );
+
+    // A stale attempt (a newer one exists for its job) and an expired lease are refused.
+    forge
+        .exec(&format!(
+            "UPDATE job_attempt SET lease_expires_at = 1 WHERE public_id = '{attempt}'"
+        ))
+        .await;
+    let status = forge.bundle(Some(SECRET), attempt, &[]).await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    forge.exec(&format!("INSERT INTO job_attempt (public_id, job_id, number, runner_id, state, lease_expires_at, started_at)
+        SELECT '7YYYYYYYYYYYYYYYYYYYYYYYYY', job_id, number + 1, runner_id, 'running', 9999999999999, 1 FROM job_attempt WHERE public_id = '{attempt}'")).await;
+    forge
+        .exec(&format!(
+            "UPDATE job_attempt SET lease_expires_at = 9999999999999 WHERE public_id = '{attempt}'"
+        ))
+        .await;
+    let status = forge.bundle(Some(SECRET), attempt, &[]).await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
 }

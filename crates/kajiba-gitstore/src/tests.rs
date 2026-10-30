@@ -1126,3 +1126,96 @@ fn shared_repository_trust_is_scoped_to_configured_canonical_ulid_paths() {
     fs::write(own.join("commondir"), outside.to_str().unwrap()).unwrap();
     assert!(shared.trusted(&own).is_none());
 }
+
+/// Fetch a bundle's single ref into `cache` as `refs/kept/<name>`; false when git refuses it.
+fn unbundle(cache: &Path, bundle: &[u8], name: &str) -> bool {
+    let path = cache.with_extension(format!("{name}.bundle"));
+    fs::write(&path, bundle).unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(cache)
+        .args(["fetch", "-q"])
+        .arg(&path)
+        .arg(format!("{BUNDLE_REF}:refs/kept/{name}"))
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[test]
+fn bundles_are_incremental_over_the_commits_the_receiver_holds() {
+    let f = fixture("bundle");
+    let bundle = |commit: &str, have: &[&str]| {
+        let mut out = Vec::new();
+        let have: Vec<String> = have.iter().map(|id| id.to_string()).collect();
+        Gix.bundle(&f.bare, commit, &have, &mut out).map(|()| out)
+    };
+    let cache = f.bare.with_file_name("cache.git");
+    git(
+        f.bare.parent().unwrap(),
+        &["init", "-q", "--bare", "cache.git"],
+        "1700000000 +0000",
+    );
+    // An empty cache gets the full history.
+    let full = bundle(&f.first, &[]).unwrap();
+    assert!(
+        String::from_utf8_lossy(&full)
+            .starts_with(&format!("# v2 git bundle\n{} {BUNDLE_REF}\n\n", f.first))
+    );
+    assert!(unbundle(&cache, &full, "first"));
+    // Holding the parent: only the new commit, which an empty repository cannot take.
+    let incremental = bundle(&f.second, &[&f.first]).unwrap();
+    assert!(
+        String::from_utf8_lossy(&incremental)
+            .starts_with(&format!("# v2 git bundle\n-{}\n", f.first))
+    );
+    let empty = f.bare.with_file_name("empty.git");
+    git(
+        f.bare.parent().unwrap(),
+        &["init", "-q", "--bare", "empty.git"],
+        "1700000000 +0000",
+    );
+    assert!(!unbundle(&empty, &incremental, "second"));
+    assert!(unbundle(&cache, &incremental, "second"));
+    // Unknown, malformed, duplicated and non-commit ids are ignored.
+    let tag = git(&f.bare, &["rev-parse", "v1"], "1700000000 +0000");
+    let noise = bundle(
+        &f.third,
+        &[
+            &f.second,
+            &f.second,
+            "zz",
+            "ffffffffffffffffffffffffffffffffffffffff",
+            &tag,
+            &f.second.to_uppercase(),
+        ],
+    )
+    .unwrap();
+    assert!(String::from_utf8_lossy(&noise).starts_with(&format!(
+        "# v2 git bundle\n-{}\n{} {BUNDLE_REF}\n\n",
+        f.second, f.third
+    )));
+    assert!(unbundle(&cache, &noise, "third"));
+    // A commit the receiver already holds still makes a valid bundle.
+    assert!(unbundle(
+        &cache,
+        &bundle(&f.second, &[&f.third]).unwrap(),
+        "again"
+    ));
+    let kept = git(
+        &cache,
+        &["for-each-ref", "--format=%(objectname)"],
+        "1700000000 +0000",
+    );
+    assert_eq!(
+        kept,
+        [&f.second, &f.first, &f.second, &f.third]
+            .map(|s| s.as_str())
+            .join("\n")
+    );
+    assert_eq!(bundle(&tag, &[]), Err(Error::NotFound));
+    assert_eq!(bundle("zz", &[]), Err(Error::NotFound));
+}

@@ -231,7 +231,21 @@ pub trait GitStore {
         verification: &push::Verification,
         allowed_signers: &Path,
     ) -> Result<bool>;
+    /// Writes to `out` a git bundle of `commit` under [`BUNDLE_REF`], minus the history
+    /// of the `have` ids that are commits of the repository (others are ignored); read
+    /// only (ADR 0106). The bundle is valid even when `have` already holds `commit`.
+    /// Blocking; `NotFound` when `commit` is not a commit of the repository.
+    fn bundle(
+        &self,
+        repo: &Path,
+        commit: &str,
+        have: &[String],
+        out: &mut dyn std::io::Write,
+    ) -> Result<()>;
 }
+
+/// The single ref of a run bundle (ADR 0106).
+pub const BUNDLE_REF: &str = "refs/kajiba/run";
 
 /// Deadline of one git child of an import (`ls-remote`, then `fetch`): a hung
 /// source must not pin the repository's admission gate (ADR 0003). Past it the
@@ -716,6 +730,86 @@ impl GitStore for Gix<'_> {
             allowed_signers,
             "verify-tag",
         )
+    }
+
+    fn bundle(
+        &self,
+        repo: &Path,
+        commit: &str,
+        have: &[String],
+        out: &mut dyn std::io::Write,
+    ) -> Result<()> {
+        use std::io::Write;
+        let opened = self.open(repo)?;
+        let is_commit = |id: &str| {
+            gix::ObjectId::from_hex(id.as_bytes())
+                .ok()
+                .filter(|id| {
+                    opened
+                        .try_find_header(*id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|header| header.kind() == gix::object::Kind::Commit)
+                })
+                .map(|id| id.to_string())
+        };
+        let commit = is_commit(commit).ok_or(Error::NotFound)?;
+        let mut have: Vec<String> = have.iter().filter_map(|id| is_commit(id)).collect();
+        have.sort();
+        have.dedup();
+        // `git bundle create` refuses a bare commit id and an empty bundle, and naming a
+        // ref would write the repository: the bundle (v2 format) is assembled here, its
+        // prerequisites being the `have` commits, which the receiver holds.
+        let mut header = String::from("# v2 git bundle\n");
+        for id in &have {
+            header.push_str(&format!("-{id}\n"));
+        }
+        header.push_str(&format!("{commit} {BUNDLE_REF}\n\n"));
+        let io = |err: std::io::Error| Error::Git(format!("bundle: {err}"));
+        out.write_all(header.as_bytes()).map_err(io)?;
+        let mut command = git();
+        if let Some(path) = self.trusted(repo) {
+            command
+                .arg("-c")
+                .arg(format!("safe.directory={}", path.display()));
+        }
+        let mut child = command
+            .arg("-C")
+            .arg(repo)
+            .args([
+                "pack-objects",
+                "--stdout",
+                "--thin",
+                "--delta-base-offset",
+                "--revs",
+                "-q",
+            ])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|err| Error::Git(format!("git: {err}")))?;
+        let revs = format!(
+            "{commit}\n--not\n{}",
+            have.iter().map(|id| format!("{id}\n")).collect::<String>()
+        );
+        // Revisions are read whole before the pack is written: no deadlock on the pipes.
+        let written = child
+            .stdin
+            .take()
+            .expect("piped")
+            .write_all(revs.as_bytes());
+        let copied = written.and_then(|()| {
+            std::io::copy(&mut child.stdout.take().expect("piped"), out).map(|_| ())
+        });
+        if copied.is_err() {
+            let _ = child.kill();
+        }
+        let status = child.wait().map_err(io)?;
+        copied.map_err(io)?;
+        if !status.success() {
+            return Err(Error::Git(format!("git pack-objects: {status}")));
+        }
+        Ok(())
     }
 
     fn push_facts(
