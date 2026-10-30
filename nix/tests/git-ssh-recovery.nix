@@ -353,7 +353,10 @@ pkgs.testers.runNixOSTest {
         replay()
         # A second generation and startup pass must not replay the applied subset.
         saved = events()
+        previous = generation()
         forge.succeed(f"systemctl restart {git_unit}")
+        # readyz stays OK across a fast restart; admission needs the new generation's snapshot.
+        retry(lambda _: generation() != previous)
         ready()
         settled()
         assert events() == saved
