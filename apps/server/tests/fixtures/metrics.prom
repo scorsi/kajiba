@@ -210,6 +210,9 @@ kajiba_runner_refusals_total{reason="disabled"} 0
 kajiba_runner_refusals_total{reason="secret"} 1
 kajiba_runner_refusals_total{reason="version"} 2
 kajiba_runner_refusals_total{reason="capabilities"} 0
+# HELP kajiba_jobs_pending Jobs waiting for a runner.
+# TYPE kajiba_jobs_pending gauge
+kajiba_jobs_pending 3
 # HELP kajiba_handler_lag_events Journal events after the handler checkpoint.
 # TYPE kajiba_handler_lag_events gauge
 kajiba_handler_lag_events{handler="ci"} 2

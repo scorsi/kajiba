@@ -48,7 +48,10 @@ async fn push(
 }
 
 async fn drain(writer: &mut SqliteConnection, bus: &EventBus) {
-    let mut ci = Ci { now: || 5000 };
+    let mut ci = Ci {
+        now: || 5000,
+        wake: std::sync::Arc::default(),
+    };
     while bus.dispatch_next(writer, &mut ci).await.unwrap() {}
 }
 

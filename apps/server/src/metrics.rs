@@ -110,6 +110,7 @@ pub struct Registry {
     pushes: [Counter; 2],
     auth_refusals: [Counter; 3],
     runners_connected: AtomicU64,
+    jobs_pending: AtomicU64,
     runner_refusals: [Counter; 5],
 }
 impl Registry {
@@ -129,6 +130,10 @@ impl Registry {
 
     pub fn set_runners_connected(&self, count: u64) {
         self.runners_connected.store(count, Relaxed);
+    }
+
+    pub fn set_jobs_pending(&self, count: u64) {
+        self.jobs_pending.store(count, Relaxed);
     }
 
     /// Count admission decisions once per push, regardless of its number of refs.
@@ -221,6 +226,13 @@ impl Registry {
             )
             .unwrap();
         }
+        out.push_str("# HELP kajiba_jobs_pending Jobs waiting for a runner.\n# TYPE kajiba_jobs_pending gauge\n");
+        writeln!(
+            out,
+            "kajiba_jobs_pending {}",
+            self.jobs_pending.load(Relaxed)
+        )
+        .unwrap();
         out.push_str("# HELP kajiba_handler_lag_events Journal events after the handler checkpoint.\n# TYPE kajiba_handler_lag_events gauge\n");
         for (handler, lag) in HANDLERS.iter().zip(lag) {
             writeln!(

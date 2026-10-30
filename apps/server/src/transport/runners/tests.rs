@@ -9,6 +9,7 @@ use tonic::transport::Channel;
 
 const SECRET: &str = "runner-secret";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const SHA: &str = "1111111111111111111111111111111111111111";
 
 struct Forge {
     state: State,
@@ -53,6 +54,7 @@ impl Forge {
         state.health.set_runners(Declared {
             runners: config.runners,
             bus: Arc::default(),
+            wake: Arc::default(),
         });
         let registry = Arc::new(Registry::default());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -128,6 +130,46 @@ impl Forge {
             .exposition("test", [0; 4], [0; 4])
             .lines()
             .any(|l| l == line)
+    }
+
+    async fn exec(&self, query: &str) {
+        let mut writer = self.state.health.writer.get().unwrap().lock().await;
+        sqlx::raw_sql(query).execute(&mut *writer).await.unwrap();
+    }
+
+    /// User `alice` and repository `demo` (public id `…01`) with one pushed run.
+    async fn run(&self) -> String {
+        self.exec("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
+            INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')").await;
+        let mut writer = self.state.health.writer.get().unwrap().lock().await;
+        let mut tx = writer.begin().await.unwrap();
+        let run = crate::db::runs::create_run(
+            &mut tx,
+            &crate::db::runs::NewRun {
+                repo_id: 1,
+                sha: SHA,
+                reference: Some("refs/heads/main"),
+                trigger: "push",
+                event_id: None,
+                triggered_by: Some(1),
+                correlation_id: "push",
+                now: 1,
+            },
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        run
+    }
+
+    async fn until_metric(&self, line: &str) {
+        for _ in 0..300 {
+            if self.metric(line) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{line} never exposed");
     }
 
     /// Wait for the server side of a stream to settle (disconnection runs in a task).
@@ -494,4 +536,81 @@ async fn connection_logs_name_the_runner_and_the_request_method() {
             1,
         )
         .await;
+}
+
+async fn next(stream: &mut Streaming<ConnectResponse>) -> connect_response::Message {
+    tokio::time::timeout(Duration::from_secs(5), stream.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .message
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_pending_job_is_assigned_to_an_admitted_runner_and_accepted() {
+    let forge = Forge::start().await;
+    let run = forge.run().await;
+    forge.until_metric("kajiba_jobs_pending 1").await;
+    forge
+        .until(
+            "SELECT count(*) FROM job WHERE pending_reason = 'no-connected-runner'",
+            1,
+        )
+        .await;
+    let (sender, mut stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
+        panic!("expected an assignment");
+    };
+    assert_eq!(
+        (
+            assignment.repo_public_id.as_str(),
+            assignment.sha.as_str(),
+            assignment.system.as_str()
+        ),
+        ("00000000000000000000000001", SHA, "aarch64-linux")
+    );
+    forge.until_metric("kajiba_jobs_pending 0").await;
+    let send = |message| {
+        let sender = sender.clone();
+        async move {
+            sender
+                .send(ConnectRequest {
+                    message: Some(message),
+                })
+                .await
+                .unwrap()
+        }
+    };
+    send(Message::Accept(kajiba_proto::runner::v1::Accept {
+        attempt_id: "7ZZZZZZZZZZZZZZZZZZZZZZZZZ".into(),
+    }))
+    .await;
+    assert_eq!(
+        next(&mut stream).await,
+        connect_response::Message::CancelAttempt(CancelAttempt {
+            attempt_id: "7ZZZZZZZZZZZZZZZZZZZZZZZZZ".into()
+        })
+    );
+    send(Message::Accept(kajiba_proto::runner::v1::Accept {
+        attempt_id: assignment.attempt_id.clone(),
+    }))
+    .await;
+    forge
+        .until(
+            "SELECT count(*) FROM job JOIN run ON run.id = job.run_id WHERE job.state = 'running' AND run.state = 'running' AND job.pending_reason IS NULL",
+            1,
+        )
+        .await;
+    let events = forge.events().await;
+    let started: Vec<_> = events
+        .iter()
+        .filter(|event| event.0 == "run-started")
+        .collect();
+    assert_eq!(started.len(), 1);
+    assert_eq!(
+        started[0].3,
+        serde_json::json!({ "run": run, "attempt": assignment.attempt_id, "runner": "build-1" })
+    );
 }

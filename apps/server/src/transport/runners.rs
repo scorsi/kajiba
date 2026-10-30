@@ -3,13 +3,17 @@
 
 use super::{Health, auth::compatible, cursor::invalid_field, local::refused};
 use crate::{
-    db::events::{EventBus, NewEvent, append_event},
+    db::{
+        attempts::{self, Offer, Outcome},
+        events::{EventBus, NewEvent, append_event},
+    },
     metrics::Registry,
 };
 use kajiba_core::config::{Capabilities, RunnerDeclaration};
 use kajiba_proto::runner::v1::{
-    ConnectRequest, ConnectResponse, FetchRunBundleRequest, FetchRunBundleResponse, Hello,
-    connect_request::Message, runner_service_server::RunnerService,
+    Assignment, CancelAttempt, ConnectRequest, ConnectResponse, FetchRunBundleRequest,
+    FetchRunBundleResponse, Hello, connect_request::Message, connect_response,
+    runner_service_server::RunnerService,
 };
 use sqlx::{Connection, SqliteConnection};
 use std::{
@@ -18,7 +22,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming, metadata::MetadataMap};
 
@@ -26,15 +30,36 @@ use tonic::{Request, Response, Status, Streaming, metadata::MetadataMap};
 pub struct Declared {
     pub runners: BTreeMap<String, RunnerDeclaration>,
     pub bus: Arc<EventBus>,
+    /// Wakes matching: job creation, runner admission and attempt end (0008).
+    pub wake: Arc<Notify>,
 }
+
+/// Matching and lease expiry also run this often without a wake-up.
+const PASS_PERIOD: Duration = Duration::from_secs(1);
 
 /// A runner silent this long after opening `Connect` is dropped: one heartbeat period (0105).
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HOSTNAME: usize = 253;
 
+type Outbound = mpsc::Sender<Result<ConnectResponse, Status>>;
+
 struct Live {
     generation: u64,
     replaced: oneshot::Sender<()>,
+    outbound: Outbound,
+    offer: Offer,
+}
+
+fn response(message: connect_response::Message) -> ConnectResponse {
+    ConnectResponse {
+        message: Some(message),
+    }
+}
+
+fn cancel(attempt_id: &str) -> ConnectResponse {
+    response(connect_response::Message::CancelAttempt(CancelAttempt {
+        attempt_id: attempt_id.into(),
+    }))
 }
 
 #[derive(Clone)]
@@ -165,6 +190,7 @@ impl Runners {
         secret: Option<Vec<u8>>,
         hello: &Hello,
         request_id: &str,
+        outbound: Outbound,
     ) -> Result<(i64, u64, oneshot::Receiver<()>), Status> {
         let unauthenticated = || {
             refused(
@@ -271,6 +297,15 @@ impl Runners {
             .map_err(internal)?;
             return Err(status);
         }
+        let announced = hello.capabilities.clone().unwrap_or_default();
+        let offer = Offer {
+            runner_id: id,
+            arch: announced.arch,
+            os: announced.os,
+            backends: announced.backends,
+            tags: announced.tags,
+            max_jobs: announced.max_jobs.into(),
+        };
         let (replaced, receiver) = oneshot::channel();
         let generation = {
             let mut live = self.live.lock().unwrap();
@@ -281,6 +316,8 @@ impl Runners {
                 Live {
                     generation,
                     replaced,
+                    outbound,
+                    offer,
                 },
             ) {
                 let _ = older.replaced.send(());
@@ -315,6 +352,7 @@ impl Runners {
             version = hello.version,
             hostname = hello.hostname
         );
+        declared.wake.notify_one();
         Ok((id, generation, receiver))
     }
 
@@ -367,11 +405,119 @@ impl Runners {
     }
 }
 
-type Outbound = Pin<Box<dyn Stream<Item = Result<ConnectResponse, Status>> + Send>>;
+impl Runners {
+    /// Expire leases and match pending jobs, on every wake-up and at least every second.
+    pub async fn schedule(self) {
+        let Some(declared) = self.health.runners.get() else {
+            return;
+        };
+        loop {
+            self.pass(crate::db::runs::now()).await;
+            tokio::select! {
+                () = declared.wake.notified() => {}
+                () = tokio::time::sleep(PASS_PERIOD) => {}
+            }
+        }
+    }
+
+    async fn pass(&self, now: i64) {
+        let Some(writer) = self.health.writer.get() else {
+            return;
+        };
+        let mut writer = writer.lock().await;
+        // Read under the writer lock, like admission, so it agrees with `runner.connected`.
+        let offers: Vec<Offer> = self
+            .live
+            .lock()
+            .unwrap()
+            .1
+            .values()
+            .map(|live| live.offer.clone())
+            .collect();
+        let result = async {
+            let mut tx = writer.begin().await?;
+            let matched = attempts::assign(&mut tx, &offers, now).await?;
+            tx.commit().await?;
+            Ok::<_, sqlx::Error>(matched)
+        }
+        .await;
+        drop(writer);
+        let assigned = match result {
+            Ok((assigned, pending)) => {
+                self.registry.set_jobs_pending(pending as u64);
+                assigned
+            }
+            Err(err) => {
+                tracing::error!(event = "runner-matching-failed", err = %err);
+                return;
+            }
+        };
+        for assigned in assigned {
+            let outbound = self
+                .live
+                .lock()
+                .unwrap()
+                .1
+                .values()
+                .find(|live| live.offer.runner_id == assigned.runner_id)
+                .map(|live| live.outbound.clone());
+            // A runner gone since leaves its attempt to lease expiry (0008).
+            if let Some(outbound) = outbound {
+                let message = connect_response::Message::Assignment(Assignment {
+                    attempt_id: assigned.attempt,
+                    repo_public_id: assigned.repo,
+                    sha: assigned.sha,
+                    system: assigned.system,
+                });
+                let _ = outbound.send(Ok(response(message))).await;
+            }
+        }
+    }
+
+    /// Apply one execution message; the answers go back on the runner's stream.
+    async fn handle(
+        &self,
+        runner: (i64, &str),
+        request_id: &str,
+        message: Message,
+    ) -> Result<Vec<ConnectResponse>, Status> {
+        let (writer, declared) = match (self.health.writer.get(), self.health.runners.get()) {
+            (Some(writer), Some(declared)) => (writer, declared),
+            _ => return Err(internal("not started")),
+        };
+        let now = crate::db::runs::now();
+        let mut writer = writer.lock().await;
+        let (attempt, outcome) = match message {
+            Message::Accept(accept) => {
+                let mut tx = writer.begin().await.map_err(internal)?;
+                let outcome =
+                    attempts::accept(&mut tx, runner, &accept.attempt_id, request_id, now)
+                        .await
+                        .map_err(internal)?;
+                declared.bus.commit(tx).await.map_err(internal)?;
+                (accept.attempt_id, outcome)
+            }
+            // Handled from J6 task 8.
+            _ => return Ok(Vec::new()),
+        };
+        drop(writer);
+        Ok(match outcome {
+            Outcome::Cancel => vec![cancel(&attempt)],
+            Outcome::Done(changes) => {
+                for (run, state) in changes {
+                    tracing::info!(event = "run-state", run, state = state.as_str());
+                }
+                Vec::new()
+            }
+        })
+    }
+}
+
+type Responses = Pin<Box<dyn Stream<Item = Result<ConnectResponse, Status>> + Send>>;
 
 #[tonic::async_trait]
 impl RunnerService for Runners {
-    type ConnectStream = Outbound;
+    type ConnectStream = Responses;
     type FetchRunBundleStream =
         Pin<Box<dyn Stream<Item = Result<FetchRunBundleResponse, Status>> + Send>>;
 
@@ -392,8 +538,10 @@ impl RunnerService for Runners {
             Ok(Err(status)) => return Err(status),
             _ => return Err(invalid_field("hello", "the first message must be a hello")),
         };
-        let (id, generation, mut replaced) = self.admit(secret, &hello, &request_id).await?;
         let (outbound, receiver) = mpsc::channel(16);
+        let (id, generation, mut replaced) = self
+            .admit(secret, &hello, &request_id, outbound.clone())
+            .await?;
         let runners = self.clone();
         tokio::spawn(async move {
             loop {
@@ -405,7 +553,16 @@ impl RunnerService for Runners {
                         return;
                     }
                     message = inbound.message() => match message {
-                        // Execution messages are handled from J6 task 8.
+                        Ok(Some(ConnectRequest { message: Some(message) })) => {
+                            let answers = runners.handle((id, &hello.name), &request_id, message).await;
+                            let failed = answers.is_err();
+                            for answer in answers.map_or_else(|status| vec![Err(status)], |answers| answers.into_iter().map(Ok).collect()) {
+                                let _ = outbound.send(answer).await;
+                            }
+                            if failed {
+                                break;
+                            }
+                        }
                         Ok(Some(_)) => {}
                         Ok(None) | Err(_) => break,
                     },

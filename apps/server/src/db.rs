@@ -5,6 +5,7 @@ use sqlx::{
 };
 use std::{path::Path, time::Duration};
 
+pub mod attempts;
 pub mod credentials;
 pub mod enrollment;
 pub mod events;
@@ -156,6 +157,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
+    mod attempts;
     mod ci;
     mod credentials;
     mod dispatch;

@@ -15,6 +15,7 @@ fn golden_exposition() {
     // Never a label outside the closed set.
     registry.auth_refused("secret");
     registry.set_runners_connected(2);
+    registry.set_jobs_pending(3);
     registry.runner_refused("secret");
     registry.runner_refused("version");
     registry.runner_refused("version");
@@ -102,7 +103,7 @@ fn labels_are_closed_and_version_is_escaped() {
             "kajiba_pushes_total{result=\"refused\"} 0",
         ]
     );
-    assert_eq!(samples, 206);
+    assert_eq!(samples, 207);
     assert!(samples <= 500);
 }
 

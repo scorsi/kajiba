@@ -163,6 +163,9 @@ fn router(
     public_url: &str,
 ) -> Result<Router, String> {
     let runner_service = runners::Runners::new(health.clone(), registry.clone());
+    if health.runners.get().is_some() {
+        tokio::spawn(runner_service.clone().schedule());
+    }
     let api = Routes::new(HealthServiceServer::new(health.clone()))
         .add_service(AuthServiceServer::new(auth::Sessions(health.clone())))
         .add_service(TokenServiceServer::new(tokens::Tokens(health.clone())))

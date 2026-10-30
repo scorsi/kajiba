@@ -188,7 +188,11 @@ async fn main() -> ExitCode {
             let writer = db::Writer::new(writer.into());
             // The mirror handler registers here when it is implemented.
             let mut dispatcher = db::events::Dispatcher::default();
-            dispatcher.register(db::runs::Ci { now: db::runs::now });
+            let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+            dispatcher.register(db::runs::Ci {
+                now: db::runs::now,
+                wake: wake.clone(),
+            });
             let admin = transport::local::Admin {
                 git_socket: config.git.socket.clone(),
                 writer: writer.clone(),
@@ -201,6 +205,7 @@ async fn main() -> ExitCode {
             health.set_runners(transport::runners::Declared {
                 runners: config.runners.clone(),
                 bus: bus.clone(),
+                wake,
             });
             health.started(readers.clone(), writer.clone());
             return match tokio::select! {

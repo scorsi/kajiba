@@ -29,6 +29,11 @@ macro_rules! states {
             pub fn as_str(self) -> &'static str {
                 match self { $(Self::$variant => $text),+ }
             }
+
+            #[allow(dead_code)]
+            pub fn parse(text: &str) -> Option<Self> {
+                match text { $($text => Some(Self::$variant),)+ _ => None }
+            }
         }
     };
 }
@@ -200,6 +205,8 @@ pub async fn create_run(
 /// keyed on the push event (`run.event_id`), so a replay creates nothing.
 pub struct Ci {
     pub now: fn() -> i64,
+    /// Wakes matching once the new job is committed (0008).
+    pub wake: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl Handler for Ci {
@@ -255,6 +262,8 @@ impl Handler for Ci {
         .await?;
         // shortcut: logged before the dispatcher commits, so a failed commit logs it again on retry.
         tracing::info!(event = "run-state", run, state = RunState::Queued.as_str());
+        // Matching takes the writer lock, so it runs after this transaction commits.
+        self.wake.notify_one();
         Ok(())
     }
 }
