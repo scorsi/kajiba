@@ -8,6 +8,7 @@ use std::{
 
 mod client;
 mod login;
+mod repo;
 
 #[derive(Parser)]
 #[command(
@@ -34,6 +35,11 @@ enum Command {
     /// Read a personal access token from stdin, check it with the forge, and save it
     /// with the forge URL.
     Login,
+    /// Read repositories.
+    Repo {
+        #[command(subcommand)]
+        command: repo::Command,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -68,5 +74,10 @@ async fn run(
     let token_file = client::token_path(args.token_file.as_deref(), env)?;
     match args.command {
         Command::Login => login::run(&token_file, args.url.as_deref(), env, input, tty, out).await,
+        Command::Repo { command } => {
+            let token = client::read_token(&token_file)?;
+            let url = client::forge_url(args.url.as_deref(), &token_file, env)?;
+            repo::run(command, client::connect(&url, &token)?, args.json, out).await
+        }
     }
 }

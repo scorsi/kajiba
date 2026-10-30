@@ -13,6 +13,10 @@ clap.workspace = true
 kajiba-proto = { path = "../../crates/kajiba-proto" }
 # Already transitive: terminal echo off while `login` reads a token (ADR 0091).
 libc.workspace = true
+prost.workspace = true
+# protojson for --json (0007, 0076).
+prost-reflect = { workspace = true, features = ["serde"] }
+serde_json.workspace = true
 tokio.workspace = true
 # TLS for an https forge URL, with the system certificate store (0076).
 tonic = { workspace = true, features = ["tls-native-roots"] }
