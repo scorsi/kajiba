@@ -6,14 +6,15 @@ use crate::{
     db::{
         attempts::{self, Offer, Outcome},
         events::{EventBus, NewEvent, append_event},
+        runs::{AttemptState, RunState},
     },
     metrics::Registry,
 };
 use kajiba_core::config::{Capabilities, RunnerDeclaration};
 use kajiba_proto::runner::v1::{
     Assignment, CancelAttempt, ConnectRequest, ConnectResponse, FetchRunBundleRequest,
-    FetchRunBundleResponse, Hello, connect_request::Message, connect_response,
-    runner_service_server::RunnerService,
+    FetchRunBundleResponse, Hello, LogAck, ResultAck, ResultState, StepState,
+    connect_request::Message, connect_response, runner_service_server::RunnerService,
 };
 use sqlx::{Connection, SqliteConnection};
 use std::{
@@ -40,6 +41,8 @@ const PASS_PERIOD: Duration = Duration::from_secs(1);
 /// A runner silent this long after opening `Connect` is dropped: one heartbeat period (0105).
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HOSTNAME: usize = 253;
+/// ADR 0105: a log chunk holds at most 64 KiB.
+const MAX_CHUNK: usize = 64 * 1024;
 
 type Outbound = mpsc::Sender<Result<ConnectResponse, Status>>;
 
@@ -474,6 +477,14 @@ impl Runners {
         }
     }
 
+    /// Log `run-state` for each run that changed and count the finished ones.
+    fn runs_changed(&self, changes: Vec<(String, RunState)>) {
+        for (run, state) in changes {
+            tracing::info!(event = "run-state", run, state = state.as_str());
+            self.registry.run_finished(state.as_str());
+        }
+    }
+
     /// Apply one execution message; the answers go back on the runner's stream.
     async fn handle(
         &self,
@@ -487,30 +498,128 @@ impl Runners {
         };
         let now = crate::db::runs::now();
         let mut writer = writer.lock().await;
-        let (attempt, outcome) = match message {
+        let mut tx = writer.begin().await.map_err(internal)?;
+        let (attempt, outcome, acknowledgment) = match message {
+            Message::Heartbeat(_) => {
+                attempts::heartbeat(&mut tx, runner.0, now)
+                    .await
+                    .map_err(internal)?;
+                tx.commit().await.map_err(internal)?;
+                return Ok(Vec::new());
+            }
             Message::Accept(accept) => {
-                let mut tx = writer.begin().await.map_err(internal)?;
                 let outcome =
                     attempts::accept(&mut tx, runner, &accept.attempt_id, request_id, now)
                         .await
                         .map_err(internal)?;
-                declared.bus.commit(tx).await.map_err(internal)?;
-                (accept.attempt_id, outcome)
+                (accept.attempt_id, outcome, None)
             }
-            // Handled from J6 task 8.
-            _ => return Ok(Vec::new()),
+            Message::LogChunk(chunk) => {
+                if chunk.data.len() > MAX_CHUNK {
+                    return Err(invalid_field(
+                        "log_chunk.data",
+                        "must be at most 65536 bytes",
+                    ));
+                }
+                let highest = attempts::append_log(
+                    &mut tx,
+                    &self.health.state_dir.join("ci/logs"),
+                    runner.0,
+                    &attempts::Chunk {
+                        attempt: &chunk.attempt_id,
+                        sequence: chunk.sequence,
+                        step: chunk.step_index,
+                        data: &chunk.data,
+                    },
+                )
+                .await
+                .map_err(internal)?;
+                let acknowledgment = highest.map(|sequence| {
+                    connect_response::Message::LogAck(LogAck {
+                        attempt_id: chunk.attempt_id.clone(),
+                        sequence,
+                    })
+                });
+                let outcome = match highest {
+                    Some(_) => Outcome::Done(Vec::new()),
+                    None => Outcome::Cancel,
+                };
+                (chunk.attempt_id, outcome, acknowledgment)
+            }
+            Message::StepStatus(status) => {
+                let Some(state) = step_state(status.state()) else {
+                    return Ok(Vec::new());
+                };
+                let current = attempts::step(
+                    &mut tx,
+                    runner.0,
+                    &status.attempt_id,
+                    (status.step_index, &status.name, state, status.exit_code),
+                    now,
+                )
+                .await
+                .map_err(internal)?;
+                let outcome = match current {
+                    true => Outcome::Done(Vec::new()),
+                    false => Outcome::Cancel,
+                };
+                (status.attempt_id, outcome, None)
+            }
+            Message::Result(result) => {
+                let state = match result.state() {
+                    ResultState::Succeeded => AttemptState::Succeeded,
+                    ResultState::Failed => AttemptState::Failed,
+                    ResultState::Cancelled => AttemptState::Cancelled,
+                    ResultState::Unspecified => {
+                        return Err(invalid_field("result.state", "must be a terminal state"));
+                    }
+                };
+                let outcome = attempts::finish(
+                    &mut tx,
+                    runner,
+                    &result.attempt_id,
+                    &attempts::Finish {
+                        state,
+                        exit_code: result.exit_code,
+                        check: &result.failing_check,
+                        reason: &result.reason,
+                    },
+                    request_id,
+                    now,
+                )
+                .await
+                .map_err(internal)?;
+                let acknowledgment = connect_response::Message::ResultAck(ResultAck {
+                    attempt_id: result.attempt_id.clone(),
+                });
+                (result.attempt_id, outcome, Some(acknowledgment))
+            }
+            Message::Hello(_) => return Err(invalid_field("hello", "must be sent once")),
         };
+        declared.bus.commit(tx).await.map_err(internal)?;
         drop(writer);
         Ok(match outcome {
             Outcome::Cancel => vec![cancel(&attempt)],
             Outcome::Done(changes) => {
-                for (run, state) in changes {
-                    tracing::info!(event = "run-state", run, state = state.as_str());
+                if changes.iter().any(|(_, state)| state.is_terminal()) {
+                    // The runner's capacity is free again (0109: matching on attempt end).
+                    declared.wake.notify_one();
                 }
-                Vec::new()
+                self.runs_changed(changes);
+                acknowledgment.into_iter().map(response).collect()
             }
         })
     }
+}
+
+fn step_state(state: StepState) -> Option<&'static str> {
+    Some(match state {
+        StepState::Unspecified => return None,
+        StepState::Running => "running",
+        StepState::Succeeded => "succeeded",
+        StepState::Failed => "failed",
+        StepState::Skipped => "skipped",
+    })
 }
 
 type Responses = Pin<Box<dyn Stream<Item = Result<ConnectResponse, Status>> + Send>>;

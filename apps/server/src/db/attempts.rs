@@ -1,10 +1,11 @@
-//! Attempts (0008): matching pending jobs to connected runners and acceptance.
+//! Attempts (0008): matching pending jobs to connected runners, acceptance, heartbeats,
+//! sequenced logs, steps and results.
 
 use super::events::{NewEvent, append_event};
-use super::runs::{JobState, RunState, job_transition, run_transition};
+use super::runs::{AttemptState, JobState, RunState, job_transition, run_transition};
 use super::users::new_public_id;
 use sqlx::SqliteConnection;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, io::Write, path::Path};
 
 /// ADR 0105: a lease lasts 30 s from the server's clock.
 pub const LEASE_MS: i64 = 30_000;
@@ -166,6 +167,7 @@ pub enum Outcome {
 /// The attempt as seen by the runner that holds it, when it is its job's current one.
 #[derive(sqlx::FromRow)]
 pub(crate) struct Current {
+    pub id: i64,
     pub public_id: String,
     pub state: String,
     pub job_id: i64,
@@ -182,7 +184,7 @@ pub(crate) async fn current(
     attempt: &str,
 ) -> Result<Option<Current>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT a.public_id, a.state, j.id AS job_id, j.state AS job_state, r.id AS run_id,
+        "SELECT a.id, a.public_id, a.state, j.id AS job_id, j.state AS job_state, r.id AS run_id,
                 r.public_id AS run, r.state AS run_state, r.repo_id
          FROM job_attempt a JOIN job j ON j.id = a.job_id JOIN run r ON r.id = j.run_id
          WHERE a.public_id = ? AND a.runner_id = ?
@@ -286,4 +288,222 @@ pub async fn accept(
     Ok(Outcome::Done(
         start(tx, &mut current, runner, correlation_id, now).await?,
     ))
+}
+
+/// A heartbeat renews the unexpired leases of the runner's running attempts (0008).
+pub async fn heartbeat(
+    writer: &mut SqliteConnection,
+    runner_id: i64,
+    now: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE job_attempt SET lease_expires_at = ?
+         WHERE runner_id = ? AND state = 'running' AND lease_expires_at >= ?",
+    )
+    .bind(now + LEASE_MS)
+    .bind(runner_id)
+    .bind(now)
+    .execute(&mut *writer)
+    .await?;
+    sqlx::query("UPDATE runner SET last_contact_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(runner_id)
+        .execute(writer)
+        .await?;
+    Ok(())
+}
+
+/// One log chunk of an attempt (0008, 0105).
+pub struct Chunk<'a> {
+    pub attempt: &'a str,
+    pub sequence: u64,
+    pub step: u32,
+    pub data: &'a [u8],
+}
+
+/// Append the chunk when its sequence is the next one: bytes to
+/// `<logs>/<attempt public id>.log`, then its `log_chunk` row (offset, length). A
+/// duplicate or a gap changes nothing. Returns the highest contiguous sequence to
+/// acknowledge, or `None` (cancel) when the attempt is not this runner's current one.
+pub async fn append_log(
+    tx: &mut SqliteConnection,
+    logs: &Path,
+    runner_id: i64,
+    chunk: &Chunk<'_>,
+) -> Result<Option<u64>, sqlx::Error> {
+    let Some(attempt) = current(tx, runner_id, chunk.attempt).await? else {
+        return Ok(None);
+    };
+    let (highest, end): (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(max(seq), 0), COALESCE(max(offset + length), 0) FROM log_chunk WHERE attempt_id = ?",
+    )
+    .bind(attempt.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if i64::try_from(chunk.sequence) != Ok(highest + 1) {
+        return Ok(Some(highest as u64));
+    }
+    // Bytes past the index's end are a write whose row never committed: overwrite them.
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(logs.join(format!("{}.log", attempt.public_id)))?;
+    file.set_len(end as u64)?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(end as u64))?;
+    file.write_all(chunk.data)?;
+    sqlx::query(
+        "INSERT INTO log_chunk (attempt_id, seq, step_idx, offset, length) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(attempt.id)
+    .bind(highest + 1)
+    .bind(chunk.step)
+    .bind(end)
+    .bind(chunk.data.len() as i64)
+    .execute(&mut *tx)
+    .await?;
+    Ok(Some(chunk.sequence))
+}
+
+/// Record a step's state (`running`, `succeeded`, `failed`, `skipped`); false when the
+/// attempt is not this runner's current one.
+pub async fn step(
+    tx: &mut SqliteConnection,
+    runner_id: i64,
+    attempt: &str,
+    (idx, name, state, exit_code): (u32, &str, &str, Option<i32>),
+    now: i64,
+) -> Result<bool, sqlx::Error> {
+    let Some(attempt) = current(tx, runner_id, attempt).await? else {
+        return Ok(false);
+    };
+    let running = state == "running";
+    sqlx::query(
+        "INSERT INTO step (attempt_id, idx, name, state, exit_code, started_at, finished_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (attempt_id, idx) DO UPDATE SET name = excluded.name, state = excluded.state,
+           exit_code = excluded.exit_code, started_at = COALESCE(step.started_at, excluded.started_at),
+           finished_at = excluded.finished_at",
+    )
+    .bind(attempt.id)
+    .bind(idx)
+    .bind(name)
+    .bind(state)
+    .bind(exit_code)
+    .bind(running.then_some(now))
+    .bind((!running).then_some(now))
+    .execute(&mut *tx)
+    .await?;
+    Ok(true)
+}
+
+/// An attempt's terminal result.
+pub struct Finish<'a> {
+    /// `succeeded`, `failed` or `cancelled`.
+    pub state: AttemptState,
+    pub exit_code: Option<i32>,
+    /// Empty when unknown (0008: known only structurally).
+    pub check: &'a str,
+    pub reason: &'a str,
+}
+
+/// Record the attempt's first terminal result in its job and run, with `run-finished`.
+/// A result for an attempt no longer running (already finished, cancelled, lost) is
+/// acknowledged and ignored; a result before acceptance starts the attempt first.
+pub async fn finish(
+    tx: &mut SqliteConnection,
+    runner: (i64, &str),
+    attempt: &str,
+    result: &Finish<'_>,
+    correlation_id: &str,
+    now: i64,
+) -> Result<Outcome, sqlx::Error> {
+    let Some(mut current) = current(tx, runner.0, attempt).await? else {
+        return Ok(Outcome::Cancel);
+    };
+    let Some(Ok(state)) = AttemptState::parse(&current.state)
+        .map(|from| super::runs::attempt_transition(from, result.state))
+    else {
+        return Ok(Outcome::Done(Vec::new()));
+    };
+    let mut changes = start(tx, &mut current, runner, correlation_id, now).await?;
+    sqlx::query("UPDATE job_attempt SET state = ?, exit_code = ?, finished_at = ? WHERE id = ?")
+        .bind(state.as_str())
+        .bind(result.exit_code)
+        .bind(now)
+        .bind(current.id)
+        .execute(&mut *tx)
+        .await?;
+    let succeeded = state == AttemptState::Succeeded;
+    let failure = |text: &str| (!succeeded && !text.is_empty()).then(|| text.to_owned());
+    changes.extend(
+        end(
+            tx,
+            &current,
+            (
+                state.as_str(),
+                failure(result.check),
+                failure(result.reason),
+            ),
+            Some(runner.0),
+            correlation_id,
+            now,
+        )
+        .await?,
+    );
+    Ok(Outcome::Done(changes))
+}
+
+/// End the attempt's job and run in `state` (`succeeded`, `failed`, `cancelled`, or
+/// `lost` for the job alone), journaling `run-finished`. Unfinished states only.
+// shortcut: a run has one job (0105), so the run ends with it; several jobs need a rule.
+pub(crate) async fn end(
+    tx: &mut SqliteConnection,
+    attempt: &Current,
+    (state, check, reason): (&str, Option<String>, Option<String>),
+    runner: Option<i64>,
+    correlation_id: &str,
+    now: i64,
+) -> Result<Vec<(String, RunState)>, sqlx::Error> {
+    let job = JobState::parse(&attempt.job_state).zip(JobState::parse(state));
+    if let Some((_, to)) = job.filter(|(from, to)| job_transition(*from, *to).is_ok()) {
+        sqlx::query("UPDATE job SET state = ?, finished_at = ? WHERE id = ?")
+            .bind(to.as_str())
+            .bind(now)
+            .bind(attempt.job_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    // A lost job fails its run.
+    let run_state = if state == "lost" { "failed" } else { state };
+    let (Some(from), Some(to)) = (
+        RunState::parse(&attempt.run_state),
+        RunState::parse(run_state),
+    ) else {
+        return Ok(Vec::new());
+    };
+    if run_transition(from, to).is_err() {
+        return Ok(Vec::new());
+    }
+    sqlx::query(
+        "UPDATE run SET state = ?, finished_at = ?, failure_check = ?, failure_reason = ? WHERE id = ?",
+    )
+    .bind(to.as_str())
+    .bind(now)
+    .bind(&check)
+    .bind(&reason)
+    .bind(attempt.run_id)
+    .execute(&mut *tx)
+    .await?;
+    journal(
+        tx,
+        "run-finished",
+        runner,
+        attempt.repo_id,
+        correlation_id,
+        serde_json::json!({ "run": attempt.run, "state": to.as_str(), "check": check, "reason": reason }),
+        now,
+    )
+    .await?;
+    Ok(vec![(attempt.run.clone(), to)])
 }

@@ -16,6 +16,11 @@ fn golden_exposition() {
     registry.auth_refused("secret");
     registry.set_runners_connected(2);
     registry.set_jobs_pending(3);
+    registry.run_finished("failed");
+    registry.run_finished("failed");
+    registry.run_finished("succeeded");
+    // A run still going is not a result.
+    registry.run_finished("running");
     registry.runner_refused("secret");
     registry.runner_refused("version");
     registry.runner_refused("version");
@@ -103,7 +108,7 @@ fn labels_are_closed_and_version_is_escaped() {
             "kajiba_pushes_total{result=\"refused\"} 0",
         ]
     );
-    assert_eq!(samples, 207);
+    assert_eq!(samples, 210);
     assert!(samples <= 500);
 }
 

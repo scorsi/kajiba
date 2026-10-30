@@ -46,6 +46,12 @@ states!(RunState {
     Cancelled = "cancelled",
 });
 
+impl RunState {
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, Self::Queued | Self::Running)
+    }
+}
+
 states!(JobState {
     Pending = "pending",
     Assigned = "assigned",

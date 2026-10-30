@@ -16,6 +16,8 @@ pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 pub const HANDLERS: [&str; 4] = ["ci", "mirror", "notifier", "webhook"];
 /// `runner-refused` reasons (0108).
 const RUNNER_REASONS: [&str; 5] = ["unknown", "disabled", "secret", "version", "capabilities"];
+/// Terminal run states counted by `kajiba_runs_total` (0022).
+const RUN_RESULTS: [&str; 3] = ["succeeded", "failed", "cancelled"];
 const KINDS: [&str; 6] = ["grpc", "grpc_web", "git_http", "raw", "ui", "other"];
 const CODES: [&str; 22] = [
     "OK",
@@ -111,6 +113,7 @@ pub struct Registry {
     auth_refusals: [Counter; 3],
     runners_connected: AtomicU64,
     jobs_pending: AtomicU64,
+    runs: [Counter; 3],
     runner_refusals: [Counter; 5],
 }
 impl Registry {
@@ -130,6 +133,13 @@ impl Registry {
 
     pub fn set_runners_connected(&self, count: u64) {
         self.runners_connected.store(count, Relaxed);
+    }
+
+    /// Count one finished run; other states are ignored.
+    pub fn run_finished(&self, state: &str) {
+        if let Some(index) = RUN_RESULTS.iter().position(|known| *known == state) {
+            self.runs[index].add(1);
+        }
     }
 
     pub fn set_jobs_pending(&self, count: u64) {
@@ -222,6 +232,15 @@ impl Registry {
             writeln!(
                 out,
                 "kajiba_runner_refusals_total{{reason=\"{reason}\"}} {}",
+                count.get()
+            )
+            .unwrap();
+        }
+        out.push_str("# HELP kajiba_runs_total Finished runs.\n# TYPE kajiba_runs_total counter\n");
+        for (result, count) in RUN_RESULTS.iter().zip(&self.runs) {
+            writeln!(
+                out,
+                "kajiba_runs_total{{result=\"{result}\"}} {}",
                 count.get()
             )
             .unwrap();

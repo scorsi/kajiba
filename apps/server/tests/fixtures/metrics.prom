@@ -210,6 +210,11 @@ kajiba_runner_refusals_total{reason="disabled"} 0
 kajiba_runner_refusals_total{reason="secret"} 1
 kajiba_runner_refusals_total{reason="version"} 2
 kajiba_runner_refusals_total{reason="capabilities"} 0
+# HELP kajiba_runs_total Finished runs.
+# TYPE kajiba_runs_total counter
+kajiba_runs_total{result="succeeded"} 1
+kajiba_runs_total{result="failed"} 2
+kajiba_runs_total{result="cancelled"} 0
 # HELP kajiba_jobs_pending Jobs waiting for a runner.
 # TYPE kajiba_jobs_pending gauge
 kajiba_jobs_pending 3

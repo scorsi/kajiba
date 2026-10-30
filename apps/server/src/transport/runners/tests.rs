@@ -614,3 +614,106 @@ async fn a_pending_job_is_assigned_to_an_admitted_runner_and_accepted() {
         serde_json::json!({ "run": run, "attempt": assignment.attempt_id, "runner": "build-1" })
     );
 }
+
+async fn send(sender: &mpsc::Sender<ConnectRequest>, message: Message) {
+    sender
+        .send(ConnectRequest {
+            message: Some(message),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn logs_and_results_are_acknowledged_and_counted() {
+    use kajiba_proto::runner::v1::{Accept, LogChunk, Result as RunResult};
+    let forge = Forge::start().await;
+    let run = forge.run().await;
+    let (sender, mut stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
+        panic!("expected an assignment");
+    };
+    let attempt = assignment.attempt_id;
+    send(
+        &sender,
+        Message::Accept(Accept {
+            attempt_id: attempt.clone(),
+        }),
+    )
+    .await;
+    let chunk = |sequence: u64, data: &[u8]| {
+        Message::LogChunk(LogChunk {
+            attempt_id: attempt.clone(),
+            sequence,
+            step_index: 0,
+            data: data.to_vec(),
+        })
+    };
+    let ack = |sequence| {
+        connect_response::Message::LogAck(LogAck {
+            attempt_id: attempt.clone(),
+            sequence,
+        })
+    };
+    for (sequence, expected) in [(1, 1), (1, 1), (3, 1), (2, 2)] {
+        send(&sender, chunk(sequence, b"line\n")).await;
+        assert_eq!(next(&mut stream).await, ack(expected));
+    }
+    let log = forge
+        .state
+        .health
+        .state_dir
+        .join(format!("ci/logs/{attempt}.log"));
+    assert_eq!(std::fs::read(&log).unwrap(), b"line\nline\n");
+    let result = |attempt_id: &str| {
+        Message::Result(RunResult {
+            attempt_id: attempt_id.into(),
+            state: ResultState::Failed.into(),
+            exit_code: Some(1),
+            failing_check: String::new(),
+            reason: "exit status 1".into(),
+        })
+    };
+    let result_ack = connect_response::Message::ResultAck(ResultAck {
+        attempt_id: attempt.clone(),
+    });
+    send(&sender, result(&attempt)).await;
+    assert_eq!(next(&mut stream).await, result_ack);
+    send(&sender, result(&attempt)).await;
+    assert_eq!(next(&mut stream).await, result_ack);
+    assert!(forge.metric("kajiba_runs_total{result=\"failed\"} 1"));
+    let state: Vec<(String, Option<String>)> =
+        forge.sql("SELECT state, failure_reason FROM run").await;
+    assert_eq!(state, [("failed".into(), Some("exit status 1".into()))]);
+    assert_eq!(
+        forge
+            .events()
+            .await
+            .iter()
+            .filter(|event| event.0 == "run-finished")
+            .map(|event| event.3.clone())
+            .collect::<Vec<_>>(),
+        [
+            serde_json::json!({ "run": run, "state": "failed", "check": null, "reason": "exit status 1" })
+        ]
+    );
+    // A message for an attempt that is not current is answered with cancel (0008).
+    send(&sender, result("7ZZZZZZZZZZZZZZZZZZZZZZZZZ")).await;
+    assert_eq!(
+        next(&mut stream).await,
+        connect_response::Message::CancelAttempt(CancelAttempt {
+            attempt_id: "7ZZZZZZZZZZZZZZZZZZZZZZZZZ".into()
+        })
+    );
+    // A chunk above 64 KiB is refused and ends the stream.
+    send(&sender, chunk(3, &vec![b'x'; 64 * 1024 + 1])).await;
+    let status = tokio::time::timeout(Duration::from_secs(5), stream.message())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(
+        (status.code(), reason(&status).as_str()),
+        (tonic::Code::InvalidArgument, "INVALID_FIELD")
+    );
+    assert_eq!(std::fs::read(&log).unwrap(), b"line\nline\n");
+}
