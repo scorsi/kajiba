@@ -186,8 +186,9 @@ async fn main() -> ExitCode {
             }
             // Request handlers that write (enrollment, push hooks) take a clone of this handle.
             let writer = db::Writer::new(writer.into());
-            // CI and mirror register here when their handlers are implemented.
+            // The mirror handler registers here when it is implemented.
             let mut dispatcher = db::events::Dispatcher::default();
+            dispatcher.register(db::runs::Ci { now: db::runs::now });
             let admin = transport::local::Admin {
                 git_socket: config.git.socket.clone(),
                 writer: writer.clone(),

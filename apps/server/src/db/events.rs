@@ -1,4 +1,4 @@
-use sqlx::{Connection, FromRow, Sqlite, SqliteConnection, SqlitePool, Transaction};
+use sqlx::{Connection, FromRow, Sqlite, SqliteConnection, Transaction};
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -28,6 +28,7 @@ impl EventBus {
     }
 
     /// Process at most one event, so a failed handler need not block other handlers.
+    #[cfg(test)]
     pub async fn dispatch_next<H: Handler>(
         &self,
         writer: &mut SqliteConnection,
@@ -269,7 +270,8 @@ pub async fn append_event(
     Ok(result.last_insert_rowid())
 }
 
-pub async fn events_after(readers: &SqlitePool, id: i64) -> Result<Vec<Event>, sqlx::Error> {
+#[cfg(test)]
+pub async fn events_after(readers: &sqlx::SqlitePool, id: i64) -> Result<Vec<Event>, sqlx::Error> {
     sqlx::query_as("SELECT id, public_id, kind, version, occurred_at, principal_kind, principal_id, repo_id, correlation_id, payload FROM event WHERE id > ? ORDER BY id")
         .bind(id)
         .fetch_all(readers)

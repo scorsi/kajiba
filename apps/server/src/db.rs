@@ -7,14 +7,13 @@ use std::{path::Path, time::Duration};
 
 pub mod credentials;
 pub mod enrollment;
+pub mod events;
 pub mod passkeys;
 pub mod permissions;
-// Production handlers follow in later milestones.
-#[cfg_attr(not(test), allow(dead_code))]
-pub mod events;
 pub mod pushes;
 pub mod repos;
 pub mod runners;
+pub mod runs;
 pub mod sessions;
 pub mod users;
 
@@ -169,6 +168,7 @@ mod tests {
     mod repos;
     mod repositories;
     mod runners;
+    mod runs;
     mod users;
 
     struct TempDir(PathBuf);
