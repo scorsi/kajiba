@@ -328,11 +328,7 @@ struct LoginFinish {
 }
 
 async fn login_finish(State(health): State<Health>, Json(body): Json<LoginFinish>) -> Response {
-    let (Some(passkeys), Some(readers), Some(writer)) = (
-        health.passkeys.get(),
-        health.database.get(),
-        health.writer.get(),
-    ) else {
+    let (Some(passkeys), Some(writer)) = (health.passkeys.get(), health.writer.get()) else {
         return starting();
     };
     let state = match passkeys.finish(&body.ceremony) {
@@ -346,9 +342,15 @@ async fn login_finish(State(health): State<Health>, Json(body): Json<LoginFinish
     else {
         return refused("VERIFICATION_FAILED");
     };
+    // Serialize lookup and verification with recovery and other logins.
+    let mut writer = writer.lock().await;
+    let mut tx = match writer.begin().await {
+        Ok(tx) => tx,
+        Err(err) => return internal(err),
+    };
     // Unknown credential, deleted passkey (admin enroll, removal) or disabled user.
     let (id, user, public_id, stored) =
-        match crate::db::passkeys::find(readers, credential_id).await {
+        match crate::db::passkeys::find(&mut tx, credential_id).await {
             Ok(Some(found)) => found,
             Ok(None) => return refused("PASSKEY_INVALID"),
             Err(err) => return internal(err),
@@ -372,10 +374,8 @@ async fn login_finish(State(health): State<Health>, Json(body): Json<LoginFinish
     let (Ok(serialized), Ok(now)) = (serde_json::to_string(&passkey), now()) else {
         return internal("passkey state");
     };
-    let mut writer = writer.lock().await;
     let opened = async {
-        let mut tx = writer.begin().await?;
-        if !crate::db::passkeys::used(&mut tx, id, &serialized, now).await? {
+        if !crate::db::passkeys::used(&mut tx, &id, user, &serialized, now).await? {
             return Ok(None);
         }
         let cookie = crate::db::sessions::create(&mut tx, user, passkeys.session_ttl, now).await?;

@@ -596,6 +596,47 @@ mod ceremonies {
     }
 
     #[tokio::test]
+    async fn recovery_reusing_a_row_id_cannot_record_a_revoked_login() {
+        for replacement_user in ["alice", "bob"] {
+            let (fixture, mut app) = fixture().await;
+            let (_, credential_id, _) = enrolled(&fixture, &mut app, "alice").await;
+            // Capture the state an in-flight login read before recovery.
+            let mut writer = fixture.writer.lock().await;
+            let (public_id, user, _, stored) =
+                crate::db::passkeys::find(&mut writer, &credential_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let row_id: i64 = sqlx::query_scalar("SELECT id FROM webauthn_credential")
+                .fetch_one(&mut *writer)
+                .await
+                .unwrap();
+            drop(writer);
+            issue(&fixture, "alice", epoch_ms()).await;
+            enrolled(&fixture, &mut app, replacement_user).await;
+            let mut writer = fixture.writer.lock().await;
+            let (replacement_id, replacement): (i64, String) =
+                sqlx::query_as("SELECT id, passkey FROM webauthn_credential")
+                    .fetch_one(&mut *writer)
+                    .await
+                    .unwrap();
+            assert_eq!(replacement_id, row_id, "SQLite reused the revoked row ID");
+            assert!(
+                !crate::db::passkeys::used(&mut writer, &public_id, user, &stored, epoch_ms())
+                    .await
+                    .unwrap()
+            );
+            let (current, last_used_at): (String, Option<i64>) =
+                sqlx::query_as("SELECT passkey, last_used_at FROM webauthn_credential")
+                    .fetch_one(&mut *writer)
+                    .await
+                    .unwrap();
+            assert_eq!(current, replacement);
+            assert_eq!(last_used_at, None);
+        }
+    }
+
+    #[tokio::test]
     async fn login_from_a_foreign_origin_is_refused() {
         let (fixture, mut app) = fixture().await;
         let (mut authenticator, id, handle) = enrolled(&fixture, &mut app, "alice").await;
