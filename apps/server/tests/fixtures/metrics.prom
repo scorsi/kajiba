@@ -195,6 +195,11 @@ kajiba_request_duration_seconds_count{kind="other"} 2
 # TYPE kajiba_pushes_total counter
 kajiba_pushes_total{result="accepted"} 1
 kajiba_pushes_total{result="refused"} 2
+# HELP kajiba_auth_refusals_total Requests refused by the auth interceptor.
+# TYPE kajiba_auth_refusals_total counter
+kajiba_auth_refusals_total{reason="CREDENTIAL_INVALID"} 0
+kajiba_auth_refusals_total{reason="CREDENTIAL_EXPIRED"} 1
+kajiba_auth_refusals_total{reason="SCOPE_MISSING"} 2
 # HELP kajiba_handler_lag_events Journal events after the handler checkpoint.
 # TYPE kajiba_handler_lag_events gauge
 kajiba_handler_lag_events{handler="ci"} 2

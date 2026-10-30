@@ -46,7 +46,7 @@ pub(in crate::transport) struct Fixture {
     daemon: crate::transport::git_side::fake::Fake,
     pub(in crate::transport) dir: PathBuf,
     _lock: crate::state::StateLock,
-    writer: SqliteConnection,
+    pub(in crate::transport) writer: crate::db::Writer,
     pub(in crate::transport) repos: Repos,
 }
 
@@ -62,8 +62,9 @@ impl Fixture {
         let (writer, readers) = crate::db::open(&dir.join("server/db/kajiba.sqlite"))
             .await
             .unwrap();
+        let writer = crate::db::Writer::new(writer.into());
         let health = Health::new(dir.join("server"), dir.clone(), None);
-        health.started(readers);
+        health.started(readers, writer.clone());
         let daemon = crate::transport::git_side::fake::Fake::start(&dir).await;
         let mut fixture = Self {
             daemon,
@@ -84,9 +85,13 @@ impl Fixture {
         .unwrap();
         config.state_dir = self.dir.join("server");
         config.git.state_dir = self.dir.clone();
-        crate::db::reconcile_declared(&mut self.writer, &config, &mut self.daemon.client)
-            .await
-            .unwrap();
+        crate::db::reconcile_declared(
+            &mut *self.writer.lock().await,
+            &config,
+            &mut self.daemon.client,
+        )
+        .await
+        .unwrap();
     }
 }
 
@@ -298,7 +303,7 @@ async fn get_and_list_redact_unsafe_persisted_mirror_urls_including_archived_rep
     ] {
         sqlx::query("UPDATE mirror SET remote_url = ?")
             .bind(remote)
-            .execute(&mut fixture.writer)
+            .execute(&mut *fixture.writer.lock().await)
             .await
             .unwrap();
         for repo in [
@@ -454,7 +459,7 @@ async fn blob_path_budget_includes_the_filename() {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    let mut fixture = Fixture::new("").await;
+    let fixture = Fixture::new("").await;
     let public_id = "00000000000000000000000001";
     sqlx::query(
         "INSERT INTO repo (public_id, owner_id, name, visibility, ci_enabled,
@@ -462,7 +467,7 @@ async fn blob_path_budget_includes_the_filename() {
          SELECT ?, id, 'demo', 'public', 0, 'main', '', 0 FROM user WHERE name = 'alice'",
     )
     .bind(public_id)
-    .execute(&mut fixture.writer)
+    .execute(&mut *fixture.writer.lock().await)
     .await
     .unwrap();
     let bare = fixture.bare("alice/demo").await;
@@ -796,7 +801,11 @@ async fn browsing_shares_the_public_read_budget() {
 async fn browsing_responses_keep_their_permit_until_the_body_is_delivered() {
     use prost::Message;
     use tonic::codegen::Service;
-    let fixture = Fixture::new(DEMO).await;
+    let fixture = Fixture::new(&format!(
+        "{DEMO}{}",
+        crate::transport::auth::tests::tokens()
+    ))
+    .await;
     fixture
         .fill("alice/demo", &[("flake.nix", "{ }\n")], &[])
         .await;
@@ -814,6 +823,10 @@ async fn browsing_responses_keep_their_permit_until_the_body_is_delivered() {
         .call(
             axum::http::Request::post("/kajiba.v1.RepoService/GetBlob")
                 .header("content-type", "application/grpc")
+                .header(
+                    "authorization",
+                    format!("Bearer {}", crate::transport::auth::tests::READ),
+                )
                 .body(axum::body::Body::from(body))
                 .unwrap(),
         )

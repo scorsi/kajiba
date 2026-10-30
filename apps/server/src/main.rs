@@ -178,7 +178,7 @@ async fn main() -> ExitCode {
                 bus: bus.clone(),
                 state_dir: config.git.state_dir.clone(),
             };
-            health.started(readers.clone());
+            health.started(readers.clone(), writer.clone());
             return match tokio::select! {
                 result = transport::serve(&config.http, &config.metrics, &config.git, health, readers, bus.clone(), admin) => result,
                 () = dispatcher.run(&bus, &writer) => unreachable!("dispatcher runs until shutdown"),

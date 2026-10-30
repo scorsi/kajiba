@@ -9,6 +9,11 @@ fn golden_exposition() {
     registry.push(true);
     registry.push(false);
     registry.push(false);
+    registry.auth_refused("CREDENTIAL_EXPIRED");
+    registry.auth_refused("SCOPE_MISSING");
+    registry.auth_refused("SCOPE_MISSING");
+    // Never a label outside the closed set.
+    registry.auth_refused("secret");
     assert_eq!(
         registry.exposition("test", [2, 1, 3, 3], [1, 0, 0, 0]),
         include_str!("../../tests/fixtures/metrics.prom")
@@ -86,7 +91,7 @@ fn labels_are_closed_and_version_is_escaped() {
             "kajiba_pushes_total{result=\"refused\"} 0",
         ]
     );
-    assert_eq!(samples, 197);
+    assert_eq!(samples, 200);
     assert!(samples <= 500);
 }
 

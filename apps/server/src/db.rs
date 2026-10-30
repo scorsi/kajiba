@@ -13,6 +13,7 @@ pub mod permissions;
 pub mod events;
 pub mod pushes;
 pub mod repos;
+pub mod sessions;
 pub mod users;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");

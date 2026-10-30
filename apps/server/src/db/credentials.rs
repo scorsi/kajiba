@@ -153,3 +153,48 @@ pub async fn reconcile_credentials(
     result.map_err(|err: sqlx::Error| format!("credential reconciliation: {err}"))?;
     Ok(Revoked(revoked))
 }
+
+/// A presented bearer credential (PAT or session) with its user's state, for the auth
+/// interceptor (ADR 0014); `scopes` is `None` for a session, which holds every scope.
+#[derive(Debug, sqlx::FromRow)]
+pub struct Found {
+    pub id: i64,
+    pub user_id: i64,
+    pub scopes: Option<String>,
+    pub expires_at: Option<i64>,
+    pub revoked: bool,
+    pub disabled: bool,
+    pub last_used_at: Option<i64>,
+}
+
+/// The token whose SHA-256 is `hash`, declared or runtime.
+pub async fn find_token(
+    readers: impl sqlx::SqliteExecutor<'_>,
+    hash: &[u8],
+) -> Result<Option<Found>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT api_token.id, user_id, scopes, expires_at, revoked_at IS NOT NULL AS revoked,
+                user.disabled_at IS NOT NULL AS disabled, last_used_at
+         FROM api_token JOIN user ON user.id = api_token.user_id WHERE token_hash = ?",
+    )
+    .bind(hash)
+    .fetch_optional(readers)
+    .await
+}
+
+/// Records a use, at most once per minute per token (ADR 0078).
+pub async fn token_used(
+    writer: &mut SqliteConnection,
+    id: i64,
+    now: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE api_token SET last_used_at = ?1
+         WHERE id = ?2 AND (last_used_at IS NULL OR last_used_at <= ?1 - 60000)",
+    )
+    .bind(now)
+    .bind(id)
+    .execute(writer)
+    .await
+    .map(drop)
+}

@@ -93,7 +93,11 @@ async fn gzip_budget_is_global_and_released_on_cancellation_and_error() {
     .await
     .unwrap();
     let health = super::super::Health::new(Default::default(), Default::default(), None);
-    health.started(database);
+    // No request here writes: the writer is a detached in-memory database.
+    let writer = <sqlx::SqliteConnection as sqlx::Connection>::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    health.started(database, crate::db::Writer::new(writer.into()));
     let repos = super::Repos(health.clone());
     let mut app = super::super::router(health.clone(), false, Default::default()).unwrap();
 

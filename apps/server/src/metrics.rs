@@ -39,6 +39,8 @@ const CODES: [&str; 22] = [
     "4xx",
     "5xx",
 ];
+/// ADR 0020 reasons of the auth interceptor's refusals: the closed `reason` label.
+pub const AUTH_REASONS: [&str; 3] = ["CREDENTIAL_INVALID", "CREDENTIAL_EXPIRED", "SCOPE_MISSING"];
 const BOUNDS_MS: [u64; 6] = [10, 50, 250, 1000, 5000, 30000];
 const BOUNDS_TEXT: [&str; 7] = ["0.01", "0.05", "0.25", "1", "5", "30", "+Inf"];
 
@@ -104,8 +106,16 @@ pub struct Registry {
     requests: [[Counter; 22]; 6],
     durations: [Histogram; 6],
     pushes: [Counter; 2],
+    auth_refusals: [Counter; 3],
 }
 impl Registry {
+    /// Count one refusal of the auth interceptor; `reason` is one of `AUTH_REASONS`.
+    pub fn auth_refused(&self, reason: &str) {
+        if let Some(index) = AUTH_REASONS.iter().position(|known| *known == reason) {
+            self.auth_refusals[index].add(1);
+        }
+    }
+
     /// Count admission decisions once per push, regardless of its number of refs.
     pub fn push(&self, accepted: bool) {
         self.pushes[usize::from(!accepted)].add(1);
@@ -167,6 +177,15 @@ impl Registry {
             writeln!(
                 out,
                 "kajiba_pushes_total{{result=\"{result}\"}} {}",
+                count.get()
+            )
+            .unwrap();
+        }
+        out.push_str("# HELP kajiba_auth_refusals_total Requests refused by the auth interceptor.\n# TYPE kajiba_auth_refusals_total counter\n");
+        for (reason, count) in AUTH_REASONS.iter().zip(&self.auth_refusals) {
+            writeln!(
+                out,
+                "kajiba_auth_refusals_total{{reason=\"{reason}\"}} {}",
                 count.get()
             )
             .unwrap();

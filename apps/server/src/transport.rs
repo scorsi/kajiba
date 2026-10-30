@@ -31,6 +31,7 @@ use tonic::{Request, Response, Status, service::Routes};
 #[derive(Clone)]
 pub struct Health {
     database: Arc<OnceLock<SqlitePool>>,
+    writer: Arc<OnceLock<crate::db::Writer>>,
     state_dir: PathBuf,
     git_state_dir: PathBuf,
     local_serving: Arc<local::Serving>,
@@ -48,6 +49,7 @@ impl Health {
     pub fn new(state_dir: PathBuf, git_state_dir: PathBuf, ssh_probe: Option<SocketAddr>) -> Self {
         Self {
             database: Arc::default(),
+            writer: Arc::default(),
             git_state_dir,
             state_dir,
             local_serving: Arc::default(),
@@ -60,9 +62,9 @@ impl Health {
     }
 
     // Called only after migrations, reconciliation and event bus initialization.
-    pub fn started(&self, database: SqlitePool) {
+    pub fn started(&self, database: SqlitePool, writer: crate::db::Writer) {
         assert!(
-            self.database.set(database).is_ok(),
+            self.database.set(database).is_ok() && self.writer.set(writer).is_ok(),
             "startup completed twice"
         );
     }
@@ -128,11 +130,7 @@ impl HealthService for Health {
     }
 }
 
-fn router(
-    health: Health,
-    reflection: bool,
-    registry: Arc<Registry>,
-) -> Result<Router, tonic_reflection::server::Error> {
+fn router(health: Health, reflection: bool, registry: Arc<Registry>) -> Result<Router, String> {
     let mut app = Routes::new(HealthServiceServer::new(health.clone()))
         .add_service(
             RepoServiceServer::new(repos::Repos(health.clone()))
@@ -142,6 +140,11 @@ fn router(
         .into_axum_router()
         // Browsing responses keep their permit through delivery (ADR 0050).
         .route_layer(middleware::from_fn(stream::guarded))
+        // Every `kajiba.v1` method, and only those, passes the single auth layer (0014).
+        .route_layer(middleware::from_fn_with_state(
+            auth::Auth::new(health.clone(), registry.clone())?,
+            auth::authenticate,
+        ))
         .merge(git_http::routes(repos::Repos(health.clone())))
         .merge(raw::routes(repos::Repos(health.clone())))
         .route("/healthz", get(|| async { "OK" }))
@@ -166,7 +169,8 @@ fn router(
     if reflection {
         let reflection = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(kajiba_proto::FILE_DESCRIPTOR_SET)
-            .build_v1()?;
+            .build_v1()
+            .map_err(|err| err.to_string())?;
         app = Routes::from(app).add_service(reflection).into_axum_router();
     }
     Ok(app
@@ -387,6 +391,7 @@ fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
     })
 }
 
+pub mod auth;
 pub mod correlation;
 pub mod cursor;
 mod gate;

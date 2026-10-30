@@ -52,7 +52,8 @@ impl State {
             .await
             .unwrap();
         let _bus = crate::db::events::EventBus::default();
-        self.health.started(readers);
+        self.health
+            .started(readers, crate::db::Writer::new(writer.into()));
         self.health.local_serving.on.store(true, Ordering::Release);
         self.health.gate_serving.on.store(true, Ordering::Release);
         git_side::tests::connected(&self.health.git_side);
@@ -112,8 +113,23 @@ async fn serving_status(app: &mut Router) -> ServingStatus {
 async fn repository_requests_are_size_bounded_before_decoding() {
     use kajiba_proto::v1::{GetRepoRequest, get_repo_request};
 
-    let state = State::new();
-    let mut app = router(state.health.clone(), false, Arc::default()).unwrap();
+    let fixture = repos::tests::Fixture::new(&auth::tests::tokens()).await;
+    let mut app = router(fixture.repos.0.clone(), false, Arc::default()).unwrap();
+    let authorization = format!("Bearer {}", auth::tests::READ);
+    let mut call = async |method: &str, frame: Vec<u8>| {
+        let response = app
+            .call(
+                http::Request::post(format!("/kajiba.v1.RepoService/{method}"))
+                    .header("content-type", "application/grpc")
+                    .header("authorization", &authorization)
+                    .body(Body::from(frame))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        Status::from_header_map(response.headers()).unwrap()
+    };
     for method in [
         "GetRepo",
         "ListRepos",
@@ -125,17 +141,7 @@ async fn repository_requests_are_size_bounded_before_decoding() {
         // Only the gRPC header: refuse the advertised size without decoding a payload.
         let mut frame = vec![0];
         frame.extend_from_slice(&(16 * 1024 + 1_u32).to_be_bytes());
-        let response = app
-            .call(
-                http::Request::post(format!("/kajiba.v1.RepoService/{method}"))
-                    .header("content-type", "application/grpc")
-                    .body(Body::from(frame))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let status = Status::from_header_map(response.headers()).unwrap();
+        let status = call(method, frame).await;
         assert_eq!(status.code(), tonic::Code::OutOfRange, "{method}");
         assert!(status.message().contains("16385 bytes"), "{status}");
         assert!(status.message().contains("16384 bytes"), "{status}");
@@ -147,12 +153,14 @@ async fn repository_requests_are_size_bounded_before_decoding() {
             repo: Some(get_repo_request::Repo::PublicId("x".repeat(size - 3))),
         };
         assert_eq!(request.encoded_len(), size);
-        let response = grpc(&mut app, "/kajiba.v1.RepoService/GetRepo", request).await;
-        let status = Status::from_header_map(response.headers()).unwrap();
+        let payload = request.encode_to_vec();
+        let mut frame = vec![0];
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        let status = call("GetRepo", frame).await;
         if size == 16 * 1024 {
-            // Reaching the unstarted handler proves the exact boundary was decoded.
-            assert_eq!(status.code(), tonic::Code::Unavailable);
-            assert_eq!(status.message(), "starting");
+            // Reaching the handler proves the exact boundary was decoded.
+            assert_eq!(status.code(), tonic::Code::NotFound);
         } else {
             assert_eq!(status.code(), tonic::Code::OutOfRange);
         }
