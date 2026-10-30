@@ -211,20 +211,21 @@ fn router(
         app = Routes::from(app).add_service(reflection).into_axum_router();
     }
     Ok(app
-        .fallback(|request: HttpRequest| async move {
-            let page = match (ui_dir.get(), request.headers().contains_key(CONTENT_TYPE)) {
-                // A body-less GET or HEAD: a page or asset, never an API call.
-                (Some(dir), false) => ui::file(dir, request.method(), request.uri().path()).await,
-                _ => None,
-            };
-            page.unwrap_or_else(|| {
-                refusal(&request, StatusCode::NOT_FOUND, tonic::Code::Unimplemented)
-            })
-        })
+        .fallback(|request: HttpRequest| async move { ui_response(ui_dir.get(), request).await })
         .layer(middleware::from_fn_with_state(
             registry,
             correlation::request,
         )))
+}
+
+/// Shared page fallback for unmatched paths and the two-segment repository route (0094).
+async fn ui_response(dir: Option<&PathBuf>, request: HttpRequest) -> HttpResponse {
+    let page = match (dir, request.headers().contains_key(CONTENT_TYPE)) {
+        // A body-less GET or HEAD: a page or asset, never an API call.
+        (Some(dir), false) => ui::file(dir, request.method(), request.uri().path()).await,
+        _ => None,
+    };
+    page.unwrap_or_else(|| refusal(&request, StatusCode::NOT_FOUND, tonic::Code::Unimplemented))
 }
 
 /// Hardcoded public listener limits (ADR 0022 sets no configuration key for them).

@@ -226,36 +226,28 @@ async fn upload_pack(
         .into_response()
 }
 
-/// The UI route of a previous name answers 301 to the current one (0021); the UI
-/// itself is not served yet, so anything else falls through to the plain 404.
+/// A GET of a previous repository name redirects (0021); other page requests use
+/// the same bundle fallback as unmatched paths (0094).
 async fn ui(
     State(repos): State<Repos>,
     Path((owner, name)): Path<(String, String)>,
     request: Request,
 ) -> Response {
-    let refused = super::refusal(&request, StatusCode::NOT_FOUND, tonic::Code::Unimplemented);
-    let Ok(readers) = repos.readers() else {
-        return refused;
-    };
-    if request.method() != axum::http::Method::GET {
-        return refused;
+    if request.method() != axum::http::Method::GET
+        || request.headers().contains_key(header::CONTENT_TYPE)
+    {
+        return super::ui_response(repos.0.ui_dir.get(), request).await;
     }
-    drop(request);
+    let Ok(readers) = repos.readers() else {
+        return super::refusal(&request, StatusCode::NOT_FOUND, tonic::Code::Unimplemented);
+    };
     match crate::db::repos::find(readers, &owner, &name).await {
         Ok(Some(found)) if found.redirected => (
             StatusCode::MOVED_PERMANENTLY,
             [(header::LOCATION, format!("/{}/{}", found.owner, found.name))],
         )
             .into_response(),
-        // A repository or application page of the `--ui-dir` bundle (ADR 0094).
-        Ok(_) => match repos.0.ui_dir.get() {
-            Some(dir) => {
-                super::ui::file(dir, &axum::http::Method::GET, &format!("/{owner}/{name}"))
-                    .await
-                    .unwrap_or(refused)
-            }
-            None => refused,
-        },
+        Ok(_) => super::ui_response(repos.0.ui_dir.get(), request).await,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

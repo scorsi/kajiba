@@ -1114,7 +1114,7 @@ fn proto_and_configuration_scope_names_agree() {
 
 #[tokio::test]
 async fn ui_dir_serves_pages_and_assets_behind_every_route() {
-    let fixture = repos::tests::Fixture::new(&auth::tests::tokens()).await;
+    let fixture = repos::tests::Fixture::new(repos::tests::DEMO).await;
     let dir = std::env::temp_dir().join(format!("kajiba-ui-router-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("_app")).unwrap();
     std::fs::write(dir.join("index.html"), "page").unwrap();
@@ -1150,6 +1150,56 @@ async fn ui_dir_serves_pages_and_assets_behind_every_route() {
         get(&mut app, "/_app/missing.js").await,
         StatusCode::NOT_FOUND
     );
+    for path in [
+        "/-/login",
+        "/_app/start.js",
+        "/alice/demo",
+        "/alice/old",
+        "/-/runs/id",
+    ] {
+        let response = app
+            .call(http::Request::head(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "HEAD {path}");
+        assert!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        for content_type in ["application/json", "application/grpc"] {
+            let response = app
+                .call(
+                    http::Request::get(path)
+                        .header("content-type", content_type)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if content_type == "application/grpc" {
+                assert_eq!(response.headers()["grpc-status"], "12", "GET {path}");
+            } else {
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "GET {path}");
+            }
+        }
+        let response = app
+            .call(http::Request::post(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "POST {path}");
+    }
+    let response = app
+        .call(
+            http::Request::get("/alice/old")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(response.headers()["location"], "/alice/demo");
     assert_eq!(get(&mut app, "/healthz").await, StatusCode::OK);
     // gRPC calls to unknown methods still get their gRPC refusal, never the page.
     let response = grpc(&mut app, "/kajiba.v1.Nope/Call", CheckRequest {}).await;
