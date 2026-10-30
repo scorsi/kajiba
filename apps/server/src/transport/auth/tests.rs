@@ -653,3 +653,58 @@ async fn session_expiry_is_absolute_and_expired_rows_are_purged() {
     drop(writer);
     assert_eq!(expires().await.len(), 1);
 }
+
+#[tokio::test]
+async fn get_viewer_names_the_caller_and_its_effective_admin_flag() {
+    use kajiba_proto::v1::GetViewerResponse;
+    use prost::Message;
+    const VIEWER: &str = "/kajiba.v1.AuthService/GetViewer";
+    let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
+    sqlx::query("UPDATE user SET is_admin = 1 WHERE name = 'alice'")
+        .execute(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    session(&fixture, "alice", SESSION, now() + 60_000).await;
+    session(&fixture, "bob", "bob-session", now() + 60_000).await;
+    let mut app = router(
+        fixture.repos.0.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
+    let status = call(&mut app, VIEWER, &[]).await.unwrap();
+    assert_eq!(status.code(), Code::Unauthenticated);
+    assert_eq!(reason(&status), "CREDENTIAL_INVALID");
+    let alice_cookie = format!("kajiba_session={SESSION}");
+    let read = format!("Bearer {READ}");
+    for (header, user, admin) in [
+        (("cookie", alice_cookie.as_str()), "alice", true),
+        (("cookie", "kajiba_session=bob-session"), "bob", false),
+        // An admin's `repo:read` PAT does not act as an administrator (ADR 0081).
+        (("authorization", read.as_str()), "alice", false),
+    ] {
+        let response = app
+            .call(
+                http::Request::post(VIEWER)
+                    .header("content-type", "application/grpc")
+                    .header(header.0, header.1)
+                    .body(Body::from(vec![0u8; 5]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let viewer = GetViewerResponse::decode(&body[5..]).unwrap();
+        assert_eq!(
+            viewer,
+            GetViewerResponse {
+                user: user.into(),
+                admin
+            },
+            "{header:?}"
+        );
+    }
+}

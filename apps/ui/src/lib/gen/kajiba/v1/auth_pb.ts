@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file kajiba/v1/auth.proto.
  */
 export const file_kajiba_v1_auth: GenFile = /*@__PURE__*/
-  fileDesc("ChRrYWppYmEvdjEvYXV0aC5wcm90bxIJa2FqaWJhLnYxIg8KDUxvZ291dFJlcXVlc3QiEAoOTG9nb3V0UmVzcG9uc2UyUgoLQXV0aFNlcnZpY2USQwoGTG9nb3V0Ehgua2FqaWJhLnYxLkxvZ291dFJlcXVlc3QaGS5rYWppYmEudjEuTG9nb3V0UmVzcG9uc2UiBIi1GAFiBnByb3RvMw", [file_kajiba_v1_options]);
+  fileDesc("ChRrYWppYmEvdjEvYXV0aC5wcm90bxIJa2FqaWJhLnYxIg8KDUxvZ291dFJlcXVlc3QiEAoOTG9nb3V0UmVzcG9uc2UiEgoQR2V0Vmlld2VyUmVxdWVzdCIwChFHZXRWaWV3ZXJSZXNwb25zZRIMCgR1c2VyGAEgASgJEg0KBWFkbWluGAIgASgIMqABCgtBdXRoU2VydmljZRJDCgZMb2dvdXQSGC5rYWppYmEudjEuTG9nb3V0UmVxdWVzdBoZLmthamliYS52MS5Mb2dvdXRSZXNwb25zZSIEiLUYARJMCglHZXRWaWV3ZXISGy5rYWppYmEudjEuR2V0Vmlld2VyUmVxdWVzdBocLmthamliYS52MS5HZXRWaWV3ZXJSZXNwb25zZSIEgLUYAWIGcHJvdG8z", [file_kajiba_v1_options]);
 
 /**
  * @generated from message kajiba.v1.LogoutRequest
@@ -40,6 +40,46 @@ export const LogoutResponseSchema: GenMessage<LogoutResponse> = /*@__PURE__*/
   messageDesc(file_kajiba_v1_auth, 1);
 
 /**
+ * @generated from message kajiba.v1.GetViewerRequest
+ */
+export type GetViewerRequest = Message<"kajiba.v1.GetViewerRequest"> & {
+};
+
+/**
+ * Describes the message kajiba.v1.GetViewerRequest.
+ * Use `create(GetViewerRequestSchema)` to create a new message.
+ */
+export const GetViewerRequestSchema: GenMessage<GetViewerRequest> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_auth, 2);
+
+/**
+ * @generated from message kajiba.v1.GetViewerResponse
+ */
+export type GetViewerResponse = Message<"kajiba.v1.GetViewerResponse"> & {
+  /**
+   * The caller's user name.
+   *
+   * @generated from field: string user = 1;
+   */
+  user: string;
+
+  /**
+   * A forge administrator (`is_admin`) whose credential holds the `admin` scope; always
+   * the user's `is_admin` for a browser session, which holds every scope.
+   *
+   * @generated from field: bool admin = 2;
+   */
+  admin: boolean;
+};
+
+/**
+ * Describes the message kajiba.v1.GetViewerResponse.
+ * Use `create(GetViewerResponseSchema)` to create a new message.
+ */
+export const GetViewerResponseSchema: GenMessage<GetViewerResponse> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_auth, 3);
+
+/**
  * Browser sessions (0014, 0079); opened by the WebAuthn ceremonies under /auth/webauthn/.
  *
  * @generated from service kajiba.v1.AuthService
@@ -56,6 +96,17 @@ export const AuthService: GenService<{
     methodKind: "unary";
     input: typeof LogoutRequestSchema;
     output: typeof LogoutResponseSchema;
+  },
+  /**
+   * The signed-in caller, for the web application. Any credential holding `repo:read`
+   * may call it; an unauthenticated call is refused by the interceptor.
+   *
+   * @generated from rpc kajiba.v1.AuthService.GetViewer
+   */
+  getViewer: {
+    methodKind: "unary";
+    input: typeof GetViewerRequestSchema;
+    output: typeof GetViewerResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_kajiba_v1_auth, 0);

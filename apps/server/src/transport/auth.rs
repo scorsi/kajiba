@@ -15,7 +15,10 @@ use axum::{
 };
 use kajiba_proto::{
     Access,
-    v1::{LogoutRequest, LogoutResponse, Scope, auth_service_server::AuthService},
+    v1::{
+        GetViewerRequest, GetViewerResponse, LogoutRequest, LogoutResponse, Scope,
+        auth_service_server::AuthService,
+    },
 };
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tonic::Status;
@@ -306,6 +309,33 @@ impl AuthService for Sessions {
                 .map_err(|_| Status::internal("cookie"))?,
         );
         Ok(response)
+    }
+
+    /// Scope `repo:read` (proto): the interceptor has authenticated the caller (ADR 0087).
+    async fn get_viewer(
+        &self,
+        request: tonic::Request<GetViewerRequest>,
+    ) -> Result<tonic::Response<GetViewerResponse>, Status> {
+        let principal = request
+            .extensions()
+            .get::<Principal>()
+            .ok_or_else(|| Status::internal("viewer: no authenticated caller"))?;
+        let readers = self
+            .0
+            .database
+            .get()
+            .ok_or_else(|| Status::unavailable("starting"))?;
+        let (user, is_admin): (String, bool) =
+            sqlx::query_as("SELECT name, is_admin FROM user WHERE id = ?")
+                .bind(principal.user_id)
+                .fetch_one(readers)
+                .await
+                .map_err(|err| Status::internal(format!("viewer: {err}")))?;
+        Ok(tonic::Response::new(GetViewerResponse {
+            user,
+            // The `admin` scope never grants more than the user's real rights (ADR 0081).
+            admin: is_admin && principal.scopes.contains(&Scope::Admin),
+        }))
     }
 }
 

@@ -12,8 +12,24 @@ service AuthService {
   rpc Logout(LogoutRequest) returns (LogoutResponse) {
     option (kajiba.v1.public_access) = true;
   }
+
+  // The signed-in caller, for the web application. Any credential holding `repo:read`
+  // may call it; an unauthenticated call is refused by the interceptor.
+  rpc GetViewer(GetViewerRequest) returns (GetViewerResponse) {
+    option (kajiba.v1.scope) = SCOPE_REPO_READ;
+  }
 }
 
 message LogoutRequest {}
 
 message LogoutResponse {}
+
+message GetViewerRequest {}
+
+message GetViewerResponse {
+  // The caller's user name.
+  string user = 1;
+  // A forge administrator (`is_admin`) whose credential holds the `admin` scope; always
+  // the user's `is_admin` for a browser session, which holds every scope.
+  bool admin = 2;
+}
