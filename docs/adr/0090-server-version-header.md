@@ -1,6 +1,6 @@
 # ADR 0090 — Server version header
 
-Status: Proposed — 2026-10-30
+Status: Accepted — 2026-10-30
 
 ## Context
 
