@@ -1,5 +1,5 @@
 //! WebAuthn relying party, in-memory ceremony state and the JSON ceremony routes under
-//! `/auth/webauthn/` (ADR 0014, 0019, 0020, 0083, 0084).
+//! `/auth/webauthn/` (ADR 0014, 0019, 0020, 0083, 0084, 0085).
 // Refusals are whole responses, returned by value to the handlers anyway.
 #![allow(clippy::result_large_err)]
 use super::{
@@ -22,7 +22,8 @@ use std::{
     time::{Duration, Instant},
 };
 use webauthn_rs::prelude::{
-    PasskeyRegistration, RegisterPublicKeyCredential, Url, Uuid, Webauthn, WebauthnBuilder,
+    DiscoverableAuthentication, DiscoverableKey, Passkey, PasskeyRegistration, PublicKeyCredential,
+    RegisterPublicKeyCredential, Url, Uuid, Webauthn, WebauthnBuilder,
 };
 
 /// A challenge is valid for five minutes (ADR 0014).
@@ -104,6 +105,7 @@ enum Ceremony {
         user: i64,
         token_hash: [u8; 32],
     },
+    Login(DiscoverableAuthentication),
 }
 
 /// The relying party, the outstanding ceremonies and the lifetime of the sessions the
@@ -172,6 +174,8 @@ pub(super) fn routes(health: Health) -> Router {
     Router::new()
         .route("/auth/webauthn/enroll/start", post(enroll_start))
         .route("/auth/webauthn/enroll/finish", post(enroll_finish))
+        .route("/auth/webauthn/login/start", post(login_start))
+        .route("/auth/webauthn/login/finish", post(login_finish))
         .with_state(health)
 }
 
@@ -205,6 +209,10 @@ async fn enroll_start(State(health): State<Health>, Json(body): Json<EnrollStart
         Ok(started) => started,
         Err(err) => return internal(err),
     };
+    // Login has no username step (ADR 0085): the credential must be discoverable, which
+    // webauthn-rs leaves optional (its proto type is not re-exported: set it in JSON).
+    let mut options = serde_json::json!(options);
+    options["publicKey"]["authenticatorSelection"]["residentKey"] = "required".into();
     match passkeys.begin(Ceremony::Enroll {
         state,
         user,
@@ -234,12 +242,13 @@ async fn enroll_finish(State(health): State<Health>, Json(body): Json<EnrollFini
     if body.name.chars().count() > MAX_NAME || body.name.chars().any(char::is_control) {
         return refusal(StatusCode::BAD_REQUEST, "NAME_INVALID");
     }
-    let Ceremony::Enroll {
-        state,
-        user,
-        token_hash,
-    } = match passkeys.finish(&body.ceremony) {
-        Ok(ceremony) => ceremony,
+    let (state, user, token_hash) = match passkeys.finish(&body.ceremony) {
+        Ok(Ceremony::Enroll {
+            state,
+            user,
+            token_hash,
+        }) => (state, user, token_hash),
+        Ok(Ceremony::Login(_)) => return refused("CEREMONY_INVALID"),
         Err(response) => return response,
     };
     // Checks the challenge, the origin and the RP ID among others.
@@ -278,12 +287,105 @@ async fn enroll_finish(State(health): State<Health>, Json(body): Json<EnrollFini
     }
     .await;
     match opened {
-        Ok(Some(cookie)) => (
-            StatusCode::NO_CONTENT,
-            [(SET_COOKIE, set_cookie(&cookie, passkeys.session_ttl))],
-        )
-            .into_response(),
+        Ok(Some(cookie)) => session_opened(&cookie, passkeys.session_ttl),
         Ok(None) => refused("ENROLLMENT_INVALID"),
+        Err(err) => internal(err),
+    }
+}
+
+/// The answer of a ceremony that opened a session: `204` and the cookie (ADR 0079).
+fn session_opened(cookie: &str, ttl: Duration) -> Response {
+    (
+        StatusCode::NO_CONTENT,
+        [(SET_COOKIE, set_cookie(cookie, ttl))],
+    )
+        .into_response()
+}
+
+/// Discoverable login (ADR 0085): no body, the authenticator picks the credential.
+async fn login_start(State(health): State<Health>) -> Response {
+    let Some(passkeys) = health.passkeys.get() else {
+        return starting();
+    };
+    let (mut options, state) = match passkeys.webauthn.start_discoverable_authentication() {
+        Ok(started) => started,
+        Err(err) => return internal(err),
+    };
+    // webauthn-rs asks for conditional (autofill) mediation; the page decides how to prompt.
+    options.mediation = None;
+    match passkeys.begin(Ceremony::Login(state)) {
+        Ok(ceremony) => {
+            Json(serde_json::json!({ "ceremony": ceremony, "options": options })).into_response()
+        }
+        Err(response) => response,
+    }
+}
+
+#[derive(Deserialize)]
+struct LoginFinish {
+    ceremony: String,
+    credential: PublicKeyCredential,
+}
+
+async fn login_finish(State(health): State<Health>, Json(body): Json<LoginFinish>) -> Response {
+    let (Some(passkeys), Some(readers), Some(writer)) = (
+        health.passkeys.get(),
+        health.database.get(),
+        health.writer.get(),
+    ) else {
+        return starting();
+    };
+    let state = match passkeys.finish(&body.ceremony) {
+        Ok(Ceremony::Login(state)) => state,
+        Ok(Ceremony::Enroll { .. }) => return refused("CEREMONY_INVALID"),
+        Err(response) => return response,
+    };
+    let Ok((handle, credential_id)) = passkeys
+        .webauthn
+        .identify_discoverable_authentication(&body.credential)
+    else {
+        return refused("VERIFICATION_FAILED");
+    };
+    // Unknown credential, deleted passkey (admin enroll, removal) or disabled user.
+    let (id, user, public_id, stored) =
+        match crate::db::passkeys::find(readers, credential_id).await {
+            Ok(Some(found)) => found,
+            Ok(None) => return refused("PASSKEY_INVALID"),
+            Err(err) => return internal(err),
+        };
+    if handle != user_handle(&public_id) {
+        return refused("PASSKEY_INVALID");
+    }
+    let mut passkey: Passkey = match serde_json::from_str(&stored) {
+        Ok(passkey) => passkey,
+        Err(err) => return internal(err),
+    };
+    // Checks the challenge, the origin, the signature and user verification.
+    let Ok(result) = passkeys.webauthn.finish_discoverable_authentication(
+        &body.credential,
+        state,
+        &[DiscoverableKey::from(&passkey)],
+    ) else {
+        return refused("VERIFICATION_FAILED");
+    };
+    passkey.update_credential(&result);
+    let (Ok(serialized), Ok(now)) = (serde_json::to_string(&passkey), now()) else {
+        return internal("passkey state");
+    };
+    let mut writer = writer.lock().await;
+    let opened = async {
+        let mut tx = writer.begin().await?;
+        if !crate::db::passkeys::used(&mut tx, id, &serialized, now).await? {
+            return Ok(None);
+        }
+        let cookie = crate::db::sessions::create(&mut tx, user, passkeys.session_ttl, now).await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(Some(cookie))
+    }
+    .await;
+    match opened {
+        Ok(Some(cookie)) => session_opened(&cookie, passkeys.session_ttl),
+        Ok(None) => refused("PASSKEY_INVALID"),
         Err(err) => internal(err),
     }
 }

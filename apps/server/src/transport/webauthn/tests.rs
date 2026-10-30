@@ -99,7 +99,7 @@ mod ceremonies {
     use axum::{body::Body, http::Request};
     use tonic::codegen::Service;
     use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
-    use webauthn_rs::prelude::CreationChallengeResponse;
+    use webauthn_rs::prelude::{CreationChallengeResponse, Passkey, PublicKeyCredential};
 
     pub(in crate::transport) const ORIGIN: &str = "https://example.org";
     const TTL: Duration = Duration::from_secs(600);
@@ -202,6 +202,10 @@ mod ceremonies {
         let (fixture, mut app) = fixture().await;
         let token = issue(&fixture, "alice", epoch_ms()).await;
         let (ceremony, options) = start(&mut app, &token).await.unwrap();
+        assert_eq!(
+            serde_json::json!(options)["publicKey"]["authenticatorSelection"]["residentKey"],
+            "required"
+        );
         let user = &options.public_key.user;
         assert_eq!(user.name, "alice");
         let (public_id,): (String,) =
@@ -409,5 +413,210 @@ mod ceremonies {
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(!stderr.contains(&token), "{stderr}");
         assert!(stderr.contains("\"ENROLLMENT_INVALID\""), "{stderr}");
+    }
+
+    /// Enrolls `user` with a new software authenticator: it, the credential id and the
+    /// user handle.
+    async fn enrolled(
+        fixture: &Fixture,
+        app: &mut Router,
+        user: &str,
+    ) -> (WebauthnAuthenticator<SoftPasskey>, Vec<u8>, Uuid) {
+        let token = issue(fixture, user, epoch_ms()).await;
+        let (ceremony, options) = start(app, &token).await.unwrap();
+        let mut authenticator = authenticator();
+        let credential = authenticator
+            .do_registration(Url::parse(ORIGIN).unwrap(), options)
+            .unwrap();
+        let (status, ..) = post(
+            app,
+            "/auth/webauthn/enroll/finish",
+            serde_json::json!({ "ceremony": ceremony, "credential": credential }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let public_id: String = sqlx::query_scalar("SELECT public_id FROM user WHERE name = ?")
+            .bind(user)
+            .fetch_one(fixture.repos.readers().unwrap())
+            .await
+            .unwrap();
+        let id = credential.raw_id.as_ref().to_vec();
+        (authenticator, id, user_handle(&public_id))
+    }
+
+    /// Starts a login and signs its challenge as a browser would with a discoverable
+    /// credential: the ceremony id and the assertion.
+    async fn assertion(
+        app: &mut Router,
+        authenticator: &mut WebauthnAuthenticator<SoftPasskey>,
+        credential_id: &[u8],
+        handle: Uuid,
+        origin: &str,
+    ) -> (String, PublicKeyCredential) {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let (status, _, mut json) =
+            post(app, "/auth/webauthn/login/start", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        let options = &mut json["options"];
+        assert_eq!(
+            options["publicKey"]["allowCredentials"],
+            serde_json::json!([])
+        );
+        assert_eq!(options["mediation"], serde_json::Value::Null);
+        // The soft authenticator cannot discover: name the credential the user would pick.
+        options["publicKey"]["allowCredentials"] = serde_json::json!([{ "type": "public-key", "id": URL_SAFE_NO_PAD.encode(credential_id) }]);
+        let mut credential = authenticator
+            .do_authentication(
+                Url::parse(origin).unwrap(),
+                serde_json::from_value(options.take()).unwrap(),
+            )
+            .unwrap();
+        // Unsigned, set by a discoverable authenticator.
+        credential.response.user_handle = Some(handle.as_bytes().to_vec().into());
+        (json["ceremony"].as_str().unwrap().into(), credential)
+    }
+
+    async fn login(
+        app: &mut Router,
+        ceremony: &str,
+        credential: &PublicKeyCredential,
+    ) -> (StatusCode, Option<String>, Option<String>) {
+        let (status, cookie, json) = post(
+            app,
+            "/auth/webauthn/login/finish",
+            serde_json::json!({ "ceremony": ceremony, "credential": credential }),
+        )
+        .await;
+        (status, cookie, json["reason"].as_str().map(Into::into))
+    }
+
+    fn refused(reason: &str) -> (StatusCode, Option<String>, Option<String>) {
+        (StatusCode::FORBIDDEN, None, Some(reason.into()))
+    }
+
+    #[tokio::test]
+    async fn login_opens_a_session_and_records_the_passkey_use() {
+        let (fixture, mut app) = fixture().await;
+        let (mut authenticator, id, handle) = enrolled(&fixture, &mut app, "alice").await;
+        let (ceremony, credential) =
+            assertion(&mut app, &mut authenticator, &id, handle, ORIGIN).await;
+        let (status, cookie, _) = login(&mut app, &ceremony, &credential).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let cookie = cookie.unwrap();
+        let value = cookie
+            .strip_prefix("kajiba_session=")
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let session = crate::db::sessions::find(
+            fixture.repos.readers().unwrap(),
+            &kajiba_core::sha256(value.as_bytes()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let alice: i64 = sqlx::query_scalar("SELECT id FROM user WHERE name = 'alice'")
+            .fetch_one(fixture.repos.readers().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(session.user_id, alice);
+        let (last_used_at, stored): (Option<i64>, String) =
+            sqlx::query_as("SELECT last_used_at, passkey FROM webauthn_credential")
+                .fetch_one(fixture.repos.readers().unwrap())
+                .await
+                .unwrap();
+        assert!(last_used_at.is_some());
+        serde_json::from_str::<Passkey>(&stored).unwrap();
+        // Replays: the same ceremony again, the same assertion on a new challenge.
+        assert_eq!(
+            login(&mut app, &ceremony, &credential).await,
+            refused("CEREMONY_INVALID")
+        );
+        let (status, _, mut json) = post(
+            &mut app,
+            "/auth/webauthn/login/start",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let fresh = json["ceremony"].take();
+        assert_eq!(
+            login(&mut app, fresh.as_str().unwrap(), &credential).await,
+            refused("VERIFICATION_FAILED")
+        );
+        // A second login works: the stored counter state follows.
+        let (ceremony, credential) =
+            assertion(&mut app, &mut authenticator, &id, handle, ORIGIN).await;
+        assert_eq!(
+            login(&mut app, &ceremony, &credential).await.0,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn login_refuses_unknown_disabled_and_revoked_passkeys() {
+        let (fixture, mut app) = fixture().await;
+        let (mut alice, alice_id, alice_handle) = enrolled(&fixture, &mut app, "alice").await;
+        let (mut bob, bob_id, bob_handle) = enrolled(&fixture, &mut app, "bob").await;
+        // Another user's handle on alice's credential.
+        let (ceremony, credential) =
+            assertion(&mut app, &mut alice, &alice_id, bob_handle, ORIGIN).await;
+        assert_eq!(
+            login(&mut app, &ceremony, &credential).await,
+            refused("PASSKEY_INVALID")
+        );
+        // A second admin enroll deletes alice's passkey: the credential is unknown.
+        let (ceremony, credential) =
+            assertion(&mut app, &mut alice, &alice_id, alice_handle, ORIGIN).await;
+        issue(&fixture, "alice", epoch_ms()).await;
+        assert_eq!(
+            login(&mut app, &ceremony, &credential).await,
+            refused("PASSKEY_INVALID")
+        );
+        // A disabled user.
+        let (ceremony, credential) =
+            assertion(&mut app, &mut bob, &bob_id, bob_handle, ORIGIN).await;
+        sqlx::query("UPDATE user SET disabled_at = 1 WHERE name = 'bob'")
+            .execute(&mut *fixture.writer.lock().await)
+            .await
+            .unwrap();
+        assert_eq!(
+            login(&mut app, &ceremony, &credential).await,
+            refused("PASSKEY_INVALID")
+        );
+        // No login opened a session; the second link deleted alice's enrollment one.
+        assert_eq!(count(&fixture, "session").await, 1);
+    }
+
+    #[tokio::test]
+    async fn login_from_a_foreign_origin_is_refused() {
+        let (fixture, mut app) = fixture().await;
+        let (mut authenticator, id, handle) = enrolled(&fixture, &mut app, "alice").await;
+        let (ceremony, credential) = assertion(
+            &mut app,
+            &mut authenticator,
+            &id,
+            handle,
+            "https://evil.example.org",
+        )
+        .await;
+        assert_eq!(
+            login(&mut app, &ceremony, &credential).await,
+            refused("VERIFICATION_FAILED")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_enrollment_ceremony_cannot_finish_a_login() {
+        let (fixture, mut app) = fixture().await;
+        let (mut authenticator, id, handle) = enrolled(&fixture, &mut app, "alice").await;
+        let token = issue(&fixture, "bob", epoch_ms()).await;
+        let (enrollment, _) = start(&mut app, &token).await.unwrap();
+        let (_, credential) = assertion(&mut app, &mut authenticator, &id, handle, ORIGIN).await;
+        assert_eq!(
+            login(&mut app, &enrollment, &credential).await,
+            refused("CEREMONY_INVALID")
+        );
     }
 }
