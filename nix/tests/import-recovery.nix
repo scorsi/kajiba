@@ -224,8 +224,8 @@ pkgs.testers.runNixOSTest {
             forge.succeed(f"touch {control}/{key}.release")
             # Retry the same repository through real admission after reconciliation.
             forge.succeed(f"kajiba-server admin import alice/{key} {bundle}")
-            retry = dict(row, correlation_id=events()[-1]["correlation_id"])
-            recovered(before, retry, json.loads(row["updates"]))
+            retried = dict(row, correlation_id=events()[-1]["correlation_id"])
+            recovered(before, retried, json.loads(row["updates"]))
             assert refs(forge, directory, user="kajiba-git") == expected
 
     validate_logs(forge, unit)
