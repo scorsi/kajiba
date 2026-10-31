@@ -296,7 +296,7 @@ pub async fn accept(
     let Some(mut current) = current(tx, runner.0, attempt).await? else {
         return Ok(Outcome::Cancel);
     };
-    if current.state != "running" {
+    if current.state != "running" || current.lease_expires_at < now {
         return Ok(Outcome::Cancel);
     }
     Ok(Outcome::Done(
@@ -435,7 +435,8 @@ pub struct Finish<'a> {
 
 /// Record the attempt's first terminal result in its job and run, with `run-finished`.
 /// A result for an attempt no longer running (already finished, cancelled, lost) is
-/// acknowledged and ignored; a result before acceptance starts the attempt first.
+/// acknowledged and ignored; a result for an expired running attempt receives cancel.
+/// A result before acceptance starts the attempt first.
 pub async fn finish(
     tx: &mut SqliteConnection,
     runner: (i64, &str),
@@ -452,6 +453,9 @@ pub async fn finish(
     else {
         return Ok(Outcome::Done(Vec::new()));
     };
+    if current.lease_expires_at < now {
+        return Ok(Outcome::Cancel);
+    }
     let mut changes = start(tx, &mut current, runner, correlation_id, now).await?;
     sqlx::query("UPDATE job_attempt SET state = ?, exit_code = ?, finished_at = ? WHERE id = ?")
         .bind(state.as_str())

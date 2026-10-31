@@ -533,6 +533,86 @@ async fn ended(writer: &mut SqliteConnection) -> Ended {
 }
 
 #[tokio::test]
+async fn expired_acceptance_and_results_cannot_beat_the_sweep() {
+    for deadline in [8, 9] {
+        let dir = TempDir::new();
+        let (mut writer, readers) = open(&dir.database()).await.unwrap();
+        populate(&mut writer).await;
+        let run = new_run(&mut writer, 1).await;
+        let offers = [offer(1, &["nix"], &[], 1)];
+        let (assigned, _) = pass(&mut writer, &offers, 2).await;
+        let attempt = &assigned[0].attempt;
+        sqlx::query("UPDATE job_attempt SET lease_expires_at = ?")
+            .bind(deadline)
+            .execute(&mut writer)
+            .await
+            .unwrap();
+        let before = ended(&mut writer).await;
+        let events = count(&mut writer, "SELECT count(*) FROM event").await;
+        let mut tx = writer.begin().await.unwrap();
+        let accepted = accept(&mut tx, (1, "build-1"), attempt, "accept", 9)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(
+            accepted,
+            if deadline < 9 {
+                Outcome::Cancel
+            } else {
+                Outcome::Done(vec![(run.clone(), RunState::Running)])
+            }
+        );
+        assert_eq!(
+            result(
+                &mut writer,
+                (1, "build-1"),
+                attempt,
+                AttemptState::Succeeded,
+                ""
+            )
+            .await,
+            if deadline < 9 {
+                Outcome::Cancel
+            } else {
+                Outcome::Done(vec![(run, RunState::Succeeded)])
+            }
+        );
+        if deadline < 9 {
+            assert_eq!(ended(&mut writer).await, before);
+            assert_eq!(
+                count(&mut writer, "SELECT count(*) FROM event").await,
+                events
+            );
+            sweep(&mut writer, 9).await;
+            assert_eq!(ended(&mut writer).await.0, "lost");
+            let (replayed, _) = pass(&mut writer, &offers, 9).await;
+            assert_eq!(replayed.len(), 1);
+            assert_ne!(replayed[0].attempt, *attempt);
+        } else {
+            // A recorded result is still acknowledged after its lease expires.
+            sqlx::query("UPDATE job_attempt SET lease_expires_at = 8")
+                .execute(&mut writer)
+                .await
+                .unwrap();
+            assert_eq!(
+                result(
+                    &mut writer,
+                    (1, "build-1"),
+                    attempt,
+                    AttemptState::Failed,
+                    "late"
+                )
+                .await,
+                Outcome::Done(Vec::new())
+            );
+            assert_eq!(ended(&mut writer).await.0, "succeeded");
+        }
+        readers.close().await;
+        writer.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn the_first_terminal_result_wins() {
     let dir = TempDir::new();
     let (mut writer, readers) = open(&dir.database()).await.unwrap();
