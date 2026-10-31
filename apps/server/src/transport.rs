@@ -47,6 +47,8 @@ pub struct Health {
     runners: Arc<OnceLock<runners::Declared>>,
     /// Bumped after each commit that stores log bytes or ends attempts: wakes run watchers.
     ci_progress: Arc<watch::Sender<()>>,
+    /// Set once the server stops: listeners close and long-lived streams end (0140).
+    stop: Arc<watch::Sender<bool>>,
     state_dir: PathBuf,
     git_state_dir: PathBuf,
     local_serving: Arc<local::Serving>,
@@ -75,6 +77,7 @@ impl Health {
             clone_base: Arc::default(),
             runners: Arc::default(),
             ci_progress: Arc::new(watch::Sender::new(())),
+            stop: Arc::new(watch::Sender::new(false)),
             git_state_dir,
             state_dir,
             local_serving: Arc::default(),
@@ -119,6 +122,12 @@ impl Health {
 
     pub fn set_passkeys(&self, passkeys: webauthn::Passkeys) {
         assert!(self.passkeys.set(passkeys).is_ok(), "passkeys set twice");
+    }
+
+    /// Resolves once the server is stopping: a long-lived stream then ends with
+    /// `UNAVAILABLE`, which its client resumes from (0105, 0130, 0140).
+    async fn stopped(&self) {
+        stopping(&mut self.stop.subscribe()).await;
     }
 
     async fn ready(&self) -> bool {
@@ -596,6 +605,7 @@ pub async fn serve(
     )?;
     let gate = gate::Gate::new(&admin, registry.clone());
     let git_side = health.git_side.clone();
+    let stop = health.stop.clone();
     let runner_app = runner_router(health.clone(), registry.clone());
     let runners = match &server.runner_listener {
         Some(listener) => {
@@ -624,11 +634,12 @@ pub async fn serve(
         .map(|listener| (listener, metrics::router(registry.clone(), readers, bus)));
     let recovery = admin.clone();
     tokio::select! {
-        result = serve_listeners(listener, app, metrics, runners, (local, admin), (gate_local, gate), registry) => result,
+        result = serve_listeners(listener, app, metrics, runners, (local, admin), (gate_local, gate), registry, stop) => result,
         () = git_side.run(&git_config.socket, Some(&recovery)) => unreachable!("connection loop runs until shutdown"),
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 async fn serve_listeners(
     listener: tokio::net::TcpListener,
     app: Router,
@@ -637,9 +648,10 @@ async fn serve_listeners(
     (local, admin): (local::Local, local::Admin),
     (gate_local, gate): (local::Local, gate::Gate),
     registry: Arc<Registry>,
+    stop: Arc<watch::Sender<bool>>,
 ) -> std::io::Result<()> {
     let shutdown = shutdown_signal()?;
-    let (stop, stopped) = watch::channel(false);
+    let stopped = stop.subscribe();
     tracing::info!(event = "listening", addr = %listener.local_addr()?);
     if let Some((listener, _)) = &metrics {
         tracing::info!(event = "metrics-listening", addr = %listener.local_addr()?);
@@ -679,10 +691,21 @@ async fn serve_listeners(
         result = &mut servers => result,
         () = shutdown => {
             stop.send_replace(true);
-            servers.await
+            // Long-lived streams end at once; other requests get a bounded drain (0140).
+            match tokio::time::timeout(DRAIN, servers).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(event = "drain-timeout");
+                    Ok(())
+                }
+            }
         }
     }
 }
+
+/// Time in-flight requests get to finish once the server stops (0140); connections still
+/// open after it are closed with the process.
+const DRAIN: Duration = Duration::from_secs(5);
 
 fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
     use tokio::signal::unix::{SignalKind, signal};

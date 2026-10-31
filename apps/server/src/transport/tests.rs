@@ -814,6 +814,14 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
                     "completed"
                 }),
             )
+            // A request that never ends, as a stream nobody ends would.
+            .route(
+                "/forever",
+                axum::routing::get(|| async {
+                    tracing::info!(event = "forever");
+                    std::future::pending::<()>().await
+                }),
+            )
             .layer(axum::middleware::from_fn_with_state(
                 registry,
                 correlation::request,
@@ -841,6 +849,7 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
             (local, admin),
             (gate_local, gate),
             Arc::default(),
+            state.health.stop.clone(),
         )
         .await
         .unwrap();
@@ -885,15 +894,19 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
                     assert!(response.contains("kajiba_build_info{version=\""));
                     Some(addr)
                 } else { None };
+                let mut forever = std::net::TcpStream::connect_timeout(&addr, timeout).unwrap();
+                forever.write_all(b"GET /forever HTTP/1.1\r\nHost: example.org\r\n\r\n").unwrap();
+                assert_eq!(recv.recv_timeout(timeout).unwrap()["event"], "ready");
+                assert_eq!(recv.recv_timeout(timeout).unwrap()["event"], "forever");
                 let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).unwrap();
                 stream.set_read_timeout(Some(timeout)).unwrap();
                 stream.set_write_timeout(Some(timeout)).unwrap();
                 stream.write_all(b"POST /slow HTTP/1.1\r\nHost: example.org\r\nContent-Length: 4\r\nConnection: close\r\n\r\na").unwrap();
-                assert_eq!(recv.recv_timeout(timeout).unwrap()["event"], "ready");
                 let started = recv.recv_timeout(timeout).unwrap();
                 assert_eq!(started["event"], "in-flight");
                 // PATH lookup: the Linux Nix build sandbox has no /bin/kill; stdenv coreutils provides kill.
                 assert!(Command::new("kill").arg(signal).arg(child.id().to_string()).status().unwrap().success());
+                let killed = std::time::Instant::now();
                 let stopping = recv.recv_timeout(timeout).unwrap();
                 assert_eq!(stopping["event"], "stopping");
                 assert!(stopping.get("request_id").is_none());
@@ -914,10 +927,13 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
                 assert_eq!(request["request_id"], started["request_id"]);
                 assert_eq!(request["status"], 200);
                 assert!(request.get("grpc_code").is_none(), "{request}");
+                // The never-ending request no longer holds the exit: the drain is bounded (0140).
+                assert_eq!(recv.recv_timeout(timeout).unwrap()["event"], "drain-timeout");
                 let deadline = std::time::Instant::now() + timeout;
                 loop {
                     if let Some(status) = child.try_wait().unwrap() {
                         assert_eq!(status.code(), Some(0));
+                        assert!(killed.elapsed() < DRAIN + Duration::from_secs(2), "{:?}", killed.elapsed());
                         break;
                     }
                     assert!(std::time::Instant::now() < deadline, "server did not drain");

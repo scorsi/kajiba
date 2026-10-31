@@ -684,17 +684,20 @@ impl RunService for Runs {
         let (watcher, events) = mpsc::channel(4);
         let runs = self.clone();
         tokio::spawn(async move {
-            if let Err(status) = runs
-                .watch(
-                    &run,
-                    request.offset,
-                    request.follow,
-                    progress,
-                    &watcher,
-                    WATCH_KEEPALIVE,
-                )
-                .await
-            {
+            let watched = runs.watch(
+                &run,
+                request.offset,
+                request.follow,
+                progress,
+                &watcher,
+                WATCH_KEEPALIVE,
+            );
+            // The CLI resumes from its offset once the server is back (0130, 0140).
+            let result = tokio::select! {
+                result = watched => result,
+                () = runs.0.stopped() => Err(Status::unavailable("the server is stopping")),
+            };
+            if let Err(status) = result {
                 deliver(&watcher, Err(status)).await;
             }
         });

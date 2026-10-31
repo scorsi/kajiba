@@ -1786,3 +1786,18 @@ async fn bundle_transfers_are_bounded_per_runner_and_end_with_their_stream_or_le
         );
     }
 }
+
+#[tokio::test]
+async fn stopping_ends_runner_streams_with_unavailable() {
+    let forge = Forge::start().await;
+    let (_sender, mut stream) = forge
+        .connect(Some(BUILD_1), hello("build-1"))
+        .await
+        .unwrap();
+    forge.state.health.stop.send_replace(true);
+    let ended = tokio::time::timeout(Duration::from_secs(5), stream.message())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(ended.code(), tonic::Code::Unavailable);
+}

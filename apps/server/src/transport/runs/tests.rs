@@ -999,6 +999,25 @@ async fn followers_get_stored_then_live_bytes_then_the_terminal_run() {
 }
 
 #[tokio::test]
+async fn stopping_ends_followers_with_unavailable() {
+    use tokio_stream::StreamExt;
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, ALICE, "alice/ci", &tip)
+        .await
+        .unwrap()
+        .public_id;
+    let mut follower = watch(&runs, ALICE, &run, 0, true).await.unwrap();
+    runs.0.stop.send_replace(true);
+    let ended = tokio::time::timeout(Duration::from_secs(5), follower.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(ended.code(), tonic::Code::Unavailable);
+}
+
+#[tokio::test]
 async fn a_watcher_cannot_follow_a_reused_run_id_into_another_repository() {
     use tokio_stream::StreamExt;
     let (fixture, runs) = fixture("").await;

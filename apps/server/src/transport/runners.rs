@@ -822,6 +822,10 @@ impl RunnerService for Runners {
                 _ = &mut replaced => {
                     let _ = outbound.try_send(Err(Status::aborted("runner connection ended")));
                 }
+                // The runner reconnects to the restarted server (0105, 0140).
+                () = runners.health.stopped() => {
+                    let _ = outbound.try_send(Err(Status::unavailable("the server is stopping")));
+                }
                 () = async {
                     let mut open = answer(
                         &outbound,
