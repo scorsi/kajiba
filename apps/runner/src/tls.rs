@@ -4,9 +4,19 @@
 
 use hyper_util::rt::TokioIo;
 use kajiba_core::{config::RunnerTlsConfig, svid};
-use std::{future::Future, pin::Pin, sync::Arc};
-use tokio::net::TcpStream;
-use tokio_rustls::{TlsConnector, client::TlsStream, rustls::pki_types::ServerName};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::SystemTime,
+};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    net::TcpStream,
+    time::Sleep,
+};
+use tokio_rustls::{TlsConnector, rustls::pki_types::ServerName};
 use tonic::{codegen::http::Uri, transport::Endpoint};
 
 /// The channel's endpoint and its connector for the runner URL.
@@ -38,7 +48,7 @@ impl Tls {
         &self,
         name: ServerName<'static>,
         stream: S,
-    ) -> std::io::Result<TlsStream<S>>
+    ) -> std::io::Result<Expiring<tokio_rustls::client::TlsStream<S>>>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
@@ -50,12 +60,76 @@ impl Tls {
                 "runner TLS requires ALPN h2",
             ));
         }
-        Ok(tls)
+        let peer = svid::peer(
+            &tls.get_ref().1.peer_certificates().unwrap()[0],
+            self.0.trust_domain(),
+        )
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        Ok(Expiring {
+            stream: Some(tls),
+            expiry: Box::pin(tokio::time::sleep(
+                peer.not_after
+                    .duration_since(SystemTime::now())
+                    .unwrap_or_default(),
+            )),
+        })
+    }
+}
+
+/// Keep the handshake's deadline even if the forge renews its files (0124, 0125).
+#[derive(Debug)]
+pub struct Expiring<S> {
+    stream: Option<S>,
+    expiry: Pin<Box<Sleep>>,
+}
+
+impl<S> Expiring<S> {
+    fn check(&mut self, cx: &mut Context<'_>) -> std::io::Result<()> {
+        if self.expiry.as_mut().poll(cx).is_ready() {
+            self.stream.take();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "forge SVID expired",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Expiring<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.check(cx)?;
+        Pin::new(self.stream.as_mut().unwrap()).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Expiring<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        self.check(cx)?;
+        Pin::new(self.stream.as_mut().unwrap()).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.check(cx)?;
+        Pin::new(self.stream.as_mut().unwrap()).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.check(cx)?;
+        Pin::new(self.stream.as_mut().unwrap()).poll_shutdown(cx)
     }
 }
 
 impl tonic::codegen::Service<Uri> for Tls {
-    type Response = TokioIo<TlsStream<TcpStream>>;
+    type Response = TokioIo<Expiring<tokio_rustls::client::TlsStream<TcpStream>>>;
     type Error = std::io::Error;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -126,6 +200,78 @@ mod tests {
             connection.alpn_protocol().map(<[u8]>::to_vec),
             svid::peer(leaf, "example.org").unwrap().id,
         ))
+    }
+
+    #[tokio::test]
+    async fn an_established_connection_ends_at_the_forge_svid_expiry() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::time::{Duration, Instant, sleep_until, timeout};
+
+        let forge = files("forge");
+        let source = svid::Source::load(svid::Files {
+            trust_domain: forge.trust_domain,
+            svid_file: forge.svid_file,
+            key_file: forge.key_file,
+            bundle_file: forge.bundle_file,
+        })
+        .unwrap();
+        let (_, connector) = endpoint("https://runners.example.org", &files("runner")).unwrap();
+        for buffered in [false, true] {
+            let acceptor = TlsAcceptor::from(Arc::new(source.server_config()));
+            let (client, server) = tokio::io::duplex(16 * 1024);
+            let (client, server) = tokio::join!(
+                connector.connect(ServerName::try_from("runners.example.org").unwrap(), client),
+                acceptor.accept(server),
+            );
+            let (mut client, mut server) = (client.unwrap(), server.unwrap());
+            let remaining = source
+                .not_after()
+                .duration_since(SystemTime::now())
+                .unwrap();
+            assert!(
+                client
+                    .expiry
+                    .deadline()
+                    .duration_since(Instant::now())
+                    .abs_diff(remaining)
+                    < Duration::from_secs(1)
+            );
+
+            server.write_all(b"command").await.unwrap();
+            server.flush().await.unwrap();
+            let mut command = [0; 7];
+            client.read_exact(&mut command).await.unwrap();
+            assert_eq!(&command, b"command");
+            client.write_all(b"reply").await.unwrap();
+            client.flush().await.unwrap();
+            let mut reply = [0; 5];
+            server.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"reply");
+
+            // The fixture lives for 100 years; shorten this handshake's deadline.
+            let expiry = Instant::now() + Duration::from_millis(20);
+            client.expiry.as_mut().reset(expiry);
+            if buffered {
+                server.write_all(b"command").await.unwrap();
+                server.flush().await.unwrap();
+                sleep_until(expiry).await;
+            }
+            let err = timeout(Duration::from_secs(1), client.read_exact(&mut command))
+                .await
+                .expect("expiry must wake an idle reader")
+                .unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::ConnectionAborted);
+            assert!(
+                client.stream.is_none(),
+                "expiry must close the TLS transport"
+            );
+            assert_eq!(
+                client.write_all(b"reply").await.unwrap_err().kind(),
+                std::io::ErrorKind::ConnectionAborted
+            );
+            assert!(client.flush().await.is_err());
+            assert!(client.shutdown().await.is_err());
+        }
     }
 
     #[tokio::test]
