@@ -456,9 +456,10 @@ pkgs.testers.runNixOSTest {
         pid = runner.succeed("systemctl show -p MainPID --value kajiba-runner.service").strip()
         runner.succeed(f"kill -STOP {pid}")
         forge.wait_until_succeeds(f"test \"$(sqlite3 {db} \"SELECT state FROM job_attempt WHERE public_id = '{first}'\")\" = lost", timeout=120)
-        forge.wait_until_succeeds(f"test $(sqlite3 {db} \"SELECT COUNT(*) FROM job_attempt a JOIN job ON job.id = a.job_id JOIN run ON run.id = job.run_id WHERE run.public_id = '{r6}'\") -ge 2")
-        # Woken before the new lease ends: the old attempt still runs and reports late.
+        # A stale runner is never matched (it is the only one), so the replay waits for it to wake;
+        # the old attempt then reports late and is ignored.
         runner.succeed(f"kill -CONT {pid}")
+        forge.wait_until_succeeds(f"test $(sqlite3 {db} \"SELECT COUNT(*) FROM job_attempt a JOIN job ON job.id = a.job_id JOIN run ON run.id = job.run_id WHERE run.public_id = '{r6}'\") -ge 2")
         assert finished(r6) == "succeeded"
         runner.wait_until_succeeds(f"journalctl _SYSTEMD_UNIT=kajiba-runner.service -o cat | grep attempt-finished | grep -F {first}")
         tries = attempts(r6)
