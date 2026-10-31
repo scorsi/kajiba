@@ -1,5 +1,6 @@
 //! Runner-host requirements of the `nix` backend (0009), checked at startup.
 
+use kajiba_core::state::StateLock;
 use serde_json::Value;
 use std::{
     fs,
@@ -7,8 +8,8 @@ use std::{
     path::Path,
 };
 
-/// Keep private source caches and checkouts behind a runner-owned directory.
-pub fn prepare_state(path: &Path) -> Result<(), String> {
+/// Keep the returned lock for the runner lifetime; clean scratch before accepting jobs.
+pub fn prepare_state(path: &Path) -> Result<StateLock, String> {
     let check = || -> std::io::Result<()> {
         fs::DirBuilder::new()
             .recursive(true)
@@ -25,7 +26,14 @@ pub fn prepare_state(path: &Path) -> Result<(), String> {
         }
         Ok(())
     };
-    check().map_err(|err| format!("state_dir ({}): {err}", path.display()))
+    check().map_err(|err| format!("state_dir ({}): {err}", path.display()))?;
+    let lock = StateLock::acquire(&path.join("kajiba-runner.lock"))?;
+    match fs::remove_dir_all(path.join("scratch")) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("scratch ({}): {err}", path.display())),
+    }
+    Ok(lock)
 }
 
 /// Check `nix config show --json` for the runner `user`, member of `groups`: the build
@@ -122,6 +130,56 @@ pub async fn check(token: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn killed_runner_scratch_is_cleaned_only_after_exclusive_restart() {
+        const CHILD_STATE: &str = "KAJIBA_TEST_KILLED_RUNNER_STATE";
+        if let Some(state) = std::env::var_os(CHILD_STATE) {
+            let state = std::path::PathBuf::from(state);
+            let _lock = prepare_state(&state).unwrap();
+            fs::create_dir_all(state.join("scratch/attempt/.git")).unwrap();
+            fs::write(state.join("scratch/attempt/source"), "checkout").unwrap();
+            fs::create_dir_all(state.join("cache/repository.git")).unwrap();
+            fs::write(state.join("cache/repository.git/HEAD"), "cached").unwrap();
+            fs::write(state.join("ready"), "").unwrap();
+            loop {
+                std::thread::park();
+            }
+        }
+        let state =
+            std::env::temp_dir().join(format!("kajiba-killed-runner-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host::tests::killed_runner_scratch_is_cleaned_only_after_exclusive_restart",
+            ])
+            .env(CHILD_STATE, &state)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !state.join("ready").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let ready = state.join("ready").exists();
+        let refused = ready && prepare_state(&state).is_err();
+        let preserved = state.join("scratch/attempt/source").exists();
+        child.kill().unwrap();
+        assert!(!child.wait().unwrap().success());
+        assert!(ready, "child did not initialize its state");
+        assert!(refused, "a second runner must not clean active checkouts");
+        assert!(preserved);
+        let lock = prepare_state(&state).unwrap();
+        assert!(!state.join("scratch").exists());
+        assert_eq!(
+            fs::read_to_string(state.join("cache/repository.git/HEAD")).unwrap(),
+            "cached"
+        );
+        drop(lock);
+        let _lock = prepare_state(&state).unwrap();
+        fs::remove_dir_all(state).unwrap();
+    }
 
     #[test]
     fn state_is_private_and_unsafe_existing_paths_are_refused() {

@@ -144,7 +144,7 @@ async fn main() -> ExitCode {
 
 async fn serve(config: RunnerConfig) -> Result<(), String> {
     tracing::info!(event = "start", version = env!("CARGO_PKG_VERSION"));
-    host::prepare_state(&config.state_dir)?;
+    let _state_lock = host::prepare_state(&config.state_dir)?;
     host::check(&config.token_file).await?;
     let secret = std::fs::read(&config.token_file)
         .map_err(|err| format!("token_file ({}): {err}", config.token_file.display()))?;
