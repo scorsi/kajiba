@@ -284,6 +284,21 @@ Ordered tasks for ephemeral working-tree runs (0097); they come after the core t
 
 **Delegable**: test machinery (minimal flake with a trivial check, store preloading), lease/reconnection tests, proto message boilerplate.
 
+## Runner mTLS (after J6)
+
+**Deliverable**: runners authenticate to the forge with mutual TLS and X.509-SVIDs instead of a shared secret (0124). The forge terminates TLS itself on a second listener serving only `kajiba.runner.v1`; the reverse proxy relays that name as raw TCP by SNI. The shared secret and the runner's development mode are removed, with no fallback; server and runners switch together.
+
+Ordered tasks, one commit each, each leaving `nix flake check` green:
+
+1. **Dependencies** (0034): a new ADR records `rustls`, `tokio-rustls`, `rustls-pki-types` and `x509-parser` as direct (all already in `Cargo.lock`); the runner drops tonic's `tls-native-roots`.
+2. **Runner identity** (0005, 0008, 0019, 0026, 0104, 0105, 0110): a new ADR records the SPIFFE IDs, the second listener, the declared `spiffe_id` per runner, the removal of the secret and of the runner's development mode.
+3. **SVID loading and peer verification** (0124): `kajiba_core::svid` loads the SVID, key and bundle, reloads them when the files change (new ADR), parses SPIFFE IDs and verifies peers on both sides. Tests: ID rules, chains (other CA, CA leaf, two URI SANs, wrong EKU, expired), reload and kept material on a broken pair.
+4. **Configuration**: server `[runner_listener]` (`listen`, `trust_domain`, `svid_file`, `key_file`, `bundle_file`) and `runners.<name>.spiffe_id` replacing `token_file`; runner `[tls]` (`trust_domain`, `server_id`, `svid_file`, `key_file`, `bundle_file`), `https` URL, `token_file` and `development` removed; module options follow; `config check` tests.
+5. **Runner listener**: rustls acceptor, ALPN `h2` only, HTTP/2, only `RunnerService`, the peer's ID passed to the handlers; the bounds of 0119 kept with a handshake timeout of 10 s and 64 connections; `RunnerService` removed from the plain router; refusal reason `identity`.
+6. **Server authorization by identity**: `Connect` and `FetchRunBundle` authorize by the peer's ID; the bearer secret code is deleted; streams of a disabled runner or whose peer SVID expired are cut (injected clock test).
+7. **Runner client**: custom connector with tokio-rustls, SNI the URL's host, ALPN `h2`, reloadable client certificate, server verified by bundle and `server_id`; the 0009 host check applies to `key_file`.
+8. **nixosTests**: `nixos-ci` and `nixos-ci-worktree` with a test CA, SVIDs for forge, runner, an undeclared runner and another CA, a TCP relay by SNI in front of the runner listener, the refusals, `UNIMPLEMENTED` for `kajiba.runner.v1` on the plain port, and an SVID reissued and picked up without restart.
+
 ---
 
 ## J7 — Mirroring to GitHub
