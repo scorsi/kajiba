@@ -127,11 +127,26 @@ impl Cache {
             self.fetch(&cache, attempt, sha, &recent).await?;
         }
         recent.insert(0, sha.into());
-        let dropped = recent.split_off(recent.len().min(KEPT));
-        std::fs::write(cache.join(RECENT), recent.join("\n"))
+        recent.truncate(KEPT);
+        let incoming = cache.join(format!("{RECENT}.tmp"));
+        let mut file = std::fs::File::create(&incoming).map_err(|err| format!("cache: {err}"))?;
+        file.write_all(recent.join("\n").as_bytes())
+            .and_then(|_| file.sync_all())
+            .and_then(|_| std::fs::rename(&incoming, cache.join(RECENT)))
+            .and_then(|_| std::fs::File::open(&cache)?.sync_all())
             .map_err(|err| format!("cache: {err}"))?;
+        // An interrupted eviction can leave refs that are no longer in RECENT.
+        let refs = git(
+            &cache,
+            &["for-each-ref", "--format=%(refname)", "refs/kept/"],
+        )
+        .await?;
+        let dropped: Vec<_> = refs
+            .lines()
+            .filter(|name| !recent.iter().any(|id| *name == format!("refs/kept/{id}")))
+            .collect();
         for id in &dropped {
-            git(&cache, &["update-ref", "-d", &format!("refs/kept/{id}")]).await?;
+            git(&cache, &["update-ref", "-d", id]).await?;
         }
         if !dropped.is_empty() {
             git(&cache, &["gc", "-q", "--prune=now"]).await?;

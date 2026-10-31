@@ -415,6 +415,76 @@ async fn the_cache_keeps_the_sixteen_most_recent_commits() {
 }
 
 #[tokio::test]
+async fn interrupted_eviction_is_reconciled_on_the_next_preparation() {
+    let dir = std::env::temp_dir().join(format!(
+        "kajiba-runner-cache-interrupted-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cache = Arc::new(Cache::new(
+        &dir.join("state"),
+        RunnerServiceClient::new(Endpoint::from_static("http://127.0.0.1:1").connect_lazy()),
+        Identity {
+            name: "build-1".into(),
+            hostname: "builder.example.org".into(),
+            capabilities: Capabilities::default(),
+            secret: "s3cret".into(),
+        },
+    ));
+    let mut setup = Setup {
+        dir,
+        fake: Fake::default(),
+        cache,
+        commits: Vec::new(),
+    };
+    let cached = setup.cached();
+    std::fs::create_dir_all(&cached).unwrap();
+    run(&cached, &["init", "-q", "--bare"]);
+    let tree = stdin(&cached, &["mktree"], "");
+    for index in 0..KEPT + 2 {
+        // Independent commits let the test prove that GC reclaims evicted objects.
+        let sha = run(&cached, &["commit-tree", &tree, "-m", &index.to_string()]);
+        run(&cached, &["update-ref", &format!("refs/kept/{sha}"), &sha]);
+        setup.commits.push(sha);
+    }
+    let recent = setup.commits[..KEPT].join("\n");
+    // Eviction saved its new list but stopped before deleting the obsolete refs.
+    std::fs::write(cached.join(RECENT), &recent).unwrap();
+    for attempt in 1..=2 {
+        drop(
+            setup
+                .cache
+                .prepare(&setup.assignment(attempt, 0))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            std::fs::read_to_string(cached.join(RECENT)).unwrap(),
+            recent
+        );
+        assert_eq!(
+            run(
+                &cached,
+                &["for-each-ref", "--format=%(refname)", "refs/kept/"]
+            )
+            .lines()
+            .count(),
+            KEPT
+        );
+        for sha in &setup.commits[KEPT..] {
+            assert!(git(&cached, &["cat-file", "-e", sha]).await.is_err());
+        }
+    }
+    // A failed replacement must leave the previous recent list intact.
+    std::fs::create_dir(cached.join(format!("{RECENT}.tmp"))).unwrap();
+    assert!(setup.cache.prepare(&setup.assignment(3, 1)).await.is_err());
+    assert_eq!(
+        std::fs::read_to_string(cached.join(RECENT)).unwrap(),
+        recent
+    );
+}
+
+#[tokio::test]
 async fn malformed_assignments_touch_no_path() {
     let setup = setup("malformed", 1).await;
     let mut assignment = setup.assignment(1, 0);
