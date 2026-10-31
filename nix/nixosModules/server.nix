@@ -177,6 +177,7 @@ let
     ci = {
       log_retention = cfg.ci.logRetention;
       artifact_retention = cfg.ci.artifactRetention;
+      run_at = cfg.ci.runAt;
     };
     dump = {
       dir = if cfg.dump.dir == "/var/lib/kajiba-dumps" then null else cfg.dump.dir;
@@ -492,6 +493,7 @@ in
     ci = {
       logRetention = optional types.str "14d" "CI log retention (0010).";
       artifactRetention = optional types.str "14d" "CI artifact retention (0010).";
+      runAt = optional types.str "03:00" "Local time `HH:MM` of the daily CI retention pass (0115).";
     };
     persistedPaths = mkOption {
       type = types.listOf types.str;

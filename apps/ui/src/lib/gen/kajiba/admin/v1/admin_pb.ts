@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file kajiba/admin/v1/admin.proto.
  */
 export const file_kajiba_admin_v1_admin: GenFile = /*@__PURE__*/
-  fileDesc("ChtrYWppYmEvYWRtaW4vdjEvYWRtaW4ucHJvdG8SD2thamliYS5hZG1pbi52MSIdCg1FbnJvbGxSZXF1ZXN0EgwKBHVzZXIYASABKAkiHQoORW5yb2xsUmVzcG9uc2USCwoDdXJsGAEgASgJIjkKEExpc3RSZXBvc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiUgoRTGlzdFJlcG9zUmVzcG9uc2USJAoFcmVwb3MYASADKAsyFS5rYWppYmEuYWRtaW4udjEuUmVwbxIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiSAoEUmVwbxIRCglwdWJsaWNfaWQYASABKAkSDQoFb3duZXIYAiABKAkSDAoEbmFtZRgDIAEoCRIQCghhcmNoaXZlZBgEIAEoCCJCCg1JbXBvcnRSZXF1ZXN0EgwKBHJlcG8YASABKAkSDgoGc291cmNlGAIgASgJEhMKC2NyZWRlbnRpYWxzGAMgASgJIh4KDkltcG9ydFJlc3BvbnNlEgwKBHJlZnMYASABKA0y+AEKDEFkbWluU2VydmljZRJJCgZFbnJvbGwSHi5rYWppYmEuYWRtaW4udjEuRW5yb2xsUmVxdWVzdBofLmthamliYS5hZG1pbi52MS5FbnJvbGxSZXNwb25zZRJSCglMaXN0UmVwb3MSIS5rYWppYmEuYWRtaW4udjEuTGlzdFJlcG9zUmVxdWVzdBoiLmthamliYS5hZG1pbi52MS5MaXN0UmVwb3NSZXNwb25zZRJJCgZJbXBvcnQSHi5rYWppYmEuYWRtaW4udjEuSW1wb3J0UmVxdWVzdBofLmthamliYS5hZG1pbi52MS5JbXBvcnRSZXNwb25zZWIGcHJvdG8z");
+  fileDesc("ChtrYWppYmEvYWRtaW4vdjEvYWRtaW4ucHJvdG8SD2thamliYS5hZG1pbi52MSIdCg1FbnJvbGxSZXF1ZXN0EgwKBHVzZXIYASABKAkiHQoORW5yb2xsUmVzcG9uc2USCwoDdXJsGAEgASgJIjkKEExpc3RSZXBvc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiUgoRTGlzdFJlcG9zUmVzcG9uc2USJAoFcmVwb3MYASADKAsyFS5rYWppYmEuYWRtaW4udjEuUmVwbxIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiSAoEUmVwbxIRCglwdWJsaWNfaWQYASABKAkSDQoFb3duZXIYAiABKAkSDAoEbmFtZRgDIAEoCRIQCghhcmNoaXZlZBgEIAEoCCJCCg1JbXBvcnRSZXF1ZXN0EgwKBHJlcG8YASABKAkSDgoGc291cmNlGAIgASgJEhMKC2NyZWRlbnRpYWxzGAMgASgJIh4KDkltcG9ydFJlc3BvbnNlEgwKBHJlZnMYASABKA0iEgoQUmV0ZW50aW9uUmVxdWVzdCIhChFSZXRlbnRpb25SZXNwb25zZRIMCgRsb2dzGAEgASgEMswCCgxBZG1pblNlcnZpY2USSQoGRW5yb2xsEh4ua2FqaWJhLmFkbWluLnYxLkVucm9sbFJlcXVlc3QaHy5rYWppYmEuYWRtaW4udjEuRW5yb2xsUmVzcG9uc2USUgoJTGlzdFJlcG9zEiEua2FqaWJhLmFkbWluLnYxLkxpc3RSZXBvc1JlcXVlc3QaIi5rYWppYmEuYWRtaW4udjEuTGlzdFJlcG9zUmVzcG9uc2USSQoGSW1wb3J0Eh4ua2FqaWJhLmFkbWluLnYxLkltcG9ydFJlcXVlc3QaHy5rYWppYmEuYWRtaW4udjEuSW1wb3J0UmVzcG9uc2USUgoJUmV0ZW50aW9uEiEua2FqaWJhLmFkbWluLnYxLlJldGVudGlvblJlcXVlc3QaIi5rYWppYmEuYWRtaW4udjEuUmV0ZW50aW9uUmVzcG9uc2ViBnByb3RvMw");
 
 /**
  * @generated from message kajiba.admin.v1.EnrollRequest
@@ -177,6 +177,38 @@ export const ImportResponseSchema: GenMessage<ImportResponse> = /*@__PURE__*/
   messageDesc(file_kajiba_admin_v1_admin, 6);
 
 /**
+ * @generated from message kajiba.admin.v1.RetentionRequest
+ */
+export type RetentionRequest = Message<"kajiba.admin.v1.RetentionRequest"> & {
+};
+
+/**
+ * Describes the message kajiba.admin.v1.RetentionRequest.
+ * Use `create(RetentionRequestSchema)` to create a new message.
+ */
+export const RetentionRequestSchema: GenMessage<RetentionRequest> = /*@__PURE__*/
+  messageDesc(file_kajiba_admin_v1_admin, 7);
+
+/**
+ * @generated from message kajiba.admin.v1.RetentionResponse
+ */
+export type RetentionResponse = Message<"kajiba.admin.v1.RetentionResponse"> & {
+  /**
+   * Number of attempts whose logs were deleted.
+   *
+   * @generated from field: uint64 logs = 1;
+   */
+  logs: bigint;
+};
+
+/**
+ * Describes the message kajiba.admin.v1.RetentionResponse.
+ * Use `create(RetentionResponseSchema)` to create a new message.
+ */
+export const RetentionResponseSchema: GenMessage<RetentionResponse> = /*@__PURE__*/
+  messageDesc(file_kajiba_admin_v1_admin, 8);
+
+/**
  * Host-local administration, authorized by Unix peer credentials (0014).
  *
  * @generated from service kajiba.admin.v1.AdminService
@@ -214,6 +246,17 @@ export const AdminService: GenService<{
     methodKind: "unary";
     input: typeof ImportRequestSchema;
     output: typeof ImportResponseSchema;
+  },
+  /**
+   * Run the CI retention pass now: delete the logs of attempts finished more than
+   * `ci.log_retention` ago; runs are kept (0010, 0115).
+   *
+   * @generated from rpc kajiba.admin.v1.AdminService.Retention
+   */
+  retention: {
+    methodKind: "unary";
+    input: typeof RetentionRequestSchema;
+    output: typeof RetentionResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_kajiba_admin_v1_admin, 0);

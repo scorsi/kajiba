@@ -34,3 +34,4 @@ token_file = "/run/secrets/kajiba-github-token"
 
 [ci]
 log_retention = "14d"
+run_at = "03:00"

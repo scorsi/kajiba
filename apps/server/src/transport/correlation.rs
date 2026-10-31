@@ -61,6 +61,7 @@ fn known(path: &str) -> Option<&'static str> {
         "/kajiba.admin.v1.AdminService/Enroll" => "/kajiba.admin.v1.AdminService/Enroll",
         "/kajiba.admin.v1.AdminService/ListRepos" => "/kajiba.admin.v1.AdminService/ListRepos",
         "/kajiba.admin.v1.AdminService/Import" => "/kajiba.admin.v1.AdminService/Import",
+        "/kajiba.admin.v1.AdminService/Retention" => "/kajiba.admin.v1.AdminService/Retention",
         "/kajiba.v1.AuthService/Logout" => "/kajiba.v1.AuthService/Logout",
         "/kajiba.v1.AuthService/GetViewer" => "/kajiba.v1.AuthService/GetViewer",
         "/kajiba.v1.HealthService/Check" => "/kajiba.v1.HealthService/Check",

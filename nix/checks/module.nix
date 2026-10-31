@@ -128,6 +128,7 @@ let
       ci = {
         logRetention = "7d";
         artifactRetention = "30d";
+        runAt = "04:30";
       };
       dump = {
         dir = "/srv/kajiba-dumps";
@@ -229,6 +230,7 @@ let
     ci = {
       log_retention = "7d";
       artifact_retention = "30d";
+      run_at = "04:30";
     };
     dump = {
       dir = "/srv/kajiba-dumps";

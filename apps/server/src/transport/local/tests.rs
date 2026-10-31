@@ -40,6 +40,8 @@ pub(in crate::transport) async fn admin(dir: &Path, users: &str) -> Admin {
         gate: Arc::default(),
         bus: Arc::default(),
         state_dir: dir.into(),
+        logs: dir.join("logs"),
+        log_retention: Duration::from_secs(60),
     }
 }
 
@@ -504,4 +506,34 @@ async fn import_never_returns_or_logs_source_credentials() {
     assert_eq!(import_file().await, std::process::ExitCode::FAILURE);
     server.abort();
     git_server.abort();
+}
+
+#[tokio::test]
+async fn retention_deletes_old_logs_on_demand() {
+    let dir = SocketDir::new();
+    let local = bind(&dir.socket(), Arc::default()).unwrap();
+    let admin = admin(&dir.0, "[users.alice]").await;
+    sqlx::query("INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES
+        (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo');
+        INSERT INTO runner (id, public_id, name, capabilities, version, connected) VALUES (1, '00000000000000000000000001', 'build-1', '{}', '', 0);
+        INSERT INTO run (id, public_id, repo_id, sha, trigger, state, created_at) VALUES (1, '00000000000000000000000001', 1, 'a', 'manual', 'failed', 0);
+        INSERT INTO job (id, public_id, run_id, name, requirements, replayable, max_attempts, state, created_at) VALUES (1, '00000000000000000000000001', 1, 'flake-check', '{}', 1, 3, 'failed', 0);
+        INSERT INTO job_attempt (id, public_id, job_id, number, runner_id, state, lease_expires_at, started_at, finished_at) VALUES
+        (1, '00000000000000000000000001', 1, 1, 1, 'failed', 0, 0, 1);
+        INSERT INTO log_chunk (attempt_id, seq, step_idx, offset, length) VALUES (1, 1, 0, 0, 3)")
+        .execute(&mut *admin.writer.lock().await)
+        .await
+        .unwrap();
+    fs::create_dir(&admin.logs).unwrap();
+    let file = admin.logs.join("00000000000000000000000001.log");
+    fs::write(&file, "abc").unwrap();
+    let server = tokio::spawn(serve(local, admin, Arc::default(), std::future::pending()));
+    assert_eq!(retention(&dir.socket()).await.unwrap(), 1);
+    assert!(!file.exists());
+    assert_eq!(
+        crate::admin_retention(&dir.socket()).await,
+        std::process::ExitCode::SUCCESS
+    );
+    assert_eq!(crate::retention_line(0), "logs deleted: 0 attempts");
+    server.abort();
 }

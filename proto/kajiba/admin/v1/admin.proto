@@ -13,6 +13,9 @@ service AdminService {
   // Import the branches and tags of a path, bundle or URL into a declared, empty
   // repository; the refs become `push` events by `system` (0003, 0026).
   rpc Import(ImportRequest) returns (ImportResponse);
+  // Run the CI retention pass now: delete the logs of attempts finished more than
+  // `ci.log_retention` ago; runs are kept (0010, 0115).
+  rpc Retention(RetentionRequest) returns (RetentionResponse);
 }
 
 message EnrollRequest {
@@ -54,4 +57,11 @@ message ImportRequest {
 message ImportResponse {
   // Number of imported refs.
   uint32 refs = 1;
+}
+
+message RetentionRequest {}
+
+message RetentionResponse {
+  // Number of attempts whose logs were deleted.
+  uint64 logs = 1;
 }

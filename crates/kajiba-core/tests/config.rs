@@ -356,6 +356,31 @@ fn durations_accept_each_unit_and_reject_bad_or_overflowing_values() {
 }
 
 #[test]
+fn ci_retention_is_positive_without_floor_at_a_local_time() {
+    let config = ServerConfig::parse(&format!(
+        "{MINIMAL}\n[ci]\nlog_retention='1m'\nrun_at='23:59'"
+    ))
+    .unwrap();
+    assert_eq!(config.ci.log_retention, Duration::from_secs(60));
+    assert_eq!(config.ci.run_at, (23, 59));
+    assert_eq!(ServerConfig::parse(MINIMAL).unwrap().ci.run_at, (3, 0));
+    for field in ["log_retention", "artifact_retention"] {
+        server_error(
+            &format!("{MINIMAL}\n[ci]\n{field}='0s'"),
+            "expected a positive duration",
+        );
+    }
+    for value in [
+        "24:00", "12:60", "3:00", "03:0", "0300", "", "03:00:00", "+3:00",
+    ] {
+        server_error(
+            &format!("{MINIMAL}\n[ci]\nrun_at='{value}'"),
+            "expected a local time HH:MM",
+        );
+    }
+}
+
+#[test]
 fn auth_ttls_are_bounded() {
     for (field, accepted, refused) in [
         (

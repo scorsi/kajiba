@@ -13,6 +13,7 @@ pub mod passkeys;
 pub mod permissions;
 pub mod pushes;
 pub mod repos;
+pub mod retention;
 pub mod runners;
 pub mod runs;
 pub mod sessions;
@@ -169,6 +170,7 @@ mod tests {
     mod pushes;
     mod repos;
     mod repositories;
+    mod retention;
     mod runners;
     mod runs;
     mod users;

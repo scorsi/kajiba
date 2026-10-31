@@ -75,6 +75,8 @@ enum AdminCommand {
         #[arg(long)]
         credentials_file: Option<PathBuf>,
     },
+    /// Delete CI logs older than `ci.log_retention` now, as the daily pass does.
+    Retention,
     /// Administer repositories (not implemented yet).
     Repo {
         #[command(subcommand)]
@@ -193,6 +195,7 @@ async fn main() -> ExitCode {
                 now: db::runs::now,
                 wake: wake.clone(),
             });
+            let logs = config.state_dir.join("ci/logs");
             let admin = transport::local::Admin {
                 git_socket: config.git.socket.clone(),
                 writer: writer.clone(),
@@ -201,6 +204,8 @@ async fn main() -> ExitCode {
                 gate: gate.clone(),
                 bus: bus.clone(),
                 state_dir: config.git.state_dir.clone(),
+                logs: logs.clone(),
+                log_retention: config.ci.log_retention,
             };
             health.set_runners(transport::runners::Declared {
                 runners: config.runners.clone(),
@@ -212,6 +217,7 @@ async fn main() -> ExitCode {
                 result = transport::serve(&config, health, readers, bus.clone(), admin) => result,
                 () = dispatcher.run(&bus, &writer) => unreachable!("dispatcher runs until shutdown"),
                 () = db::sessions::purge_periodically(&writer) => unreachable!("purge runs until shutdown"),
+                () = db::retention::purge_daily(&writer, &logs, config.ci.log_retention, config.ci.run_at) => unreachable!("retention runs until shutdown"),
                 () = gate.recover_periodically(&db::events::SystemClock, &writer, &bus, &config.git.state_dir, &store) => unreachable!("recovery runs until shutdown"),
             } {
                 Ok(()) => ExitCode::SUCCESS,
@@ -243,6 +249,9 @@ async fn main() -> ExitCode {
                 credentials_file,
             } => {
                 return admin_import(&socket, repo, source, source_file, credentials_file).await;
+            }
+            AdminCommand::Retention => {
+                return admin_retention(&socket).await;
             }
             AdminCommand::Repo {
                 command: RepoCommand::List,
@@ -329,6 +338,27 @@ async fn admin_repo_list(path: &std::path::Path) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+async fn admin_retention(path: &std::path::Path) -> ExitCode {
+    match transport::local::retention(path).await {
+        Ok(logs) => {
+            println!("{}", retention_line(logs));
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            let message = match err.downcast_ref::<tonic::Status>() {
+                Some(status) => status.message().to_owned(),
+                None => err.to_string(),
+            };
+            log::error("fatal", &format!("admin retention: {message}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn retention_line(logs: u64) -> String {
+    format!("logs deleted: {logs} attempts")
 }
 
 /// `<public id>\t<owner>/<name>`, then `\tarchived` for an archived repository.

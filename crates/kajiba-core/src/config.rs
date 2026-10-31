@@ -305,10 +305,13 @@ pub struct RepoMirrorConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CiConfig {
-    #[serde(deserialize_with = "duration")]
+    #[serde(deserialize_with = "positive")]
     pub log_retention: Duration,
-    #[serde(deserialize_with = "duration")]
+    #[serde(deserialize_with = "positive")]
     pub artifact_retention: Duration,
+    /// Local time `(hour, minute)` of the daily retention pass (ADR 0115).
+    #[serde(deserialize_with = "local_time")]
+    pub run_at: (u8, u8),
 }
 
 impl Default for CiConfig {
@@ -316,8 +319,24 @@ impl Default for CiConfig {
         Self {
             log_retention: Duration::from_secs(14 * 86400),
             artifact_retention: Duration::from_secs(14 * 86400),
+            run_at: (3, 0),
         }
     }
+}
+
+/// `HH:MM`, 24-hour local time.
+fn local_time<'de, D: Deserializer<'de>>(de: D) -> Result<(u8, u8), D::Error> {
+    let value = String::deserialize(de)?;
+    let digits = |text: &str| {
+        (text.len() == 2 && text.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| text.parse::<u8>().ok())
+            .flatten()
+    };
+    value
+        .split_once(':')
+        .and_then(|(hour, minute)| Some((digits(hour)?, digits(minute)?)))
+        .filter(|(hour, minute)| *hour < 24 && *minute < 60)
+        .ok_or_else(|| serde::de::Error::custom("expected a local time HH:MM"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -441,6 +460,15 @@ fn duration<'de, D: Deserializer<'de>>(de: D) -> Result<Duration, D::Error> {
     parsed
         .map(Duration::from_secs)
         .ok_or_else(|| serde::de::Error::custom("expected duration <n>s|m|h|d within u64 seconds"))
+}
+
+/// A retention: positive, without floor (ADR 0115).
+fn positive<'de, D: Deserializer<'de>>(de: D) -> Result<Duration, D::Error> {
+    let value = duration(de)?;
+    if value.is_zero() {
+        return Err(serde::de::Error::custom("expected a positive duration"));
+    }
+    Ok(value)
 }
 
 fn parse<T: DeserializeOwned>(input: &str) -> Result<T, String> {
