@@ -102,26 +102,36 @@ impl Repos {
     /// The git directory of a repository the caller can read, active or archived (0026),
     /// by public id or by `<owner>/<name>`, current or previous.
     async fn browse_dir(&self, user: i64, repo: &str) -> Result<PathBuf, Status> {
-        let readers = self.readers()?;
-        let (id, public_id) = match repo.split_once('/') {
-            Some((owner, name)) => crate::db::repos::find(readers, owner, name)
-                .await
-                .map_err(internal)?
-                .map(|found| (found.id, found.public_id)),
-            None => sqlx::query_as("SELECT id, public_id FROM repo WHERE public_id = ?")
-                .bind(repo)
-                .fetch_optional(readers)
-                .await
-                .map_err(internal)?,
-        }
-        .ok_or_else(not_found)?;
-        readable(readers, user, id).await?;
+        let (_, public_id) = find_readable(self.readers()?, user, repo).await?;
         Ok(self.0.git_state_dir.join(format!("repos/{public_id}.git")))
     }
 }
 
+/// The row id and public id of a repository the caller can read, active or archived,
+/// by public id or by `<owner>/<name>`, current or previous; REPO_NOT_FOUND otherwise.
+pub(super) async fn find_readable(
+    readers: &SqlitePool,
+    user: i64,
+    repo: &str,
+) -> Result<(i64, String), Status> {
+    let (id, public_id) = match repo.split_once('/') {
+        Some((owner, name)) => crate::db::repos::find(readers, owner, name)
+            .await
+            .map_err(internal)?
+            .map(|found| (found.id, found.public_id)),
+        None => sqlx::query_as("SELECT id, public_id FROM repo WHERE public_id = ?")
+            .bind(repo)
+            .fetch_optional(readers)
+            .await
+            .map_err(internal)?,
+    }
+    .ok_or_else(not_found)?;
+    readable(readers, user, id).await?;
+    Ok((id, public_id))
+}
+
 /// The authenticated caller the auth layer put in the request (0014).
-fn caller<T>(request: &Request<T>) -> Result<i64, Status> {
+pub(super) fn caller<T>(request: &Request<T>) -> Result<i64, Status> {
     request
         .extensions()
         .get::<super::auth::Principal>()
@@ -130,7 +140,7 @@ fn caller<T>(request: &Request<T>) -> Result<i64, Status> {
 }
 
 /// ADR 0014's role check: without a read role the repository does not exist (0020).
-async fn readable(
+pub(super) async fn readable(
     executor: impl sqlx::SqliteExecutor<'_>,
     user: i64,
     repo: i64,
@@ -184,7 +194,7 @@ async fn blocking<T: Send + 'static>(
 
 /// `NotFound` from git becomes `<reason>`, `TooLarge` the RESOURCE_EXHAUSTED of what
 /// was exceeded (ADR 0043, 0047), anything else INTERNAL.
-fn git_error(reason: &'static str) -> impl Fn(kajiba_gitstore::Error) -> Status {
+pub(super) fn git_error(reason: &'static str) -> impl Fn(kajiba_gitstore::Error) -> Status {
     use kajiba_gitstore::{Limit, MAX_COMMIT_OBJECT_BYTES, MAX_TREE_OBJECT_BYTES};
     move |err| match err {
         kajiba_gitstore::Error::NotFound => refused(
@@ -280,7 +290,7 @@ fn not_found() -> Status {
     )
 }
 
-fn internal(err: sqlx::Error) -> Status {
+pub(super) fn internal(err: sqlx::Error) -> Status {
     Status::internal(format!("repositories: {err}"))
 }
 

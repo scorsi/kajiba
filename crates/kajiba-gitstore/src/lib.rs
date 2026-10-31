@@ -242,6 +242,9 @@ pub trait GitStore {
         have: &[String],
         out: &mut dyn std::io::Write,
     ) -> Result<()>;
+    /// Whether `commit` (a full id) is a commit reachable from any ref of the repository,
+    /// whatever its namespace; read only, blocking.
+    fn reachable(&self, repo: &Path, commit: &str) -> Result<bool>;
 }
 
 /// The single ref of a run bundle (ADR 0106).
@@ -810,6 +813,47 @@ impl GitStore for Gix<'_> {
             return Err(Error::Git(format!("git pack-objects: {status}")));
         }
         Ok(())
+    }
+
+    fn reachable(&self, repo: &Path, commit: &str) -> Result<bool> {
+        let opened = self.open(repo)?;
+        let lowercase = commit
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        let is_commit = gix::ObjectId::from_hex(commit.as_bytes())
+            .ok()
+            .filter(|_| lowercase)
+            .and_then(|id| opened.try_find_header(id).ok().flatten())
+            .is_some_and(|header| header.kind() == gix::object::Kind::Commit);
+        if !is_commit {
+            return Ok(false);
+        }
+        let mut command = git();
+        if let Some(path) = self.trusted(repo) {
+            command
+                .arg("-c")
+                .arg(format!("safe.directory={}", path.display()));
+        }
+        let output = command
+            .arg("-C")
+            .arg(repo)
+            .args([
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname)",
+                "--contains",
+                commit,
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|err| Error::Git(format!("git: {err}")))?;
+        if !output.status.success() {
+            return Err(Error::Git(format!(
+                "git for-each-ref: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(!output.stdout.is_empty())
     }
 
     fn push_facts(

@@ -18,6 +18,7 @@ use kajiba_proto::v1::{
     check_response::ServingStatus,
     health_service_server::{HealthService, HealthServiceServer},
     repo_service_server::RepoServiceServer,
+    run_service_server::RunServiceServer,
     token_service_server::TokenServiceServer,
 };
 use sqlx::SqlitePool;
@@ -173,6 +174,9 @@ fn router(
             RepoServiceServer::new(repos::Repos(health.clone()))
                 // Bound inbound work before handler admission (ADR 0057).
                 .max_decoding_message_size(16 * 1024),
+        )
+        .add_service(
+            RunServiceServer::new(runs::Runs(health.clone())).max_decoding_message_size(16 * 1024),
         )
         .into_axum_router()
         // Browsing responses keep their permit through delivery (ADR 0050).
@@ -471,6 +475,7 @@ pub mod local;
 pub mod raw;
 pub mod repos;
 pub mod runners;
+mod runs;
 mod stream;
 mod tokens;
 mod ui;

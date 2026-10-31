@@ -1219,3 +1219,37 @@ fn bundles_are_incremental_over_the_commits_the_receiver_holds() {
     assert_eq!(bundle(&tag, &[]), Err(Error::NotFound));
     assert_eq!(bundle("zz", &[]), Err(Error::NotFound));
 }
+
+#[test]
+fn reachability_counts_every_ref_namespace() {
+    let f = fixture("reachable");
+    let t = "1700000300 +0000";
+    let dangling = git(
+        &f.bare,
+        &[
+            "commit-tree",
+            &format!("{}^{{tree}}", f.first),
+            "-m",
+            "dangling",
+        ],
+        t,
+    );
+    assert!(Gix.reachable(&f.bare, &f.first).unwrap());
+    assert!(Gix.reachable(&f.bare, &f.third).unwrap());
+    assert!(!Gix.reachable(&f.bare, &dangling).unwrap());
+    git(
+        &f.bare,
+        &["update-ref", "refs/contrib/alice/x", &dangling],
+        t,
+    );
+    assert!(Gix.reachable(&f.bare, &dangling).unwrap());
+    let tag = git(&f.bare, &["rev-parse", "v1"], t);
+    for id in [
+        tag.as_str(),
+        "ffffffffffffffffffffffffffffffffffffffff",
+        "zz",
+        &f.first.to_uppercase(),
+    ] {
+        assert!(!Gix.reachable(&f.bare, id).unwrap(), "{id}");
+    }
+}
