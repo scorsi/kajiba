@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file kajiba/v1/repo.proto.
  */
 export const file_kajiba_v1_repo: GenFile = /*@__PURE__*/
-  fileDesc("ChRrYWppYmEvdjEvcmVwby5wcm90bxIJa2FqaWJhLnYxIj0KDkdldFJlcG9SZXF1ZXN0EhMKCXB1YmxpY19pZBgBIAEoCUgAEg4KBG5hbWUYAiABKAlIAEIGCgRyZXBvIjAKD0dldFJlcG9SZXNwb25zZRIdCgRyZXBvGAEgASgLMg8ua2FqaWJhLnYxLlJlcG8iOQoQTGlzdFJlcG9zUmVxdWVzdBIRCglwYWdlX3NpemUYASABKAUSEgoKcGFnZV90b2tlbhgCIAEoCSJMChFMaXN0UmVwb3NSZXNwb25zZRIeCgVyZXBvcxgBIAMoCzIPLmthamliYS52MS5SZXBvEhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSK+AgoEUmVwbxIRCglwdWJsaWNfaWQYASABKAkSDQoFb3duZXIYAiABKAkSDAoEbmFtZRgDIAEoCRITCgtkZXNjcmlwdGlvbhgEIAEoCRIpCgp2aXNpYmlsaXR5GAUgASgOMhUua2FqaWJhLnYxLlZpc2liaWxpdHkSFgoOZGVmYXVsdF9icmFuY2gYBiABKAkSIgoHY2lfbW9kZRgMIAEoDjIRLmthamliYS52MS5DaU1vZGUSFgoOcHJldmlvdXNfbmFtZXMYCCADKAkSKgoLcGVybWlzc2lvbnMYCSADKAsyFS5rYWppYmEudjEuUGVybWlzc2lvbhIiCgdtaXJyb3JzGAogAygLMhEua2FqaWJhLnYxLk1pcnJvchIQCghhcmNoaXZlZBgLIAEoCEoECAcQCFIKY2lfZW5hYmxlZCI5CgpQZXJtaXNzaW9uEgwKBHVzZXIYASABKAkSHQoEcm9sZRgCIAEoDjIPLmthamliYS52MS5Sb2xlIkEKBk1pcnJvchISCgpyZW1vdGVfdXJsGAEgASgJEhIKCmNyZWRlbnRpYWwYAiABKAkSDwoHZW5hYmxlZBgDIAEoCCI+Cg5HZXRUcmVlUmVxdWVzdBIMCgRyZXBvGAEgASgJEhAKCHJldmlzaW9uGAIgASgJEgwKBHBhdGgYAyABKAkiSwoPR2V0VHJlZVJlc3BvbnNlEhEKCWNvbW1pdF9pZBgBIAEoCRIlCgdlbnRyaWVzGAIgAygLMhQua2FqaWJhLnYxLlRyZWVFbnRyeSJJCglUcmVlRW50cnkSDAoEbmFtZRgBIAEoCRIiCgRraW5kGAIgASgOMhQua2FqaWJhLnYxLkVudHJ5S2luZBIKCgJpZBgDIAEoCSI+Cg5HZXRCbG9iUmVxdWVzdBIMCgRyZXBvGAEgASgJEhAKCHJldmlzaW9uGAIgASgJEgwKBHBhdGgYAyABKAkiNQoPR2V0QmxvYlJlc3BvbnNlEhEKCWNvbW1pdF9pZBgBIAEoCRIPCgdjb250ZW50GAIgASgMIlsKEkxpc3RDb21taXRzUmVxdWVzdBIMCgRyZXBvGAEgASgJEhAKCHJldmlzaW9uGAIgASgJEhEKCXBhZ2Vfc2l6ZRgDIAEoBRISCgpwYWdlX3Rva2VuGAQgASgJIlIKE0xpc3RDb21taXRzUmVzcG9uc2USIgoHY29tbWl0cxgBIAMoCzIRLmthamliYS52MS5Db21taXQSFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJIpUBCgZDb21taXQSCgoCaWQYASABKAkSEgoKcGFyZW50X2lkcxgCIAMoCRITCgthdXRob3JfbmFtZRgDIAEoCRIUCgxhdXRob3JfZW1haWwYBCABKAkSLwoLY29tbWl0X3RpbWUYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg8KB21lc3NhZ2UYBiABKAkiNgoUR2V0Q29tbWl0RGlmZlJlcXVlc3QSDAoEcmVwbxgBIAEoCRIQCghyZXZpc2lvbhgCIAEoCSJiChVHZXRDb21taXREaWZmUmVzcG9uc2USIQoGY29tbWl0GAEgASgLMhEua2FqaWJhLnYxLkNvbW1pdBImCgdjaGFuZ2VzGAIgAygLMhUua2FqaWJhLnYxLkZpbGVDaGFuZ2UiXwoKRmlsZUNoYW5nZRIMCgRwYXRoGAEgASgJEiMKBGtpbmQYAiABKA4yFS5rYWppYmEudjEuQ2hhbmdlS2luZBIOCgZvbGRfaWQYAyABKAkSDgoGbmV3X2lkGAQgASgJKlgKBkNpTW9kZRIXChNDSV9NT0RFX1VOU1BFQ0lGSUVEEAASDwoLQ0lfTU9ERV9PRkYQARISCg5DSV9NT0RFX01BTlVBTBACEhAKDENJX01PREVfUFVTSBADKj8KClZpc2liaWxpdHkSGgoWVklTSUJJTElUWV9VTlNQRUNJRklFRBAAEhUKEVZJU0lCSUxJVFlfUFVCTElDEAEqSwoEUm9sZRIUChBST0xFX1VOU1BFQ0lGSUVEEAASDQoJUk9MRV9SRUFEEAESDgoKUk9MRV9XUklURRACEg4KClJPTEVfQURNSU4QAyqbAQoJRW50cnlLaW5kEhoKFkVOVFJZX0tJTkRfVU5TUEVDSUZJRUQQABITCg9FTlRSWV9LSU5EX1RSRUUQARITCg9FTlRSWV9LSU5EX0JMT0IQAhIZChVFTlRSWV9LSU5EX0VYRUNVVEFCTEUQAxITCg9FTlRSWV9LSU5EX0xJTksQBBIYChRFTlRSWV9LSU5EX1NVQk1PRFVMRRAFKnMKCkNoYW5nZUtpbmQSGwoXQ0hBTkdFX0tJTkRfVU5TUEVDSUZJRUQQABIVChFDSEFOR0VfS0lORF9BRERFRBABEhcKE0NIQU5HRV9LSU5EX0RFTEVURUQQAhIYChRDSEFOR0VfS0lORF9NT0RJRklFRBADMuEDCgtSZXBvU2VydmljZRJGCgdHZXRSZXBvEhkua2FqaWJhLnYxLkdldFJlcG9SZXF1ZXN0Ghoua2FqaWJhLnYxLkdldFJlcG9SZXNwb25zZSIEgLUYARJMCglMaXN0UmVwb3MSGy5rYWppYmEudjEuTGlzdFJlcG9zUmVxdWVzdBocLmthamliYS52MS5MaXN0UmVwb3NSZXNwb25zZSIEgLUYARJGCgdHZXRUcmVlEhkua2FqaWJhLnYxLkdldFRyZWVSZXF1ZXN0Ghoua2FqaWJhLnYxLkdldFRyZWVSZXNwb25zZSIEgLUYARJGCgdHZXRCbG9iEhkua2FqaWJhLnYxLkdldEJsb2JSZXF1ZXN0Ghoua2FqaWJhLnYxLkdldEJsb2JSZXNwb25zZSIEgLUYARJSCgtMaXN0Q29tbWl0cxIdLmthamliYS52MS5MaXN0Q29tbWl0c1JlcXVlc3QaHi5rYWppYmEudjEuTGlzdENvbW1pdHNSZXNwb25zZSIEgLUYARJYCg1HZXRDb21taXREaWZmEh8ua2FqaWJhLnYxLkdldENvbW1pdERpZmZSZXF1ZXN0GiAua2FqaWJhLnYxLkdldENvbW1pdERpZmZSZXNwb25zZSIEgLUYAWIGcHJvdG8z", [file_google_protobuf_timestamp, file_kajiba_v1_options]);
+  fileDesc("ChRrYWppYmEvdjEvcmVwby5wcm90bxIJa2FqaWJhLnYxIj0KDkdldFJlcG9SZXF1ZXN0EhMKCXB1YmxpY19pZBgBIAEoCUgAEg4KBG5hbWUYAiABKAlIAEIGCgRyZXBvIjAKD0dldFJlcG9SZXNwb25zZRIdCgRyZXBvGAEgASgLMg8ua2FqaWJhLnYxLlJlcG8iOQoQTGlzdFJlcG9zUmVxdWVzdBIRCglwYWdlX3NpemUYASABKAUSEgoKcGFnZV90b2tlbhgCIAEoCSJMChFMaXN0UmVwb3NSZXNwb25zZRIeCgVyZXBvcxgBIAMoCzIPLmthamliYS52MS5SZXBvEhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSLoAgoEUmVwbxIRCglwdWJsaWNfaWQYASABKAkSDQoFb3duZXIYAiABKAkSDAoEbmFtZRgDIAEoCRITCgtkZXNjcmlwdGlvbhgEIAEoCRIpCgp2aXNpYmlsaXR5GAUgASgOMhUua2FqaWJhLnYxLlZpc2liaWxpdHkSFgoOZGVmYXVsdF9icmFuY2gYBiABKAkSIgoHY2lfbW9kZRgMIAEoDjIRLmthamliYS52MS5DaU1vZGUSFgoOcHJldmlvdXNfbmFtZXMYCCADKAkSKgoLcGVybWlzc2lvbnMYCSADKAsyFS5rYWppYmEudjEuUGVybWlzc2lvbhIiCgdtaXJyb3JzGAogAygLMhEua2FqaWJhLnYxLk1pcnJvchIQCghhcmNoaXZlZBgLIAEoCBIoCgpjbG9uZV91cmxzGA0gASgLMhQua2FqaWJhLnYxLkNsb25lVXJsc0oECAcQCFIKY2lfZW5hYmxlZCInCglDbG9uZVVybHMSDQoFaHR0cHMYASABKAkSCwoDc3NoGAIgASgJIh8KD0xpc3RSZWZzUmVxdWVzdBIMCgRyZXBvGAEgASgJIjMKEExpc3RSZWZzUmVzcG9uc2USHwoEcmVmcxgBIAMoCzIRLmthamliYS52MS5HaXRSZWYiOQoGR2l0UmVmEgwKBG5hbWUYASABKAkSEQoJY29tbWl0X2lkGAIgASgJEg4KBnRhZ19pZBgDIAEoCSI5CgpQZXJtaXNzaW9uEgwKBHVzZXIYASABKAkSHQoEcm9sZRgCIAEoDjIPLmthamliYS52MS5Sb2xlIkEKBk1pcnJvchISCgpyZW1vdGVfdXJsGAEgASgJEhIKCmNyZWRlbnRpYWwYAiABKAkSDwoHZW5hYmxlZBgDIAEoCCI+Cg5HZXRUcmVlUmVxdWVzdBIMCgRyZXBvGAEgASgJEhAKCHJldmlzaW9uGAIgASgJEgwKBHBhdGgYAyABKAkiSwoPR2V0VHJlZVJlc3BvbnNlEhEKCWNvbW1pdF9pZBgBIAEoCRIlCgdlbnRyaWVzGAIgAygLMhQua2FqaWJhLnYxLlRyZWVFbnRyeSJJCglUcmVlRW50cnkSDAoEbmFtZRgBIAEoCRIiCgRraW5kGAIgASgOMhQua2FqaWJhLnYxLkVudHJ5S2luZBIKCgJpZBgDIAEoCSI+Cg5HZXRCbG9iUmVxdWVzdBIMCgRyZXBvGAEgASgJEhAKCHJldmlzaW9uGAIgASgJEgwKBHBhdGgYAyABKAkiNQoPR2V0QmxvYlJlc3BvbnNlEhEKCWNvbW1pdF9pZBgBIAEoCRIPCgdjb250ZW50GAIgASgMIlsKEkxpc3RDb21taXRzUmVxdWVzdBIMCgRyZXBvGAEgASgJEhAKCHJldmlzaW9uGAIgASgJEhEKCXBhZ2Vfc2l6ZRgDIAEoBRISCgpwYWdlX3Rva2VuGAQgASgJIlIKE0xpc3RDb21taXRzUmVzcG9uc2USIgoHY29tbWl0cxgBIAMoCzIRLmthamliYS52MS5Db21taXQSFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJIpUBCgZDb21taXQSCgoCaWQYASABKAkSEgoKcGFyZW50X2lkcxgCIAMoCRITCgthdXRob3JfbmFtZRgDIAEoCRIUCgxhdXRob3JfZW1haWwYBCABKAkSLwoLY29tbWl0X3RpbWUYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg8KB21lc3NhZ2UYBiABKAkiNgoUR2V0Q29tbWl0RGlmZlJlcXVlc3QSDAoEcmVwbxgBIAEoCRIQCghyZXZpc2lvbhgCIAEoCSJiChVHZXRDb21taXREaWZmUmVzcG9uc2USIQoGY29tbWl0GAEgASgLMhEua2FqaWJhLnYxLkNvbW1pdBImCgdjaGFuZ2VzGAIgAygLMhUua2FqaWJhLnYxLkZpbGVDaGFuZ2UiXwoKRmlsZUNoYW5nZRIMCgRwYXRoGAEgASgJEiMKBGtpbmQYAiABKA4yFS5rYWppYmEudjEuQ2hhbmdlS2luZBIOCgZvbGRfaWQYAyABKAkSDgoGbmV3X2lkGAQgASgJKlgKBkNpTW9kZRIXChNDSV9NT0RFX1VOU1BFQ0lGSUVEEAASDwoLQ0lfTU9ERV9PRkYQARISCg5DSV9NT0RFX01BTlVBTBACEhAKDENJX01PREVfUFVTSBADKj8KClZpc2liaWxpdHkSGgoWVklTSUJJTElUWV9VTlNQRUNJRklFRBAAEhUKEVZJU0lCSUxJVFlfUFVCTElDEAEqSwoEUm9sZRIUChBST0xFX1VOU1BFQ0lGSUVEEAASDQoJUk9MRV9SRUFEEAESDgoKUk9MRV9XUklURRACEg4KClJPTEVfQURNSU4QAyqbAQoJRW50cnlLaW5kEhoKFkVOVFJZX0tJTkRfVU5TUEVDSUZJRUQQABITCg9FTlRSWV9LSU5EX1RSRUUQARITCg9FTlRSWV9LSU5EX0JMT0IQAhIZChVFTlRSWV9LSU5EX0VYRUNVVEFCTEUQAxITCg9FTlRSWV9LSU5EX0xJTksQBBIYChRFTlRSWV9LSU5EX1NVQk1PRFVMRRAFKnMKCkNoYW5nZUtpbmQSGwoXQ0hBTkdFX0tJTkRfVU5TUEVDSUZJRUQQABIVChFDSEFOR0VfS0lORF9BRERFRBABEhcKE0NIQU5HRV9LSU5EX0RFTEVURUQQAhIYChRDSEFOR0VfS0lORF9NT0RJRklFRBADMqwECgtSZXBvU2VydmljZRJGCgdHZXRSZXBvEhkua2FqaWJhLnYxLkdldFJlcG9SZXF1ZXN0Ghoua2FqaWJhLnYxLkdldFJlcG9SZXNwb25zZSIEgLUYARJMCglMaXN0UmVwb3MSGy5rYWppYmEudjEuTGlzdFJlcG9zUmVxdWVzdBocLmthamliYS52MS5MaXN0UmVwb3NSZXNwb25zZSIEgLUYARJJCghMaXN0UmVmcxIaLmthamliYS52MS5MaXN0UmVmc1JlcXVlc3QaGy5rYWppYmEudjEuTGlzdFJlZnNSZXNwb25zZSIEgLUYARJGCgdHZXRUcmVlEhkua2FqaWJhLnYxLkdldFRyZWVSZXF1ZXN0Ghoua2FqaWJhLnYxLkdldFRyZWVSZXNwb25zZSIEgLUYARJGCgdHZXRCbG9iEhkua2FqaWJhLnYxLkdldEJsb2JSZXF1ZXN0Ghoua2FqaWJhLnYxLkdldEJsb2JSZXNwb25zZSIEgLUYARJSCgtMaXN0Q29tbWl0cxIdLmthamliYS52MS5MaXN0Q29tbWl0c1JlcXVlc3QaHi5rYWppYmEudjEuTGlzdENvbW1pdHNSZXNwb25zZSIEgLUYARJYCg1HZXRDb21taXREaWZmEh8ua2FqaWJhLnYxLkdldENvbW1pdERpZmZSZXF1ZXN0GiAua2FqaWJhLnYxLkdldENvbW1pdERpZmZSZXNwb25zZSIEgLUYAWIGcHJvdG8z", [file_google_protobuf_timestamp, file_kajiba_v1_options]);
 
 /**
  * @generated from message kajiba.v1.GetRepoRequest
@@ -173,6 +173,13 @@ export type Repo = Message<"kajiba.v1.Repo"> & {
    * @generated from field: bool archived = 11;
    */
   archived: boolean;
+
+  /**
+   * How to clone it, as the server advertises them; unset for an archived repository.
+   *
+   * @generated from field: kajiba.v1.CloneUrls clone_urls = 13;
+   */
+  cloneUrls?: CloneUrls | undefined;
 };
 
 /**
@@ -181,6 +188,98 @@ export type Repo = Message<"kajiba.v1.Repo"> & {
  */
 export const RepoSchema: GenMessage<Repo> = /*@__PURE__*/
   messageDesc(file_kajiba_v1_repo, 4);
+
+/**
+ * Clone URLs built from `http.public_url`, `ssh.host`, `ssh.port` and the git side's
+ * login name.
+ *
+ * @generated from message kajiba.v1.CloneUrls
+ */
+export type CloneUrls = Message<"kajiba.v1.CloneUrls"> & {
+  /**
+   * @generated from field: string https = 1;
+   */
+  https: string;
+
+  /**
+   * @generated from field: string ssh = 2;
+   */
+  ssh: string;
+};
+
+/**
+ * Describes the message kajiba.v1.CloneUrls.
+ * Use `create(CloneUrlsSchema)` to create a new message.
+ */
+export const CloneUrlsSchema: GenMessage<CloneUrls> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 5);
+
+/**
+ * @generated from message kajiba.v1.ListRefsRequest
+ */
+export type ListRefsRequest = Message<"kajiba.v1.ListRefsRequest"> & {
+  /**
+   * @generated from field: string repo = 1;
+   */
+  repo: string;
+};
+
+/**
+ * Describes the message kajiba.v1.ListRefsRequest.
+ * Use `create(ListRefsRequestSchema)` to create a new message.
+ */
+export const ListRefsRequestSchema: GenMessage<ListRefsRequest> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 6);
+
+/**
+ * @generated from message kajiba.v1.ListRefsResponse
+ */
+export type ListRefsResponse = Message<"kajiba.v1.ListRefsResponse"> & {
+  /**
+   * @generated from field: repeated kajiba.v1.GitRef refs = 1;
+   */
+  refs: GitRef[];
+};
+
+/**
+ * Describes the message kajiba.v1.ListRefsResponse.
+ * Use `create(ListRefsResponseSchema)` to create a new message.
+ */
+export const ListRefsResponseSchema: GenMessage<ListRefsResponse> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 7);
+
+/**
+ * @generated from message kajiba.v1.GitRef
+ */
+export type GitRef = Message<"kajiba.v1.GitRef"> & {
+  /**
+   * The full name, `refs/heads/main` or `refs/tags/v1`.
+   *
+   * @generated from field: string name = 1;
+   */
+  name: string;
+
+  /**
+   * The commit the ref resolves to (an annotated tag is peeled).
+   *
+   * @generated from field: string commit_id = 2;
+   */
+  commitId: string;
+
+  /**
+   * The tag object of an annotated tag, absent otherwise.
+   *
+   * @generated from field: string tag_id = 3;
+   */
+  tagId: string;
+};
+
+/**
+ * Describes the message kajiba.v1.GitRef.
+ * Use `create(GitRefSchema)` to create a new message.
+ */
+export const GitRefSchema: GenMessage<GitRef> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_repo, 8);
 
 /**
  * @generated from message kajiba.v1.Permission
@@ -202,7 +301,7 @@ export type Permission = Message<"kajiba.v1.Permission"> & {
  * Use `create(PermissionSchema)` to create a new message.
  */
 export const PermissionSchema: GenMessage<Permission> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_repo, 5);
+  messageDesc(file_kajiba_v1_repo, 9);
 
 /**
  * Mirror configuration only; its sync status belongs to MirrorService (0011).
@@ -233,7 +332,7 @@ export type Mirror = Message<"kajiba.v1.Mirror"> & {
  * Use `create(MirrorSchema)` to create a new message.
  */
 export const MirrorSchema: GenMessage<Mirror> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_repo, 6);
+  messageDesc(file_kajiba_v1_repo, 10);
 
 /**
  * @generated from message kajiba.v1.GetTreeRequest
@@ -262,7 +361,7 @@ export type GetTreeRequest = Message<"kajiba.v1.GetTreeRequest"> & {
  * Use `create(GetTreeRequestSchema)` to create a new message.
  */
 export const GetTreeRequestSchema: GenMessage<GetTreeRequest> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_repo, 7);
+  messageDesc(file_kajiba_v1_repo, 11);
 
 /**
  * @generated from message kajiba.v1.GetTreeResponse
@@ -286,7 +385,7 @@ export type GetTreeResponse = Message<"kajiba.v1.GetTreeResponse"> & {
  * Use `create(GetTreeResponseSchema)` to create a new message.
  */
 export const GetTreeResponseSchema: GenMessage<GetTreeResponse> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_repo, 8);
+  messageDesc(file_kajiba_v1_repo, 12);
 
 /**
  * @generated from message kajiba.v1.TreeEntry
@@ -313,7 +412,7 @@ export type TreeEntry = Message<"kajiba.v1.TreeEntry"> & {
  * Use `create(TreeEntrySchema)` to create a new message.
  */
 export const TreeEntrySchema: GenMessage<TreeEntry> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_repo, 9);
+  messageDesc(file_kajiba_v1_repo, 13);
 
 /**
  * @generated from message kajiba.v1.GetBlobRequest
@@ -340,7 +439,7 @@ export type GetBlobRequest = Message<"kajiba.v1.GetBlobRequest"> & {
  * Use `create(GetBlobRequestSchema)` to create a new message.
  */
 export const GetBlobRequestSchema: GenMessage<GetBlobRequest> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_repo, 10);
+  messageDesc(file_kajiba_v1_repo, 14);
 
 /**
  * @generated from message kajiba.v1.GetBlobResponse
@@ -362,7 +461,7 @@ export type GetBlobResponse = Message<"kajiba.v1.GetBlobResponse"> & {
  * Use `create(GetBlobResponseSchema)` to create a new message.
  */
 export const GetBlobResponseSchema: GenMessage<GetBlobResponse> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_repo, 11);
+  messageDesc(file_kajiba_v1_repo, 15);
 
 /**
  * @generated from message kajiba.v1.ListCommitsRequest
@@ -396,7 +495,7 @@ export type ListCommitsRequest = Message<"kajiba.v1.ListCommitsRequest"> & {
  * Use `create(ListCommitsRequestSchema)` to create a new message.
  */
 export const ListCommitsRequestSchema: GenMessage<ListCommitsRequest> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_repo, 12);
+  messageDesc(file_kajiba_v1_repo, 16);
 
 /**
  * @generated from message kajiba.v1.ListCommitsResponse
@@ -418,7 +517,7 @@ export type ListCommitsResponse = Message<"kajiba.v1.ListCommitsResponse"> & {
  * Use `create(ListCommitsResponseSchema)` to create a new message.
  */
 export const ListCommitsResponseSchema: GenMessage<ListCommitsResponse> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_repo, 13);
+  messageDesc(file_kajiba_v1_repo, 17);
 
 /**
  * @generated from message kajiba.v1.Commit
@@ -460,7 +559,7 @@ export type Commit = Message<"kajiba.v1.Commit"> & {
  * Use `create(CommitSchema)` to create a new message.
  */
 export const CommitSchema: GenMessage<Commit> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_repo, 14);
+  messageDesc(file_kajiba_v1_repo, 18);
 
 /**
  * @generated from message kajiba.v1.GetCommitDiffRequest
@@ -482,7 +581,7 @@ export type GetCommitDiffRequest = Message<"kajiba.v1.GetCommitDiffRequest"> & {
  * Use `create(GetCommitDiffRequestSchema)` to create a new message.
  */
 export const GetCommitDiffRequestSchema: GenMessage<GetCommitDiffRequest> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_repo, 15);
+  messageDesc(file_kajiba_v1_repo, 19);
 
 /**
  * @generated from message kajiba.v1.GetCommitDiffResponse
@@ -504,7 +603,7 @@ export type GetCommitDiffResponse = Message<"kajiba.v1.GetCommitDiffResponse"> &
  * Use `create(GetCommitDiffResponseSchema)` to create a new message.
  */
 export const GetCommitDiffResponseSchema: GenMessage<GetCommitDiffResponse> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_repo, 16);
+  messageDesc(file_kajiba_v1_repo, 20);
 
 /**
  * @generated from message kajiba.v1.FileChange
@@ -540,7 +639,7 @@ export type FileChange = Message<"kajiba.v1.FileChange"> & {
  * Use `create(FileChangeSchema)` to create a new message.
  */
 export const FileChangeSchema: GenMessage<FileChange> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_repo, 17);
+  messageDesc(file_kajiba_v1_repo, 21);
 
 /**
  * When the repository's CI runs (0133).
@@ -732,6 +831,17 @@ export const RepoService: GenService<{
     methodKind: "unary";
     input: typeof ListReposRequestSchema;
     output: typeof ListReposResponseSchema;
+  },
+  /**
+   * The branches and tags (`refs/heads/*`, `refs/tags/*`), sorted by name, each with
+   * the commit it resolves to; other namespaces are not listed.
+   *
+   * @generated from rpc kajiba.v1.RepoService.ListRefs
+   */
+  listRefs: {
+    methodKind: "unary";
+    input: typeof ListRefsRequestSchema;
+    output: typeof ListRefsResponseSchema;
   },
   /**
    * The entries of a directory.

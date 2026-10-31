@@ -6,8 +6,9 @@ import type { IconName } from "./components/Icon.svelte";
 export const ENTRY_ICON: Record<EntryKind, IconName> = {
   [EntryKind.UNSPECIFIED]: "file",
   [EntryKind.BLOB]: "file",
+  [EntryKind.EXECUTABLE]: "file",
   [EntryKind.TREE]: "folder",
-  [EntryKind.SYMLINK]: "symlink",
+  [EntryKind.LINK]: "symlink",
   [EntryKind.SUBMODULE]: "submodule",
 };
 

@@ -43,7 +43,6 @@
 	import {
 		README_NAMES,
 		absoluteTime,
-		cloneUrls,
 		commitBody,
 		commitSubject,
 		formatBytes,
@@ -260,8 +259,7 @@
 		[ChangeKind.UNSPECIFIED]: { l: '?', cls: 'text-fg-subtle', label: 'changed' },
 		[ChangeKind.ADDED]: { l: 'A', cls: 'text-ok', label: 'added' },
 		[ChangeKind.MODIFIED]: { l: 'M', cls: 'text-accent', label: 'modified' },
-		[ChangeKind.DELETED]: { l: 'D', cls: 'text-danger', label: 'deleted' },
-		[ChangeKind.RENAMED]: { l: 'R', cls: 'text-warn', label: 'renamed' }
+		[ChangeKind.DELETED]: { l: 'D', cls: 'text-danger', label: 'deleted' }
 	};
 	// History: events of the current scope (path-filtered log, its releases,
 	// failed runs on those commits, a failing mirror)
@@ -407,10 +405,7 @@
 										class="h-8 w-36 rounded-sm border border-border"
 									/>
 								{/if}
-								{#if repo && !repo.archived && !empty}<CloneButton
-										owner={repo.owner}
-										name={repo.name}
-									/>{/if}
+								{#if repo?.cloneUrls && !empty}<CloneButton urls={repo.cloneUrls} />{/if}
 							</div>
 						</div>
 
@@ -688,10 +683,7 @@
 						SSH-signed):
 					</p>
 					<pre
-						class="mt-3 rounded-sm border border-border bg-surface px-3 py-2 font-mono text-xs leading-5 break-all whitespace-pre-wrap text-fg-muted">git remote add origin {cloneUrls(
-							repoKey.split('/')[0],
-							repoKey.split('/')[1]
-						).ssh}
+						class="mt-3 rounded-sm border border-border bg-surface px-3 py-2 font-mono text-xs leading-5 break-all whitespace-pre-wrap text-fg-muted">git remote add origin {repo?.cloneUrls?.ssh ?? ''}
 git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre>
 					<p class="mt-3 text-xs text-fg-subtle">
 						History, pipelines and files appear here after the first push.

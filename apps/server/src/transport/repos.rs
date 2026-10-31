@@ -6,15 +6,37 @@
 use super::{Health, cursor, local::refused};
 use kajiba_gitstore::{GitStore, Gix};
 use kajiba_proto::v1::{
-    ChangeKind, CiMode, Commit, EntryKind, FileChange, GetBlobRequest, GetBlobResponse,
+    ChangeKind, CiMode, CloneUrls, Commit, EntryKind, FileChange, GetBlobRequest, GetBlobResponse,
     GetCommitDiffRequest, GetCommitDiffResponse, GetRepoRequest, GetRepoResponse, GetTreeRequest,
-    GetTreeResponse, ListCommitsRequest, ListCommitsResponse, ListReposRequest, ListReposResponse,
-    Mirror, Permission, Repo, Role, TreeEntry, Visibility, get_repo_request,
-    repo_service_server::RepoService,
+    GetTreeResponse, GitRef, ListCommitsRequest, ListCommitsResponse, ListRefsRequest,
+    ListRefsResponse, ListReposRequest, ListReposResponse, Mirror, Permission, Repo, Role,
+    TreeEntry, Visibility, get_repo_request, repo_service_server::RepoService,
 };
 use sqlx::{SqliteConnection, SqlitePool};
 use std::path::{Path, PathBuf};
 use tonic::{Request, Response, Status};
+
+/// What the server advertises for cloning (0019, 0054): `http.public_url`, the SSH host
+/// and port, and the git side's login name.
+#[derive(Debug, Clone)]
+pub struct CloneBase {
+    pub https: String,
+    pub ssh_host: String,
+    pub ssh_port: u16,
+    pub ssh_user: String,
+}
+
+impl CloneBase {
+    pub fn for_repo(&self, owner: &str, name: &str) -> CloneUrls {
+        CloneUrls {
+            https: format!("{}/{owner}/{name}.git", self.https.trim_end_matches('/')),
+            ssh: format!(
+                "ssh://{}@{}:{}/{owner}/{name}.git",
+                self.ssh_user, self.ssh_host, self.ssh_port
+            ),
+        }
+    }
+}
 
 /// Repository routes read through the read pool, available once startup completed.
 #[derive(Clone)]
@@ -301,7 +323,11 @@ const SELECT: &str = "SELECT repo.id, repo.public_id, owner.name, repo.name, rep
     FROM repo JOIN user owner ON owner.id = repo.owner_id";
 
 /// The row with its redirects, permissions and mirror configuration.
-async fn message(connection: &mut SqliteConnection, row: Row) -> Result<Repo, sqlx::Error> {
+async fn message(
+    connection: &mut SqliteConnection,
+    clone: Option<&CloneBase>,
+    row: Row,
+) -> Result<Repo, sqlx::Error> {
     let (id, public_id, owner, name, description, default_branch, ci_mode, archived) = row;
     let previous_names = sqlx::query_scalar(
         "SELECT owner_name || '/' || name FROM repo_redirect WHERE repo_id = ? ORDER BY 1",
@@ -346,6 +372,9 @@ async fn message(connection: &mut SqliteConnection, row: Row) -> Result<Repo, sq
         enabled,
     })
     .collect();
+    let clone_urls = clone
+        .filter(|_| !archived)
+        .map(|base| base.for_repo(&owner, &name));
     Ok(Repo {
         public_id,
         owner,
@@ -365,6 +394,7 @@ async fn message(connection: &mut SqliteConnection, row: Row) -> Result<Repo, sq
         permissions,
         mirrors,
         archived,
+        clone_urls,
     })
 }
 
@@ -406,7 +436,9 @@ impl RepoService for Repos {
             .fetch_one(&mut *connection)
             .await
             .map_err(internal)?;
-        let repo = message(&mut connection, row).await.map_err(internal)?;
+        let repo = message(&mut connection, self.0.clone_base(), row)
+            .await
+            .map_err(internal)?;
         Ok(Response::new(GetRepoResponse { repo: Some(repo) }))
     }
 
@@ -449,13 +481,54 @@ impl RepoService for Repos {
                 .map_err(internal)?
                 .is_some()
             {
-                repos.push(message(&mut connection, row).await.map_err(internal)?);
+                repos.push(
+                    message(&mut connection, self.0.clone_base(), row)
+                        .await
+                        .map_err(internal)?,
+                );
             }
         }
         Ok(Response::new(ListReposResponse {
             repos,
             next_page_token,
         }))
+    }
+
+    async fn list_refs(
+        &self,
+        request: Request<ListRefsRequest>,
+    ) -> Result<Response<ListRefsResponse>, Status> {
+        let user = caller(&request)?;
+        let request = request.into_inner();
+        let dir = self.browse_dir(user, &request.repo).await?;
+        let permit = self.browse_permit()?;
+        let root = self.0.git_state_dir.join("repos");
+        blocking(permit, move |cancelled| {
+            let store = Gix::shared(&root).cancellable(cancelled);
+            let mut refs = Vec::new();
+            for found in store.refs(&dir).map_err(git_error("REVISION_NOT_FOUND"))? {
+                if !(found.name.starts_with("refs/heads/") || found.name.starts_with("refs/tags/"))
+                {
+                    continue;
+                }
+                // A tag naming a tree or a blob has no commit: not listed.
+                let Ok(commit_id) = store.peel_commit(&dir, &found.target) else {
+                    continue;
+                };
+                let tag_id = if commit_id == found.target {
+                    String::new()
+                } else {
+                    found.target
+                };
+                refs.push(GitRef {
+                    name: found.name,
+                    commit_id,
+                    tag_id,
+                });
+            }
+            Ok(Response::new(ListRefsResponse { refs }))
+        })
+        .await
     }
 
     async fn get_tree(

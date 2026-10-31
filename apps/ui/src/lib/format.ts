@@ -65,24 +65,6 @@ export function isBinary(bytes: Uint8Array): boolean {
   return bytes.subarray(0, 8000).includes(0);
 }
 
-export interface CloneUrls {
-  https: string;
-  ssh: string;
-}
-
-/** Clone URLs from the current origin (ASSUMED: SSH user/port fixed by ADR). */
-export function cloneUrls(
-  owner: string,
-  name: string,
-  host = location.host,
-): CloneUrls {
-  const hostname = host.replace(/:\d+$/, "");
-  return {
-    https: `https://${host}/${owner}/${name}.git`,
-    ssh: `ssh://kajiba-git@${hostname}:2222/${owner}/${name}.git`,
-  };
-}
-
 export const README_NAMES = [
   "README.md",
   "readme.md",

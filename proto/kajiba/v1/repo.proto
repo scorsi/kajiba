@@ -22,6 +22,11 @@ service RepoService {
   // id or <owner>/<name>, current or previous; `revision` is a branch, a tag or a
   // full commit id. REPO_NOT_FOUND, REVISION_NOT_FOUND, PATH_NOT_FOUND otherwise.
 
+  // The branches and tags (`refs/heads/*`, `refs/tags/*`), sorted by name, each with
+  // the commit it resolves to; other namespaces are not listed.
+  rpc ListRefs(ListRefsRequest) returns (ListRefsResponse) {
+    option (kajiba.v1.scope) = SCOPE_REPO_READ;
+  }
   // The entries of a directory.
   rpc GetTree(GetTreeRequest) returns (GetTreeResponse) {
     option (kajiba.v1.scope) = SCOPE_REPO_READ;
@@ -81,6 +86,32 @@ message Repo {
   repeated Mirror mirrors = 10;
   // Removed from the configuration: read-only, no git transport or /raw/.
   bool archived = 11;
+  // How to clone it, as the server advertises them; unset for an archived repository.
+  CloneUrls clone_urls = 13;
+}
+
+// Clone URLs built from `http.public_url`, `ssh.host`, `ssh.port` and the git side's
+// login name.
+message CloneUrls {
+  string https = 1;
+  string ssh = 2;
+}
+
+message ListRefsRequest {
+  string repo = 1;
+}
+
+message ListRefsResponse {
+  repeated GitRef refs = 1;
+}
+
+message GitRef {
+  // The full name, `refs/heads/main` or `refs/tags/v1`.
+  string name = 1;
+  // The commit the ref resolves to (an annotated tag is peeled).
+  string commit_id = 2;
+  // The tag object of an annotated tag, absent otherwise.
+  string tag_id = 3;
 }
 
 // When the repository's CI runs (0133).

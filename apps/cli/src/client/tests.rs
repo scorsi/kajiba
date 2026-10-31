@@ -198,6 +198,12 @@ impl RepoService for Fake {
         })
     }
 
+    async fn list_refs(
+        &self,
+        _: tonic::Request<kajiba_proto::v1::ListRefsRequest>,
+    ) -> Result<Response<kajiba_proto::v1::ListRefsResponse>, Status> {
+        unimplemented()
+    }
     async fn get_tree(
         &self,
         _: tonic::Request<GetTreeRequest>,

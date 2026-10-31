@@ -8,6 +8,7 @@
   writeShellApplication,
   coreutils,
   curl,
+  git,
   nodejs,
   pnpm,
   pnpmConfigHook,
@@ -47,6 +48,7 @@ writeShellApplication {
   runtimeInputs = [
     coreutils
     curl
+    git
     nodejs
     kajibaServer
     kajibaGit
@@ -81,6 +83,11 @@ writeShellApplication {
     session_ttl = "1m"
     [users.alice]
     is_admin = true
+    [users.reader]
+    [repos.demo]
+    owner = "alice"
+    description = "Demo repository"
+    permissions.reader = "read"
     EOF
     cat > "$dir/git.toml" <<EOF
     state_dir = "$dir/git"
@@ -122,6 +129,26 @@ writeShellApplication {
       logs
       exit 1
     fi
+
+    # The declared repository's content: two branches, an annotated tag, a README and a nested
+    # file, built with plain git (a push needs SSH and signed commits) and imported (0026).
+    fixture="$dir/fixture"
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+    export GIT_AUTHOR_NAME=Alice GIT_AUTHOR_EMAIL=alice@example.org
+    export GIT_COMMITTER_NAME=Alice GIT_COMMITTER_EMAIL=alice@example.org
+    git init --quiet --initial-branch=main "$fixture"
+    mkdir -p "$fixture/docs/guide"
+    printf '# Demo\n\nA fixture repository.\n' > "$fixture/README.md"
+    printf 'Start here.\n' > "$fixture/docs/guide/intro.md"
+    git -C "$fixture" add .
+    git -C "$fixture" commit --quiet -m "Add the README and a guide"
+    git -C "$fixture" tag -a v1 -m "First release"
+    git -C "$fixture" switch --quiet -c feature
+    printf 'More.\n' >> "$fixture/docs/guide/intro.md"
+    git -C "$fixture" commit --quiet -am "Extend the guide"
+    git -C "$fixture" switch --quiet main
+    git clone --quiet --bare "$fixture" "$dir/fixture.git"
+    kajiba-server admin --socket "$dir/run/local.sock" import alice/demo "$dir/fixture.git" >/dev/null
 
     export KAJIBA_E2E_URL="http://localhost:$port"
     export KAJIBA_E2E_ADMIN_SOCKET="$dir/run/local.sock"

@@ -43,6 +43,7 @@ pub struct Health {
     writer: Arc<OnceLock<crate::db::Writer>>,
     passkeys: Arc<OnceLock<webauthn::Passkeys>>,
     ui_dir: Arc<OnceLock<PathBuf>>,
+    clone_base: Arc<OnceLock<repos::CloneBase>>,
     runners: Arc<OnceLock<runners::Declared>>,
     /// Bumped after each commit that stores log bytes or ends attempts: wakes run watchers.
     ci_progress: Arc<watch::Sender<()>>,
@@ -71,6 +72,7 @@ impl Health {
             writer: Arc::default(),
             passkeys: Arc::default(),
             ui_dir: Arc::default(),
+            clone_base: Arc::default(),
             runners: Arc::default(),
             ci_progress: Arc::new(watch::Sender::new(())),
             git_state_dir,
@@ -104,6 +106,15 @@ impl Health {
     /// The declared runners; `Connect` answers `UNAVAILABLE` until they are set.
     pub fn set_runners(&self, declared: runners::Declared) {
         assert!(self.runners.set(declared).is_ok(), "runners set twice");
+    }
+
+    /// The clone URLs `Repo` advertises; none are advertised until they are set.
+    pub fn set_clone_base(&self, base: repos::CloneBase) {
+        assert!(self.clone_base.set(base).is_ok(), "clone base set twice");
+    }
+
+    fn clone_base(&self) -> Option<&repos::CloneBase> {
+        self.clone_base.get()
     }
 
     pub fn set_passkeys(&self, passkeys: webauthn::Passkeys) {

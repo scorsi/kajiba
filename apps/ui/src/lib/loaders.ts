@@ -5,11 +5,7 @@
 
 import * as api from "./api";
 
-/**
- * There is no `GetRepo` RPC: find a repository by paging `ListRepos`
- * (a few dozen repos, cached for the session). Old names resolve to the
- * current one so the view can redirect.
- */
+/** Every repository the viewer can read, paged from `ListRepos` and cached for the session. */
 let repoCache: Promise<api.Repo[]> | undefined;
 
 export function allRepos(): Promise<api.Repo[]> {
@@ -29,18 +25,11 @@ export function allRepos(): Promise<api.Repo[]> {
   return repoCache;
 }
 
+/** `GetRepo` resolves previous names: the view redirects to the current one. */
 export async function findRepo(owner: string, name: string) {
-  const repos = await allRepos();
-  const exact = repos.find((r) => r.owner === owner && r.name === name);
-  if (exact) return { repo: exact, renamedFrom: undefined };
-  const moved = repos.find(
-    (r) => r.owner === owner && r.previousNames.includes(name),
-  );
-  if (moved) return { repo: moved, renamedFrom: name };
-  throw new api.ApiError(
-    api.Code.NotFound,
-    `repository ${owner}/${name} not found`,
-  );
+  const repo = await api.getRepo({ name: `${owner}/${name}` });
+  const renamed = repo.owner !== owner || repo.name !== name;
+  return { repo, renamedFrom: renamed ? name : undefined };
 }
 
 /** Directories first, then files, each alphabetical (case-insensitive). */

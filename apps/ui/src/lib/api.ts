@@ -18,6 +18,11 @@ import { createGrpcWebTransport } from "@connectrpc/connect-web";
 import { AuthService } from "./gen/kajiba/v1/auth_pb.ts";
 import { Scope } from "./gen/kajiba/v1/options_pb.ts";
 import {
+  RepoService,
+  type Commit as CommitMessage,
+  type Repo as RepoMessage,
+} from "./gen/kajiba/v1/repo_pb.ts";
+import {
   TokenService,
   TokenSource,
   type Token as TokenMessage,
@@ -31,12 +36,8 @@ import {
   MOCK_RUNNERS,
   MOCK_RUNS,
   MOCK_DISK_BYTES,
-  ZERO_ID,
   CHECKS,
-  fakeId,
   mockRunLog,
-  type MockNode,
-  type MockRepo,
 } from "./mock";
 
 // ── Types (shape of protobuf-es generated messages) ─────────────────────
@@ -83,20 +84,22 @@ export enum CiMode {
   PUSH = 3,
 }
 
+/** The proto's numbers (`kajiba.v1.EntryKind`). */
 export enum EntryKind {
   UNSPECIFIED = 0,
-  BLOB = 1,
-  TREE = 2,
-  SYMLINK = 3,
-  SUBMODULE = 4,
+  TREE = 1,
+  BLOB = 2,
+  EXECUTABLE = 3,
+  LINK = 4,
+  SUBMODULE = 5,
 }
 
+/** The proto's numbers (`kajiba.v1.ChangeKind`); renames are not detected. */
 export enum ChangeKind {
   UNSPECIFIED = 0,
   ADDED = 1,
-  MODIFIED = 2,
-  DELETED = 3,
-  RENAMED = 4,
+  DELETED = 2,
+  MODIFIED = 3,
 }
 
 export interface Permission {
@@ -115,13 +118,15 @@ export interface Repo {
   owner: string;
   name: string;
   description: string;
-  /** Full ref, e.g. `refs/heads/main`. */
+  /** Full ref, e.g. `refs/heads/main` (the server sends the short name). */
   defaultBranch: string;
   ciMode: CiMode;
   previousNames: string[];
   permissions: Permission[];
   mirrors: Mirror[];
   archived: boolean;
+  /** As the server advertises them; absent for an archived repository. */
+  cloneUrls?: { https: string; ssh: string };
 }
 
 export interface TreeEntry {
@@ -146,23 +151,64 @@ export interface Change {
   newId: string;
 }
 
-/** Repository reference used in requests: `"<owner>/<name>"` (ASSUMED shape). */
+/** Repository reference used in requests: `"<owner>/<name>"` or a public id. */
 export type RepoRef = string;
 
 // ── RepoService ─────────────────────────────────────────────────────────
 
+// Same origin: the session cookie (HttpOnly) rides along; CORS admits only the forge origin.
+const transport = createGrpcWebTransport({
+  baseUrl: typeof location === "undefined" ? "/" : location.origin,
+});
+const repos = createClient(RepoService, transport);
+
+/** The server takes a short branch or tag name (or a commit id), not a full ref. */
+const short = (revision: string) =>
+  revision.replace(/^refs\/(heads|tags)\//, "");
+
+function toRepo(m: RepoMessage): Repo {
+  return {
+    publicId: m.publicId,
+    owner: m.owner,
+    name: m.name,
+    description: m.description,
+    defaultBranch: `refs/heads/${m.defaultBranch}`,
+    ciMode: m.ciMode as number as CiMode,
+    previousNames: m.previousNames,
+    permissions: m.permissions.map((p) => ({
+      user: p.user,
+      role: p.role as number as Role,
+    })),
+    mirrors: m.mirrors.map((x) => ({
+      remoteUrl: x.remoteUrl,
+      credential: x.credential,
+      enabled: x.enabled,
+    })),
+    archived: m.archived,
+    cloneUrls: m.cloneUrls && {
+      https: m.cloneUrls.https,
+      ssh: m.cloneUrls.ssh,
+    },
+  };
+}
+
+/** `RepoService.GetRepo` by `<owner>/<name>`, current or previous. */
+export async function getRepo(req: { name: string }): Promise<Repo> {
+  const { repo } = await repos.getRepo({
+    repo: { case: "name", value: req.name },
+  });
+  if (!repo) throw new ApiError(Code.Unknown, "empty GetRepo answer");
+  return toRepo(repo);
+}
+
 export async function listRepos(
   req: { pageSize?: number; pageToken?: string } = {},
 ) {
-  await mockGate();
-  if (scenario() === "empty") return { repos: [] as Repo[], nextPageToken: "" };
-  const all = MOCK_REPOS.map(toRepo);
-  const { items, nextPageToken } = paginate(
-    all,
-    req.pageSize ?? 50,
-    req.pageToken,
-  );
-  return { repos: items, nextPageToken };
+  const res = await repos.listRepos({
+    pageSize: req.pageSize ?? 50,
+    pageToken: req.pageToken ?? "",
+  });
+  return { repos: res.repos.map(toRepo), nextPageToken: res.nextPageToken };
 }
 
 export async function getTree(req: {
@@ -170,21 +216,18 @@ export async function getTree(req: {
   revision: string;
   path: string;
 }) {
-  await mockGate();
-  const repo = findMock(req.repo);
-  const commitId = resolve(repo, req.revision);
-  const node = walk(repo.tree, req.path);
-  if (node?.kind !== "tree")
-    throw new ApiError(Code.NotFound, `no directory '${req.path}'`);
-  const base = req.path.replace(/\/$/, "");
-  const entries: TreeEntry[] = Object.entries(node.children).map(
-    ([name, child]) => ({
-      name,
-      kind: KIND[child.kind],
-      id: fakeId(`${repo.name}:${base}/${name}`),
-    }),
-  );
-  return { commitId, entries };
+  const { commitId, entries } = await repos.getTree({
+    ...req,
+    revision: short(req.revision),
+  });
+  return {
+    commitId,
+    entries: entries.map<TreeEntry>((e) => ({
+      name: e.name,
+      kind: e.kind as number as EntryKind,
+      id: e.id,
+    })),
+  };
 }
 
 export async function getBlob(req: {
@@ -192,24 +235,11 @@ export async function getBlob(req: {
   revision: string;
   path: string;
 }) {
-  await mockGate();
-  const repo = findMock(req.repo);
-  const commitId = resolve(repo, req.revision);
-  const node = walk(repo.tree, req.path);
-  if (node?.kind === "symlink")
-    return { commitId, content: new TextEncoder().encode(node.target) };
-  if (node?.kind !== "blob")
-    throw new ApiError(Code.NotFound, `no file '${req.path}'`);
-  const c = node.content;
-  if (typeof c === "string") {
-    return {
-      commitId,
-      content: new TextEncoder().encode(
-        olderVersion(repo, commitId, req.path, c),
-      ),
-    };
-  }
-  return { commitId, content: c instanceof Uint8Array ? c : c() };
+  const { commitId, content } = await repos.getBlob({
+    ...req,
+    revision: short(req.revision),
+  });
+  return { commitId, content };
 }
 
 export async function listCommits(req: {
@@ -217,55 +247,63 @@ export async function listCommits(req: {
   revision: string;
   pageSize?: number;
   pageToken?: string;
-  /** ASSUMED: only commits touching this file or directory (like `git log -- <path>`). */
+  /** ASSUMED (J5 task 3): only commits touching this path; ignored until then. */
   path?: string;
 }) {
-  await mockGate();
-  const repo = findMock(req.repo);
-  const head = resolve(repo, req.revision);
-  const start = repo.commits.findIndex((c) => c.id === head);
-  const p = req.path?.replace(/\/$/, "");
-  const history = repo.commits
-    .slice(start)
-    .filter(
-      (c) =>
-        !p ||
-        changesFor(repo, c.id).some(
-          (ch) => ch.path === p || ch.path.startsWith(p + "/"),
-        ),
-    )
-    .map(toCommit);
-  const { items, nextPageToken } = paginate(
-    history,
-    req.pageSize ?? 50,
-    req.pageToken,
-  );
-  return { commits: items, nextPageToken };
+  const res = await repos.listCommits({
+    repo: req.repo,
+    revision: short(req.revision),
+    pageSize: req.pageSize ?? 50,
+    pageToken: req.pageToken ?? "",
+  });
+  return {
+    commits: res.commits.map(toCommit),
+    nextPageToken: res.nextPageToken,
+  };
+}
+
+function toCommit(c: CommitMessage): Commit {
+  return {
+    id: c.id,
+    parentIds: c.parentIds,
+    authorName: c.authorName,
+    authorEmail: c.authorEmail,
+    commitTime: c.commitTime && {
+      seconds: c.commitTime.seconds,
+      nanos: c.commitTime.nanos,
+    },
+    message: c.message,
+  };
 }
 
 export async function getCommitDiff(req: { repo: RepoRef; revision: string }) {
-  await mockGate();
-  const repo = findMock(req.repo);
-  return { changes: changesFor(repo, resolve(repo, req.revision)) };
+  const { changes } = await repos.getCommitDiff({
+    ...req,
+    revision: short(req.revision),
+  });
+  return {
+    changes: changes.map<Change>((c) => ({
+      path: c.path,
+      kind: c.kind as number as ChangeKind,
+      oldId: c.oldId,
+      newId: c.newId,
+    })),
+  };
 }
-
-// ── ASSUMED: not in the API yet ─────────────────────────────────────────
 
 export interface Ref {
   /** Full name: `refs/heads/main`, `refs/tags/v1.0.0`. */
   name: string;
+  /** The commit it resolves to (an annotated tag is peeled). */
   commitId: string;
 }
 
-/** ASSUMED `ListRefs` — needed by the branch/tag switcher and to split `<ref>/<path>` URLs. */
+/** Branches and tags, sorted by name. */
 export async function listRefs(req: { repo: RepoRef }) {
-  await mockGate();
-  const repo = findMock(req.repo);
-  const refs: Ref[] = Object.entries(repo.refs).map(([name, i]) => ({
-    name,
-    commitId: repo.commits[i].id,
-  }));
-  return { refs };
+  const { refs } = await repos.listRefs(req);
+  return {
+    refs: refs.map<Ref>((r) => ({ name: r.name, commitId: r.commitId })),
+  };
 }
 
 export interface Viewer {
@@ -274,10 +312,6 @@ export interface Viewer {
   admin: boolean;
 }
 
-// Same origin: the session cookie (HttpOnly) rides along; CORS admits only the forge origin.
-const transport = createGrpcWebTransport({
-  baseUrl: typeof location === "undefined" ? "/" : location.origin,
-});
 const auth = createClient(AuthService, transport);
 
 /** `AuthService.GetViewer` — who is signed in. Throws `Unauthenticated` otherwise (ADR 0087). */
@@ -770,67 +804,6 @@ export async function getRunLog(req: { id: string; step: number }) {
 
 // ── mock internals
 
-/** Deterministic changed files of a commit (memoised). */
-const changeCache = new Map<string, Change[]>();
-function changesFor(repo: MockRepo, id: string): Change[] {
-  const key = repo.name + id;
-  const hit = changeCache.get(key);
-  if (hit) return hit;
-  const files = listFiles(repo.tree);
-  const seed = parseInt(id.slice(0, 8), 16);
-  const count = 1 + (seed % 6);
-  const changes: Change[] = [];
-  for (let i = 0; i < count && i < files.length; i++) {
-    const path = files[(seed + i * 7) % files.length];
-    if (changes.some((c) => c.path === path)) continue;
-    const kind = [
-      ChangeKind.MODIFIED,
-      ChangeKind.MODIFIED,
-      ChangeKind.ADDED,
-      ChangeKind.DELETED,
-    ][(seed >>> (i + 1)) % 4];
-    changes.push({
-      path,
-      kind,
-      oldId: kind === ChangeKind.ADDED ? ZERO_ID : fakeId(id + path + "old"),
-      newId: kind === ChangeKind.DELETED ? ZERO_ID : fakeId(id + path + "new"),
-    });
-  }
-  changeCache.set(key, changes);
-  return changes;
-}
-
-/**
- * Text of `path` as of commit `id`: the current text minus one deterministic
- * edit per later commit that touched the file, so consecutive revisions differ
- * exactly where getCommitDiff says they do.
- */
-function olderVersion(
-  repo: MockRepo,
-  id: string,
-  path: string,
-  text: string,
-): string {
-  const k = repo.commits.findIndex((c) => c.id === id);
-  if (k <= 0) return text;
-  const lines = text.split("\n");
-  for (let j = 0; j < k; j++) {
-    if (!changesFor(repo, repo.commits[j].id).some((c) => c.path === path))
-      continue;
-    const h = parseInt(repo.commits[j].id.slice(8, 16), 16);
-    const at = h % Math.max(1, lines.length - 1);
-    if (h % 3 === 0 && lines.length > 2) lines.splice(at, 1);
-    else if (h % 3 === 1) lines[at] = (lines[at] ?? "") + "  // revised later";
-    else
-      lines.splice(
-        at,
-        0,
-        `// (older) ${repo.commits[j].message.split("\n")[0]}`,
-      );
-  }
-  return lines.join("\n");
-}
-
 type Scenario =
   | "slow"
   | "error"
@@ -857,91 +830,4 @@ async function mockGate() {
       Code.Unknown,
       "internal: database is locked (SQLITE_BUSY)",
     );
-}
-
-const KIND: Record<MockNode["kind"], EntryKind> = {
-  blob: EntryKind.BLOB,
-  tree: EntryKind.TREE,
-  symlink: EntryKind.SYMLINK,
-  submodule: EntryKind.SUBMODULE,
-};
-
-function toRepo(m: MockRepo): Repo {
-  const ROLE = {
-    read: Role.READ,
-    write: Role.WRITE,
-    admin: Role.ADMIN,
-  } as const;
-  return {
-    publicId: m.publicId,
-    owner: m.owner,
-    name: m.name,
-    description: m.description,
-    defaultBranch: m.defaultBranch,
-    ciMode: { off: CiMode.OFF, manual: CiMode.MANUAL, push: CiMode.PUSH }[m.ci],
-    previousNames: [...m.previousNames],
-    permissions: m.permissions.map((p) => ({
-      user: p.user,
-      role: ROLE[p.role],
-    })),
-    mirrors: m.mirrors.map((x) => ({ ...x })),
-    archived: m.archived,
-  };
-}
-
-function toCommit(c: (typeof MOCK_REPOS)[number]["commits"][number]): Commit {
-  return {
-    id: c.id,
-    parentIds: c.parentIds,
-    authorName: c.authorName,
-    authorEmail: c.authorEmail,
-    commitTime: { seconds: BigInt(c.time), nanos: 0 },
-    message: c.message,
-  };
-}
-
-function findMock(ref: RepoRef): MockRepo {
-  const [owner, name] = ref.split("/");
-  const repo = MOCK_REPOS.find((r) => r.owner === owner && r.name === name);
-  if (!repo) throw new ApiError(Code.NotFound, `repository ${ref} not found`);
-  return repo;
-}
-
-/** Accepts a full ref, a short branch/tag name or a full commit id. */
-function resolve(repo: MockRepo, revision: string): string {
-  if (repo.commits.length === 0)
-    throw new ApiError(Code.NotFound, "repository is empty");
-  const candidates = [
-    revision,
-    `refs/heads/${revision}`,
-    `refs/tags/${revision}`,
-  ];
-  for (const c of candidates)
-    if (c in repo.refs) return repo.commits[repo.refs[c]].id;
-  const byId = repo.commits.find((c) => c.id === revision);
-  if (byId) return byId.id;
-  throw new ApiError(Code.NotFound, `unknown revision '${revision}'`);
-}
-
-function walk(root: MockNode, path: string): MockNode | undefined {
-  let node: MockNode | undefined = root;
-  for (const part of path.split("/").filter(Boolean)) {
-    if (node?.kind !== "tree") return undefined;
-    node = node.children[part];
-  }
-  return node;
-}
-
-function listFiles(node: MockNode, prefix = ""): string[] {
-  if (node.kind !== "tree") return [prefix];
-  return Object.entries(node.children).flatMap(([n, c]) =>
-    listFiles(c, prefix ? `${prefix}/${n}` : n),
-  );
-}
-
-function paginate<T>(all: T[], pageSize: number, pageToken?: string) {
-  const offset = pageToken ? Number(atob(pageToken)) : 0;
-  const items = all.slice(offset, offset + pageSize);
-  const next = offset + pageSize;
-  return { items, nextPageToken: next < all.length ? btoa(String(next)) : "" };
 }

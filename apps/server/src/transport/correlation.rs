@@ -67,6 +67,7 @@ fn known(path: &str) -> Option<&'static str> {
         "/kajiba.v1.HealthService/Check" => "/kajiba.v1.HealthService/Check",
         "/kajiba.v1.RepoService/GetRepo" => "/kajiba.v1.RepoService/GetRepo",
         "/kajiba.v1.RepoService/ListRepos" => "/kajiba.v1.RepoService/ListRepos",
+        "/kajiba.v1.RepoService/ListRefs" => "/kajiba.v1.RepoService/ListRefs",
         "/kajiba.v1.RepoService/GetTree" => "/kajiba.v1.RepoService/GetTree",
         "/kajiba.v1.RepoService/GetBlob" => "/kajiba.v1.RepoService/GetBlob",
         "/kajiba.v1.RepoService/ListCommits" => "/kajiba.v1.RepoService/ListCommits",

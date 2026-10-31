@@ -134,6 +134,13 @@ async fn main() -> ExitCode {
             if let Some(dir) = ui_dir {
                 health.set_ui_dir(dir);
             }
+            health.set_clone_base(transport::repos::CloneBase {
+                https: config.http.public_url.clone(),
+                // Filled from `http.public_url` by validation when absent.
+                ssh_host: config.ssh.host.clone().unwrap_or_default(),
+                ssh_port: config.ssh.port,
+                ssh_user: config.git.user.clone(),
+            });
             match transport::webauthn::Passkeys::new(
                 &config.http.public_url,
                 config.auth.session_ttl,

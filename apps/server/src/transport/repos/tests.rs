@@ -263,6 +263,7 @@ async fn get_returns_declared_fields_by_id_name_and_redirect_archived_included()
                 enabled: true,
             }],
             archived: false,
+            clone_urls: None,
         }
     );
     for repo in [
@@ -422,6 +423,7 @@ fn the_service_has_no_mutating_method() {
         [
             "GetRepo",
             "ListRepos",
+            "ListRefs",
             "GetTree",
             "GetBlob",
             "ListCommits",
@@ -1086,7 +1088,7 @@ async fn every_method_requires_a_credential_with_repo_read() {
     .unwrap();
     let repo = || "alice/demo".to_owned();
     let main = || "main".to_owned();
-    let calls: [(&str, Vec<u8>); 6] = [
+    let calls: [(&str, Vec<u8>); 7] = [
         (
             "GetRepo",
             GetRepoRequest {
@@ -1095,6 +1097,7 @@ async fn every_method_requires_a_credential_with_repo_read() {
             .encode_to_vec(),
         ),
         ("ListRepos", ListReposRequest::default().encode_to_vec()),
+        ("ListRefs", ListRefsRequest { repo: repo() }.encode_to_vec()),
         (
             "GetTree",
             GetTreeRequest {
@@ -1154,6 +1157,104 @@ async fn every_method_requires_a_credential_with_repo_read() {
             "{method}"
         );
     }
+}
+
+async fn refs(repos: &Repos, repo: &str) -> Result<Vec<GitRef>, Status> {
+    let request = as_alice(ListRefsRequest { repo: repo.into() });
+    Ok(repos.list_refs(request).await?.into_inner().refs)
+}
+
+#[tokio::test]
+async fn list_refs_gives_branches_and_tags_with_their_commits() {
+    let fixture = Fixture::new(&format!(
+        "{DEMO}[repos.empty]\nowner='alice'\ndescription=''\n"
+    ))
+    .await;
+    fixture
+        .fill(
+            "alice/demo",
+            &[("a", "1")],
+            &["refs/heads/b1", "refs/tags/v1"],
+        )
+        .await;
+    let bare = fixture.bare("alice/demo").await;
+    let main = git(&bare, &["rev-parse", "main"]).trim().to_owned();
+    // An annotated tag, another namespace and a tag naming a tree.
+    git(&bare, &["tag", "-a", "-m", "release", "v2", &main]);
+    git(&bare, &["update-ref", "refs/contrib/bob/x", &main]);
+    git(&bare, &["tag", "tree", &format!("{main}^{{tree}}")]);
+    let repos = &fixture.repos;
+    let listed = refs(repos, "alice/demo").await.unwrap();
+    assert_eq!(
+        listed.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+        [
+            "refs/heads/b1",
+            "refs/heads/main",
+            "refs/tags/v1",
+            "refs/tags/v2"
+        ]
+    );
+    let by = |name: &str| listed.iter().find(|r| r.name == name).unwrap();
+    assert_eq!(by("refs/heads/main").commit_id, main);
+    assert!(by("refs/heads/main").tag_id.is_empty());
+    assert!(by("refs/tags/v1").tag_id.is_empty());
+    let annotated = by("refs/tags/v2");
+    assert_eq!(annotated.commit_id, main);
+    assert_eq!(annotated.tag_id, git(&bare, &["rev-parse", "v2"]).trim());
+    // A repository with no ref, and one the caller cannot see.
+    assert!(refs(repos, "alice/empty").await.unwrap().is_empty());
+    let status = refs(repos, "alice/missing").await.unwrap_err();
+    assert_eq!(
+        (status.code(), reason(&status)),
+        (Code::NotFound, "REPO_NOT_FOUND".into())
+    );
+}
+
+#[tokio::test]
+async fn repos_advertise_clone_urls_unless_archived() {
+    let mut fixture = Fixture::new(DEMO).await;
+    let base = |host: &str, port| CloneBase {
+        https: "https://forge.example.org/".into(),
+        ssh_host: host.into(),
+        ssh_port: port,
+        ssh_user: "kajiba-git".into(),
+    };
+    // Not set: nothing advertised.
+    let repo = get(
+        &fixture.repos,
+        get_repo_request::Repo::Name("alice/demo".into()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(repo.clone_urls, None);
+    fixture
+        .repos
+        .0
+        .set_clone_base(base("git.example.org", 2222));
+    let repo = get(
+        &fixture.repos,
+        get_repo_request::Repo::Name("alice/demo".into()),
+    )
+    .await
+    .unwrap();
+    let urls = repo.clone_urls.unwrap();
+    assert_eq!(urls.https, "https://forge.example.org/alice/demo.git");
+    assert_eq!(
+        urls.ssh,
+        "ssh://kajiba-git@git.example.org:2222/alice/demo.git"
+    );
+    assert_eq!(
+        base("forge.example.org", 22).for_repo("a", "b").ssh,
+        "ssh://kajiba-git@forge.example.org:22/a/b.git"
+    );
+    fixture.apply("").await;
+    let repo = get(
+        &fixture.repos,
+        get_repo_request::Repo::Name("alice/demo".into()),
+    )
+    .await
+    .unwrap();
+    assert!(repo.archived && repo.clone_urls.is_none());
 }
 
 #[tokio::test]

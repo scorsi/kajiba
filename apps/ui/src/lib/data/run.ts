@@ -176,5 +176,4 @@ export const CHANGE_LABEL: Record<ChangeKind, string> = {
   [ChangeKind.ADDED]: "added",
   [ChangeKind.MODIFIED]: "modified",
   [ChangeKind.DELETED]: "deleted",
-  [ChangeKind.RENAMED]: "renamed",
 };
