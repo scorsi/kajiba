@@ -121,6 +121,12 @@ fn chunk(sequence: u64, data: &str) -> Message {
     })
 }
 
+fn accepted() -> Message {
+    Message::Accept(Accept {
+        attempt_id: "A1".into(),
+    })
+}
+
 #[test]
 fn backoff_doubles_from_one_second_up_to_thirty() {
     let mut delays = Vec::new();
@@ -164,7 +170,7 @@ async fn logs_and_results_are_kept_until_acknowledged_and_resent_after_a_continu
     };
     attempts.receive(resumed());
     attempts.receive(ack(1));
-    assert_eq!(drain(), [chunk(2, "two"), chunk(3, "three")]);
+    assert_eq!(drain(), [accepted(), chunk(2, "two"), chunk(3, "three")]);
     let result = RunResult {
         attempt_id: "A1".into(),
         state: ResultState::Failed.into(),
@@ -176,7 +182,7 @@ async fn logs_and_results_are_kept_until_acknowledged_and_resent_after_a_continu
     assert_eq!(drain(), [Message::Result(result.clone())]);
     attempts.receive(resumed());
     attempts.receive(ack(3));
-    assert_eq!(drain(), [Message::Result(result)]);
+    assert_eq!(drain(), [accepted(), Message::Result(result)]);
     attempts.receive(connect_response::Message::ResultAck(ResultAck {
         attempt_id: "A1".into(),
     }));
@@ -253,7 +259,12 @@ async fn completion_during_reconnection_waits_for_log_replay() {
             .collect();
         assert_eq!(
             messages,
-            [chunk(2, "two"), chunk(3, "three"), Message::Result(result)]
+            [
+                accepted(),
+                chunk(2, "two"),
+                chunk(3, "three"),
+                Message::Result(result)
+            ]
         );
         attempts.receive(connect_response::Message::ResultAck(ResultAck {
             attempt_id: "A1".into(),
@@ -326,6 +337,7 @@ async fn steps_completed_during_an_outage_are_replayed_before_the_result() {
         assert_eq!(
             messages,
             [
+                accepted(),
                 step(0, StepState::Succeeded, Some(0)),
                 step(1, StepState::Failed, Some(1)),
                 Message::Result(result),
@@ -390,6 +402,8 @@ async fn reconnection_resumes_in_flight_attempts_with_backoff() {
         })))
         .await
         .unwrap();
+    // The Accept may never have reached the server: it is replayed first.
+    assert_eq!(next(&mut first.requests).await, accepted());
     assert_eq!(next(&mut first.requests).await, chunk(2, "two"));
     assert_eq!(next(&mut first.requests).await, chunk(3, "three"));
     let assignment = Assignment {

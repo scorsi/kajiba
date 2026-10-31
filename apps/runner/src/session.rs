@@ -217,12 +217,12 @@ impl Attempts {
                 self.1.notify_waiters();
                 if std::mem::take(&mut held.resend) {
                     held.reconciling = false;
-                    let mut resent: Vec<Message> = held
-                        .unacknowledged
-                        .iter()
-                        .cloned()
-                        .map(Message::LogChunk)
-                        .collect();
+                    // The Accept may have been lost with the connection: the server's
+                    // heartbeat renews only accepted attempts (0008: statuses replay).
+                    let mut resent = vec![Message::Accept(Accept {
+                        attempt_id: ack.attempt_id.clone(),
+                    })];
+                    resent.extend(held.unacknowledged.iter().cloned().map(Message::LogChunk));
                     resent.extend(held.steps.values().cloned().map(Message::StepStatus));
                     resent.extend(held.result.clone().map(Message::Result));
                     for message in resent {
