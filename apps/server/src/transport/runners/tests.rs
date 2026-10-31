@@ -23,7 +23,7 @@ struct Forge {
 impl Forge {
     /// `build-1` (aarch64-linux, nix and process, tag kvm, 2 jobs) and `build-2` (same,
     /// another secret) are declared; `gone` was declared once and is disabled.
-    async fn start() -> Self {
+    async fn state() -> State {
         let state = State::new();
         state.start().await;
         let dir = &state.health.state_dir;
@@ -64,6 +64,11 @@ impl Forge {
             bus: Arc::default(),
             wake: Arc::default(),
         });
+        state
+    }
+
+    async fn start() -> Self {
+        let state = Self::state().await;
         let registry = Arc::new(Registry::default());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -225,6 +230,109 @@ fn hello(name: &str) -> Hello {
 fn other_minor() -> String {
     let (major, minor, _) = kajiba_core::version::semver(VERSION).unwrap();
     format!("{major}.{}.0", minor + 1)
+}
+
+#[tokio::test]
+async fn a_stalled_runner_does_not_block_matching_or_lease_expiry() {
+    let state = Forge::state().await;
+    let runners = Runners::new(state.health.clone(), Arc::default());
+    let (stalled, _unread) = mpsc::channel(1);
+    stalled.try_send(Ok(cancel("unknown"))).unwrap();
+    let (stalled_id, generation, mut ended) = runners
+        .admit(
+            Some(SECRET.as_bytes().to_vec()),
+            &hello("build-1"),
+            "test",
+            stalled,
+        )
+        .await
+        .unwrap();
+    let (healthy, mut received) = mpsc::channel(4);
+    runners
+        .admit(
+            Some(OTHER_SECRET.as_bytes().to_vec()),
+            &hello("build-2"),
+            "test",
+            healthy,
+        )
+        .await
+        .unwrap();
+    let now = crate::db::runs::now();
+    {
+        let mut writer = state.health.writer.get().unwrap().lock().await;
+        sqlx::raw_sql("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
+            INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')")
+            .execute(&mut *writer).await.unwrap();
+        let mut tx = writer.begin().await.unwrap();
+        for _ in 0..2 {
+            crate::db::runs::create_run(
+                &mut tx,
+                &crate::db::runs::NewRun {
+                    repo_id: 1,
+                    sha: SHA,
+                    reference: Some("refs/heads/main"),
+                    trigger: "push",
+                    event_id: None,
+                    triggered_by: Some(1),
+                    correlation_id: "test",
+                    now,
+                    worktree: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(1), runners.pass(now))
+        .await
+        .expect("a full runner queue blocked the scheduler");
+    assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+    assert!(!runners.live.lock().unwrap().1.contains_key("build-1"));
+    assert!(matches!(
+        received.try_recv().unwrap().unwrap().message,
+        Some(connect_response::Message::Assignment(_))
+    ));
+    {
+        let mut writer = state.health.writer.get().unwrap().lock().await;
+        let connected: bool = sqlx::query_scalar("SELECT connected FROM runner WHERE id = ?")
+            .bind(stalled_id)
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap();
+        assert!(!connected);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM event WHERE kind = 'runner-disconnected'"
+            )
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap(),
+            1
+        );
+    }
+    // A late cleanup from the ended session is harmless.
+    runners
+        .disconnected(stalled_id, "build-1", generation, "test")
+        .await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        runners.pass(now + attempts::LEASE_MS + 1),
+    )
+    .await
+    .expect("lease expiry stopped after disconnecting the stalled runner");
+    assert!(matches!(
+        received.try_recv().unwrap().unwrap().message,
+        Some(connect_response::Message::Assignment(_))
+    ));
+    let mut writer = state.health.writer.get().unwrap().lock().await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM job_attempt WHERE state = 'lost'")
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap(),
+        2
+    );
 }
 
 #[tokio::test]

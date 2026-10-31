@@ -472,11 +472,11 @@ impl Runners {
                 .lock()
                 .unwrap()
                 .1
-                .values()
-                .find(|live| live.offer.runner_id == assigned.runner_id)
-                .map(|live| live.outbound.clone());
+                .iter()
+                .find(|(_, live)| live.offer.runner_id == assigned.runner_id)
+                .map(|(name, live)| (name.clone(), live.generation, live.outbound.clone()));
             // A runner gone since leaves its attempt to lease expiry (0008).
-            if let Some(outbound) = outbound {
+            if let Some((name, generation, outbound)) = outbound {
                 let message = connect_response::Message::Assignment(Assignment {
                     attempt_id: assigned.attempt,
                     repo_public_id: assigned.repo,
@@ -484,7 +484,11 @@ impl Runners {
                     system: assigned.system,
                     checks: assigned.checks,
                 });
-                let _ = outbound.send(Ok(response(message))).await;
+                // A stalled runner must not stop matching or lease expiry (0109).
+                if outbound.try_send(Ok(response(message))).is_err() {
+                    self.disconnected(assigned.runner_id, &name, generation, "")
+                        .await;
+                }
             }
         }
     }
@@ -718,29 +722,30 @@ impl RunnerService for Runners {
             .await?;
         let runners = self.clone();
         tokio::spawn(async move {
-            let mut open = answer(
-                &outbound,
-                runners.resume(id, &hello.in_flight_attempt_ids).await,
-            )
-            .await;
-            while open {
-                tokio::select! {
-                    _ = &mut replaced => {
-                        let _ = outbound
-                            .send(Err(Status::aborted("replaced by a newer connection of this runner")))
-                            .await;
-                        return;
-                    }
-                    message = inbound.message() => match message {
-                        Ok(Some(ConnectRequest { message: Some(message) })) => {
-                            let answers = runners.handle((id, &hello.name), &request_id, message).await;
-                            open = answer(&outbound, answers).await;
-                        }
-                        Ok(Some(_)) => {}
-                        Ok(None) | Err(_) => break,
-                    },
-                    () = outbound.closed() => break,
+            tokio::select! {
+                _ = &mut replaced => {
+                    let _ = outbound.try_send(Err(Status::aborted("runner connection ended")));
                 }
+                () = async {
+                    let mut open = answer(
+                        &outbound,
+                        runners.resume(id, &hello.in_flight_attempt_ids).await,
+                    )
+                    .await;
+                    while open {
+                        tokio::select! {
+                            message = inbound.message() => match message {
+                                Ok(Some(ConnectRequest { message: Some(message) })) => {
+                                    let answers = runners.handle((id, &hello.name), &request_id, message).await;
+                                    open = answer(&outbound, answers).await;
+                                }
+                                Ok(Some(_)) => {}
+                                Ok(None) | Err(_) => break,
+                            },
+                            () = outbound.closed() => break,
+                        }
+                    }
+                } => {}
             }
             runners
                 .disconnected(id, &hello.name, generation, &request_id)
