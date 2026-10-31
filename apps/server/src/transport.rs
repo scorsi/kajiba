@@ -46,6 +46,8 @@ pub struct Health {
     local_serving: Arc<local::Serving>,
     public_reads: Arc<Semaphore>,
     webauthn_requests: Arc<Semaphore>,
+    /// `WatchRun` streams per principal (0120).
+    watchers: Arc<slots::Slots<i64>>,
     gate_serving: Arc<local::Serving>,
     git_side: Arc<git_side::Link>,
     ssh_probe: Option<SocketAddr>,
@@ -69,6 +71,7 @@ impl Health {
             local_serving: Arc::default(),
             public_reads: Arc::new(Semaphore::new(PUBLIC_READS)),
             webauthn_requests: Arc::new(Semaphore::new(webauthn::MAX_REQUESTS)),
+            watchers: slots::Slots::new(runs::MAX_WATCHERS),
             gate_serving: Arc::default(),
             git_side: Arc::default(),
             ssh_probe,
@@ -221,10 +224,7 @@ fn router(
             }),
         )
         // Only the routes added so far: reflection is a bidirectional stream.
-        .route_layer(middleware::from_fn_with_state(
-            REQUEST_TIMEOUT,
-            request_timeout,
-        ));
+        .route_layer(middleware::from_fn_with_state(TIMEOUTS, request_timeout));
     if reflection {
         let reflection = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(kajiba_proto::FILE_DESCRIPTOR_SET)
@@ -273,8 +273,23 @@ const PUBLIC: Limits = Limits {
     connections: 1024,
     header_read: Duration::from_secs(30),
 };
-/// Time to produce a response head on non-streaming routes, request body included.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Time to produce a response head on non-streaming routes, request body included; a
+/// worktree upload is bounded by its own idle and total times instead (0120).
+#[derive(Clone, Copy)]
+struct Timeouts {
+    request: Duration,
+    upload_idle: Duration,
+    upload: Duration,
+}
+
+const TIMEOUTS: Timeouts = Timeouts {
+    request: Duration::from_secs(30),
+    upload_idle: Duration::from_secs(30),
+    upload: Duration::from_secs(10 * 60),
+};
+
+/// The client-streaming upload of a worktree run's bundle (0097, 0120).
+const UPLOAD_PATH: &str = "/kajiba.v1.RunService/CreateWorktreeRun";
 /// Shared by public reads; gzip upload-pack costs eight permits (ADR 0058).
 const PUBLIC_READS: usize = 32;
 
@@ -294,7 +309,7 @@ fn refusal(request: &HttpRequest, http: StatusCode, grpc: tonic::Code) -> HttpRe
 }
 
 async fn request_timeout(
-    State(limit): State<Duration>,
+    State(timeouts): State<Timeouts>,
     request: HttpRequest,
     next: Next,
 ) -> HttpResponse {
@@ -303,9 +318,58 @@ async fn request_timeout(
         StatusCode::REQUEST_TIMEOUT,
         tonic::Code::DeadlineExceeded,
     );
+    let (limit, request) = if request.uri().path() == UPLOAD_PATH {
+        let idle = timeouts.upload_idle;
+        let request = request.map(|body| axum::body::Body::new(Idle::new(body, idle)));
+        (timeouts.upload, request)
+    } else {
+        (timeouts.request, request)
+    };
     tokio::time::timeout(limit, next.run(request))
         .await
         .unwrap_or(refused)
+}
+
+/// A request body that fails once no byte arrived for its idle time (0120).
+struct Idle {
+    body: axum::body::Body,
+    idle: Duration,
+    deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+}
+
+impl Idle {
+    fn new(body: axum::body::Body, idle: Duration) -> Self {
+        Self {
+            body,
+            idle,
+            deadline: Box::pin(tokio::time::sleep(idle)),
+        }
+    }
+}
+
+impl http_body::Body for Idle {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        use std::{future::Future, task::Poll};
+        if let Poll::Ready(frame) = std::pin::Pin::new(&mut self.body).poll_frame(cx) {
+            let next = tokio::time::Instant::now() + self.idle;
+            self.deadline.as_mut().reset(next);
+            return Poll::Ready(frame);
+        }
+        std::task::ready!(self.deadline.as_mut().poll(cx));
+        Poll::Ready(Some(Err(axum::Error::new(Status::deadline_exceeded(
+            "no bytes received for the upload's idle time",
+        )))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
 }
 
 use kajiba_core::local::accept_backoff;

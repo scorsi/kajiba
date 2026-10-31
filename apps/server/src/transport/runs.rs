@@ -513,6 +513,19 @@ type Watcher = mpsc::Sender<Result<WatchRunResponse, Status>>;
 
 /// Watchers re-read the run this often even without a progress signal.
 const WATCH_PERIOD: Duration = Duration::from_secs(1);
+/// ADR 0120: `WatchRun` streams at once per principal, and server-wide.
+const WATCHERS_PER_PRINCIPAL: usize = 16;
+pub const MAX_WATCHERS: usize = 256;
+/// ADR 0120: a watcher whose delivery is stalled this long is cut.
+const WATCH_STALL: Duration = Duration::from_secs(60);
+
+/// Hand `item` to the watcher's stream; false once it is gone or stalled.
+async fn deliver(watcher: &Watcher, item: Result<WatchRunResponse, Status>) -> bool {
+    matches!(
+        tokio::time::timeout(WATCH_STALL, watcher.send(item)).await,
+        Ok(Ok(()))
+    )
+}
 
 impl Runs {
     /// Stream the run's log from `position`, then its terminal state; returns when the
@@ -525,12 +538,8 @@ impl Runs {
         mut progress: watch::Receiver<()>,
         watcher: &Watcher,
     ) -> Result<(), Status> {
-        let send = async |event| {
-            watcher
-                .send(Ok(WatchRunResponse { event: Some(event) }))
-                .await
-                .is_ok()
-        };
+        let send =
+            async |event| deliver(watcher, Ok(WatchRunResponse { event: Some(event) })).await;
         let mut marked: Option<String> = None;
         loop {
             // Marked seen before the snapshot: a commit after it wakes the next wait.
@@ -638,16 +647,30 @@ impl RunService for Runs {
         let mut connection = self.readers()?.begin().await.map_err(internal)?;
         let run = readable_run(&mut connection, user, &request.run).await?.1;
         drop(connection);
+        let slot = self
+            .0
+            .watchers
+            .take(user, WATCHERS_PER_PRINCIPAL)
+            .ok_or_else(|| {
+                refused(
+                    tonic::Code::ResourceExhausted,
+                    "WATCH_STREAMS_LIMIT",
+                    format!(
+                        "at most {WATCHERS_PER_PRINCIPAL} run watches per caller and {MAX_WATCHERS} in all may be open"
+                    ),
+                )
+            })?;
         // Subscribed before the first snapshot: nothing stored after it is missed.
         let progress = self.0.ci_progress.subscribe();
         let (watcher, events) = mpsc::channel(4);
         let runs = self.clone();
         tokio::spawn(async move {
+            let _slot = slot;
             if let Err(status) = runs
                 .watch(&run, request.offset, request.follow, progress, &watcher)
                 .await
             {
-                let _ = watcher.send(Err(status)).await;
+                deliver(&watcher, Err(status)).await;
             }
         });
         Ok(Response::new(Box::pin(

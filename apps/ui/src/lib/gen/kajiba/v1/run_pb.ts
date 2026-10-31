@@ -812,7 +812,8 @@ export const RunService: GenService<{
    * A run's log: the stored bytes from `offset`, then, when following, live bytes as
    * the forge stores them, then the run once terminal, and the stream ends. Each
    * attempt's bytes are preceded by its section marker; a replayed attempt opens a new
-   * section. Not bound by the request timeout.
+   * section. Not bound by the request timeout. At most 16 open per caller and 256 in all
+   * (RESOURCE_EXHAUSTED / WATCH_STREAMS_LIMIT); a stream not read for 60 s is cut (ADR 0120).
    *
    * @generated from rpc kajiba.v1.RunService.WatchRun
    */
@@ -840,6 +841,8 @@ export const RunService: GenService<{
    * BUNDLE_TOO_LARGE above 64 MiB, BUNDLE_INVALID when not a bundle with exactly one
    * head, BUNDLE_PREREQUISITE_MISSING when a prerequisite is not reachable from
    * `refs/heads/*` or `refs/tags/*`; INVALID_FIELD when the messages are out of order.
+   * Not bound by the request timeout: DEADLINE_EXCEEDED after 30 s without a byte or
+   * 10 min in all (ADR 0120).
    *
    * @generated from rpc kajiba.v1.RunService.CreateWorktreeRun
    */

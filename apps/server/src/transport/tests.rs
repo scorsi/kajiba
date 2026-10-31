@@ -1064,13 +1064,82 @@ async fn non_streaming_routes_time_out_with_http_or_grpc_status() {
             }),
         )
         .route_layer(middleware::from_fn_with_state(
-            Duration::from_millis(50),
+            Timeouts {
+                request: Duration::from_millis(50),
+                ..TIMEOUTS
+            },
             request_timeout,
         ));
     assert_eq!(get(&mut app, "/slow").await, StatusCode::REQUEST_TIMEOUT);
     let response = grpc(&mut app, "/slow", CheckRequest {}).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["grpc-status"], "4");
+}
+
+#[tokio::test]
+async fn a_worktree_upload_is_cut_when_idle_or_too_long_not_by_the_request_timeout() {
+    // The handler reads the whole body, as `CreateWorktreeRun` does, then answers.
+    let app = Router::new()
+        .route(
+            UPLOAD_PATH,
+            axum::routing::post(|body: Body| async move {
+                match axum::body::to_bytes(body, usize::MAX).await {
+                    Ok(bytes) => format!("read {}", bytes.len()),
+                    Err(err) => format!("cut: {err}"),
+                }
+            }),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            Timeouts {
+                request: Duration::from_millis(100),
+                upload_idle: Duration::from_millis(300),
+                upload: Duration::from_millis(1500),
+            },
+            request_timeout,
+        ));
+    // One byte every 100 ms: beyond the request timeout, within the idle time.
+    let trickle = |pause: Duration, count: usize| {
+        let (sender, receiver) =
+            tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(1);
+        tokio::spawn(async move {
+            for _ in 0..count {
+                tokio::time::sleep(pause).await;
+                if sender
+                    .send(Ok(axum::body::Bytes::from_static(b"x")))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(receiver))
+    };
+    let call = |body: Body| {
+        let mut app = app.clone();
+        async move {
+            let response = app
+                .call(http::Request::post(UPLOAD_PATH).body(body).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let text = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            (status, String::from_utf8(text.to_vec()).unwrap())
+        }
+    };
+    assert_eq!(
+        call(trickle(Duration::from_millis(100), 5)).await,
+        (StatusCode::OK, "read 5".into())
+    );
+    // Silent past the idle time: the body fails.
+    let (status, text) = call(trickle(Duration::from_millis(600), 2)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(text.starts_with("cut: "), "{text}");
+    // Steady but past the total time: refused.
+    let (status, _) = call(trickle(Duration::from_millis(100), 30)).await;
+    assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
 }
 
 #[test]

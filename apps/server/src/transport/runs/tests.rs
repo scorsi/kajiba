@@ -1342,3 +1342,71 @@ async fn worktree_bundles_are_refused_with_nothing_left_on_disk() {
         .unwrap();
     assert_eq!(runs_count, 0);
 }
+
+#[tokio::test]
+async fn run_watches_are_bounded_per_caller_and_in_all() {
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, ALICE, "alice/ci", &tip)
+        .await
+        .unwrap()
+        .public_id;
+    let mut open = Vec::new();
+    for _ in 0..WATCHERS_PER_PRINCIPAL {
+        open.push(watch(&runs, BOB, &run, 0, true).await.unwrap());
+    }
+    let status = watch(&runs, BOB, &run, 0, true).await.err().unwrap();
+    assert_eq!(
+        (status.code(), reason(&status).as_str()),
+        (Code::ResourceExhausted, "WATCH_STREAMS_LIMIT")
+    );
+    // Another caller has its own places; a closed watch gives its place back.
+    let alice = watch(&runs, ALICE, &run, 0, true).await.unwrap();
+    drop(open.pop());
+    let mut reopened = None;
+    for _ in 0..100 {
+        if let Ok(events) = watch(&runs, BOB, &run, 0, true).await {
+            reopened = Some(events);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(reopened.is_some());
+    // The server-wide bound counts every caller.
+    drop((open, alice, reopened));
+    let slots = &runs.0.watchers;
+    let mut held = Vec::new();
+    for _ in 0..100 {
+        held.clear();
+        held.extend((0..MAX_WATCHERS as i64).map_while(|user| slots.take(user + 100, 1)));
+        if held.len() == MAX_WATCHERS {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(held.len(), MAX_WATCHERS);
+    let status = watch(&runs, ALICE, &run, 0, true).await.err().unwrap();
+    assert_eq!(status.code(), Code::ResourceExhausted);
+}
+
+#[tokio::test]
+async fn an_upload_silent_past_its_idle_time_ends_with_deadline_exceeded() {
+    use tonic::codec::Codec;
+    let (_fixture, runs) = fixture("").await;
+    let (_sender, receiver) =
+        tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(1);
+    let body = axum::body::Body::new(crate::transport::Idle::new(
+        axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(receiver)),
+        Duration::from_millis(50),
+    ));
+    let decoder =
+        tonic::codec::ProstCodec::<CreateWorktreeRunResponse, CreateWorktreeRunRequest>::default()
+            .decoder();
+    let parts = tonic::Streaming::new_request(decoder, body, None, None);
+    let status = runs
+        .create_worktree_run(as_user(BOB, parts))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(status.code(), Code::DeadlineExceeded, "{status:?}");
+}
