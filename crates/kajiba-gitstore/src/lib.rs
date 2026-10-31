@@ -177,6 +177,20 @@ pub trait GitStore {
         limit: usize,
         max_bytes: usize,
     ) -> Result<Vec<Commit>>;
+    /// As `log`, keeping only the commits whose change against their first parent
+    /// touches `path` (ADR 0137), and `skip` counts commits walked, not kept. The
+    /// second value is where to resume (`skip` of the next call) when the page ended
+    /// before the history did: `limit` kept, `max_bytes` passed or the comparison
+    /// budget spent; `None` when the walk is complete.
+    fn log_path(
+        &self,
+        repo: &Path,
+        commit: &str,
+        path: &str,
+        skip: usize,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<(Vec<Commit>, Option<usize>)>;
     /// Changes from `from` (the empty tree when `None`) to `to`, refused during the
     /// walk past `max_changes` of them or `max_bytes` of paths.
     fn diff(
@@ -770,6 +784,32 @@ fn tree_at<'r>(
     load_tree(repo, id, work)
 }
 
+/// The mode and id of the entry at `path` in a commit's tree, `None` when absent.
+fn entry_at(
+    repo: &gix::Repository,
+    commit: &gix::Commit<'_>,
+    path: &str,
+    work: &mut Traversal<'_>,
+) -> Result<Option<(gix::object::tree::EntryMode, gix::ObjectId)>> {
+    let mut id = commit
+        .tree_id()
+        .map_err(|err| Error::Git(err.to_string()))?
+        .detach();
+    let mut found: Option<(gix::object::tree::EntryMode, gix::ObjectId)> = None;
+    for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+        if found.is_some_and(|(mode, _)| !mode.is_tree()) {
+            return Ok(None);
+        }
+        let tree = load_tree(repo, id, work)?;
+        let Some(entry) = tree.find_entry(segment) else {
+            return Ok(None);
+        };
+        id = entry.oid().to_owned();
+        found = Some((entry.mode(), id));
+    }
+    Ok(found)
+}
+
 impl GitStore for Gix<'_> {
     fn verify_commits(
         &self,
@@ -1218,6 +1258,88 @@ impl GitStore for Gix<'_> {
         }
         work.check()?;
         Ok(commits)
+    }
+
+    fn log_path(
+        &self,
+        repo: &Path,
+        commit_id: &str,
+        path: &str,
+        skip: usize,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<(Vec<Commit>, Option<usize>)> {
+        use std::cmp::Reverse;
+        use std::collections::{BinaryHeap, HashSet};
+        let repo = self.open(repo)?;
+        let mut work = Traversal::new(self.cancelled);
+        work.path(path.as_bytes())?;
+        let tip = commit(&repo, commit_id, &mut work)?;
+        // The walk of `log`, with a path comparison per commit past `skip`.
+        let mut queue = BinaryHeap::from([(tip.time()?.seconds, Reverse(0), tip.id)]);
+        let mut seen = HashSet::from([tip.id]);
+        let mut commits = Vec::new();
+        let (mut bytes, mut walked, mut next) = (0, 0, None);
+        let mut base = None;
+        while let Some((_, _, id)) = queue.pop() {
+            let object = load_commit(&repo, id, &mut work)?;
+            let mut parents = Vec::new();
+            for parent in object.parent_ids() {
+                work.entry()?;
+                parents.push(parent.detach());
+            }
+            let index = walked;
+            walked += 1;
+            if index >= skip {
+                // The first comparison of a call is always made, so pages progress.
+                let base = *base.get_or_insert_with(|| work.usage());
+                if work.spent_since(base) {
+                    next = Some(index);
+                    break;
+                }
+                let before = match parents.first() {
+                    Some(parent) => {
+                        let parent = load_commit(&repo, *parent, &mut work)?;
+                        entry_at(&repo, &parent, path, &mut work)?
+                    }
+                    None => None,
+                };
+                if entry_at(&repo, &object, path, &mut work)? != before {
+                    if commits.len() == limit {
+                        next = Some(index);
+                        break;
+                    }
+                    let author = object.author()?;
+                    let commit = Commit {
+                        id: id.to_string(),
+                        parents: parents.iter().map(|id| id.to_string()).collect(),
+                        author_name: author.name.to_string(),
+                        author_email: author.email.to_string(),
+                        time: object.time()?.seconds,
+                        message: object.message_raw_sloppy().to_string(),
+                    };
+                    bytes += commit.page_bytes();
+                    commits.push(commit);
+                    if bytes > max_bytes {
+                        next = Some(index + 1);
+                        break;
+                    }
+                }
+            }
+            for parent in parents {
+                work.check()?;
+                if !seen.contains(&parent) {
+                    if queue.len() == traversal::MAX_FRONTIER {
+                        return Err(Error::TooLarge(Limit::Traversal));
+                    }
+                    let time = load_commit(&repo, parent, &mut work)?.time()?.seconds;
+                    seen.insert(parent);
+                    queue.push((time, Reverse(seen.len()), parent));
+                }
+            }
+        }
+        work.check()?;
+        Ok((commits, next))
     }
 
     fn diff(

@@ -1059,6 +1059,111 @@ fn log_follows_merges_in_commit_time_order_and_pages_without_gaps() {
     assert_eq!(paged, expected);
 }
 
+fn path_log(
+    f: &Fixture,
+    tip: &str,
+    path: &str,
+    skip: usize,
+    limit: usize,
+) -> (Vec<String>, Option<usize>) {
+    let (log, next) = Gix
+        .log_path(&f.bare, tip, path, skip, limit, usize::MAX)
+        .unwrap();
+    (log.into_iter().map(|c| c.id).collect(), next)
+}
+
+#[test]
+fn log_path_keeps_the_commits_touching_a_file_or_directory() {
+    let f = fixture("log-path");
+    let (a, b, c) = (f.third.clone(), f.second.clone(), f.first.clone());
+    for (path, expected) in [
+        ("README.md", vec![&a, &b, &c]),
+        // Added by the first commit, deleted by the second: absent at the tip.
+        ("src/lib.rs", vec![&b, &c]),
+        ("src", vec![&b, &c]),
+        ("docs", vec![&b]),
+        ("docs/a.md", vec![&b]),
+        ("run.sh", vec![&c]),
+        ("nope", vec![]),
+        // A file path through a file is no path.
+        ("README.md/x", vec![]),
+    ] {
+        let (ids, next) = path_log(&f, &a, path, 0, 10);
+        assert_eq!(ids.iter().collect::<Vec<_>>(), expected, "{path}");
+        assert_eq!(next, None, "{path}");
+    }
+}
+
+#[test]
+fn log_path_resumes_by_walked_commits_without_duplicates() {
+    let f = fixture("log-path-pages");
+    let (ids, next) = path_log(&f, &f.third, "README.md", 0, 1);
+    assert_eq!((ids, next), (vec![f.third.clone()], Some(1)));
+    let (ids, next) = path_log(&f, &f.third, "README.md", 1, 1);
+    assert_eq!((ids, next), (vec![f.second.clone()], Some(2)));
+    let (ids, next) = path_log(&f, &f.third, "README.md", 2, 1);
+    assert_eq!((ids, next), (vec![f.first.clone()], None));
+    // The next match is looked for past the page: none ahead, no token.
+    let (ids, next) = path_log(&f, &f.third, "docs", 0, 1);
+    assert_eq!((ids, next), (vec![f.second.clone()], None));
+    // A cut by bytes resumes after the last kept commit.
+    let (log, next) = Gix
+        .log_path(&f.bare, &f.third, "README.md", 0, 10, 0)
+        .unwrap();
+    assert_eq!((log.len(), next), (1, Some(1)));
+}
+
+#[test]
+fn log_path_compares_merges_to_their_first_parent_and_spends_a_budget() {
+    let f = fixture("log-path-merge");
+    let tree = |rev: &str| {
+        git(
+            &f.bare,
+            &["rev-parse", &format!("{rev}^{{tree}}")],
+            "0 +0000",
+        )
+    };
+    let side = git(
+        &f.bare,
+        &["commit-tree", &tree(&f.first), "-p", &f.first, "-m", "side"],
+        "1700000150 +0000",
+    );
+    // The merge takes the third commit's tree: it differs from `side`, its second
+    // parent, but not from the third, its first.
+    let merge = git(
+        &f.bare,
+        &[
+            "commit-tree",
+            &tree(&f.third),
+            "-p",
+            &f.third,
+            "-p",
+            &side,
+            "-m",
+            "merge",
+        ],
+        "1700000300 +0000",
+    );
+    let (ids, _) = path_log(&f, &merge, "README.md", 0, 10);
+    assert_eq!(ids, [f.third.clone(), f.second.clone(), f.first.clone()]);
+    // A long history of empty commits ends a page short with a resume point.
+    let empty = tree(&f.first);
+    let mut tip = f.first.clone();
+    for i in 0..2000 {
+        tip = git(
+            &f.bare,
+            &["commit-tree", &empty, "-p", &tip, "-m", "e"],
+            &format!("{} +0000", 1_700_001_000 + i),
+        );
+    }
+    let (ids, next) = path_log(&f, &tip, "docs", 0, 10);
+    assert!(ids.is_empty());
+    let next = next.expect("the budget ended the page");
+    assert!(next > 0 && next < 2000);
+    let (ids, _) = path_log(&f, &tip, "run.sh", next, 10);
+    assert!(ids.len() <= 1);
+}
+
 /// Writes a commit object directly, so its author name has no command-line bound.
 fn raw_commit(bare: &Path, tree: &str, parents: &[&str], author: &str, time: u64) -> String {
     let mut content = format!("tree {tree}\n");

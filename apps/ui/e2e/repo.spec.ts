@@ -71,3 +71,39 @@ test("alice/demo: open a nested file from the Files band, its size and raw bytes
   );
   expect(await response.text()).toBe("Start here.\n");
 });
+
+test("alice/demo: history per branch, filtered by a file, a commit and its diff", async ({
+  page,
+}) => {
+  await authenticator(page);
+  await enroll(page, enrollLink());
+  await page.getByRole("link", { name: "Continue to kajiba" }).click();
+
+  // main has one commit, feature two.
+  await page.goto("/alice/demo?history=1");
+  const history = page.getByRole("region", { name: "History" });
+  await expect(history.getByText("Add the README and a guide")).toBeVisible();
+  await expect(history.getByText("Extend the guide")).toHaveCount(0);
+  await page.goto("/alice/demo?history=1&ref=feature");
+  await expect(history.getByText("Extend the guide")).toBeVisible();
+
+  // Filtered by the nested file: both commits touch it, the README's is not asked.
+  await page.goto(
+    "/alice/demo?history=1&ref=feature&path=docs%2Fguide%2Fintro.md",
+  );
+  await expect(page.getByText("2 commits touch")).toBeVisible();
+  await page.goto("/alice/demo?history=1&ref=feature&path=README.md");
+  await expect(page.getByText("1 commits touch")).toBeVisible();
+
+  // A commit, and the files it changed.
+  await page.goto("/alice/demo?history=1&ref=feature");
+  await history.getByRole("link", { name: /Extend the guide/ }).click();
+  await expect(page).toHaveURL(/at=[0-9a-f]{40}/);
+  await expect(
+    page.getByRole("heading", { name: "Extend the guide" }),
+  ).toBeVisible();
+  await expect(page.getByText("1 files changed")).toBeVisible();
+  await expect(page.getByText("As of")).toBeVisible();
+  await page.getByRole("link", { name: "Back to now" }).click();
+  await expect(page).not.toHaveURL(/at=/);
+});

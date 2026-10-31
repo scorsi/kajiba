@@ -98,7 +98,7 @@
 			listRuns({ pageSize: 200 }).then((r) => r.runs),
 			Promise.all(
 				list.map((r) =>
-					listCommits({ repo: `${r.owner}/${r.name}`, revision: r.defaultBranch, pageSize: 120 })
+					listCommits({ repo: `${r.owner}/${r.name}`, revision: r.defaultBranch, want: 120 })
 						.then((l) => l.commits)
 						.catch(() => [])
 				)

@@ -32,6 +32,18 @@ impl<'a> Traversal<'a> {
         }
     }
 
+    pub(super) fn usage(&self) -> (usize, usize, u64) {
+        (self.objects, self.entries, self.bytes)
+    }
+
+    /// Whether a path-filtered log has used its share of the budget since `base`:
+    /// a short page ends there (ADR 0137), well before the hard bounds refuse.
+    pub(super) fn spent_since(&self, base: (usize, usize, u64)) -> bool {
+        self.objects - base.0 >= 4_000
+            || self.entries - base.1 >= 40_000
+            || self.bytes - base.2 >= 16 << 20
+    }
+
     pub(super) fn check(&self) -> Result<()> {
         if self
             .cancelled

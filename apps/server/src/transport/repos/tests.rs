@@ -569,6 +569,7 @@ async fn commits(
             revision: revision.into(),
             page_size,
             page_token,
+            path: String::new(),
         }))
         .await
         .map(Response::into_inner)
@@ -754,6 +755,55 @@ async fn forged_commit_cursors_are_bounded_and_history_ends_without_a_token() {
     let rest = commits(repos, "", 2, page(2)).await.unwrap();
     assert_eq!(rest.commits.len(), 2);
     assert!(rest.next_page_token.is_empty());
+}
+
+#[tokio::test]
+async fn commit_listing_filters_by_path_and_keeps_it_in_the_token() {
+    let fixture = Fixture::new(DEMO).await;
+    fixture
+        .fill(
+            "alice/demo",
+            &[("flake.nix", "{ }\n"), ("src/lib.rs", "")],
+            &["refs/heads/b1", "refs/heads/b2"],
+        )
+        .await;
+    let repos = &fixture.repos;
+    let at = |path: &str, token: String| {
+        repos.list_commits(as_alice(ListCommitsRequest {
+            repo: "alice/demo".into(),
+            revision: "b2".into(),
+            page_size: 1,
+            page_token: token,
+            path: path.into(),
+        }))
+    };
+    // Only the first commit adds the files; the two empty ones touch nothing.
+    for path in ["flake.nix", "src", "src/lib.rs"] {
+        let page = at(path, String::new()).await.unwrap().into_inner();
+        assert_eq!(
+            page.commits
+                .iter()
+                .map(|c| c.message.as_str())
+                .collect::<Vec<_>>(),
+            ["init\n"],
+            "{path}"
+        );
+        assert!(page.next_page_token.is_empty(), "{path}");
+    }
+    let page = at("nope", String::new()).await.unwrap().into_inner();
+    assert!(page.commits.is_empty() && page.next_page_token.is_empty());
+    let status = at("a//b", String::new()).await.unwrap_err();
+    assert_eq!(status.code(), Code::InvalidArgument);
+    // A forged token for another path is still the token's own filter.
+    let tip = commits(repos, "b2", 1, String::new())
+        .await
+        .unwrap()
+        .commits
+        .remove(0)
+        .id;
+    let token = cursor::encode("v1.ListCommits", &format!("{tip}\nflake.nix"), 0);
+    let page = at("src", token).await.unwrap().into_inner();
+    assert_eq!(page.commits.len(), 1);
 }
 
 #[tokio::test]

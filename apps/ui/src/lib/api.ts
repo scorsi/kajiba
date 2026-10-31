@@ -246,25 +246,39 @@ export async function getBlob(req: {
   return { commitId, content };
 }
 
+/**
+ * One page of history, or up to `want` commits when set: the server clamps pages at
+ * 200 and may end a path-filtered page short (even empty) with a token (ADR 0137), so
+ * pages are followed, at most `MAX_PAGES` requests.
+ */
 export async function listCommits(req: {
   repo: RepoRef;
   revision: string;
   pageSize?: number;
   pageToken?: string;
-  /** ASSUMED (J5 task 3): only commits touching this path; ignored until then. */
+  /** Only commits touching this file or directory; empty for all. */
   path?: string;
+  want?: number;
 }) {
-  const res = await repos.listCommits({
-    repo: req.repo,
-    revision: short(req.revision),
-    pageSize: req.pageSize ?? 50,
-    pageToken: req.pageToken ?? "",
-  });
-  return {
-    commits: res.commits.map(toCommit),
-    nextPageToken: res.nextPageToken,
-  };
+  const want = req.want ?? 0;
+  const commits: Commit[] = [];
+  let pageToken = req.pageToken ?? "";
+  for (let page = 0; page < (want ? MAX_PAGES : 1); page++) {
+    const res = await repos.listCommits({
+      repo: req.repo,
+      revision: short(req.revision),
+      pageSize: req.pageSize ?? Math.min(want || 50, 200),
+      pageToken,
+      path: req.path ?? "",
+    });
+    commits.push(...res.commits.map(toCommit));
+    pageToken = res.nextPageToken;
+    if (!pageToken || commits.length >= want) break;
+  }
+  return { commits, nextPageToken: pageToken };
 }
+
+const MAX_PAGES = 8;
 
 function toCommit(c: CommitMessage): Commit {
   return {

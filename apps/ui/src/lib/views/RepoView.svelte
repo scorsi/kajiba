@@ -105,7 +105,7 @@
 	let logMore = $state(false);
 	const log = resource(async () => {
 		if (!head || empty) return [] as Commit[];
-		const res = await listCommits({ repo: repoKey, revision: head, path, pageSize: 400 });
+		const res = await listCommits({ repo: repoKey, revision: head, path, want: 400 });
 		logMore = !!res.nextPageToken;
 		return res.commits;
 	});
@@ -123,7 +123,11 @@
 	const today = new Date();
 	const dayKey = (dt: Date) =>
 		`${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
-	const atCommit = $derived(at ? log.data?.find((c) => c.id === at) : undefined);
+	// The commit of a time-travel banner may not touch the filtered path: fetch it alone.
+	const atFetched = resource(async () =>
+		at ? (await listCommits({ repo: repoKey, revision: at, pageSize: 1 })).commits[0] : undefined
+	);
+	const atCommit = $derived(at ? (log.data?.find((c) => c.id === at) ?? atFetched.data) : undefined);
 	const atDay = $derived(atCommit ? dayKey(toDate(atCommit.commitTime)!) : '');
 	const WORST = [RunState.RUNNING, RunState.FAILED, RunState.CANCELLED, RunState.SUCCEEDED];
 	const ribbon = $derived.by(() => {
@@ -213,16 +217,22 @@
 					return { kind: 'large' as const, size: sel.size };
 				throw e;
 			}
-			const change = changes.find((c) => c.path === p);
+			let change = changes.find((c) => c.path === p);
+			let shown = commit;
+			// Not time-travelling: diff against the revision before the latest change of the file.
+			if (!at) {
+				shown = (await listCommits({ repo: repoKey, revision: rev, path: p, want: 1 })).commits[0];
+				if (shown) change = (await getCommitDiff({ repo: repoKey, revision: shown.id })).changes.find((c) => c.path === p);
+			}
 			let before: Uint8Array | undefined;
 			if (change?.kind === ChangeKind.ADDED) before = new Uint8Array();
-			else if (commit && change && commit.parentIds[0])
+			else if (shown && change && shown.parentIds[0])
 				before = (
-					await getBlob({ repo: repoKey, revision: commit.parentIds[0], path: p }).catch(
+					await getBlob({ repo: repoKey, revision: shown.parentIds[0], path: p }).catch(
 						() => undefined
 					)
 				)?.content;
-			return { kind: 'file' as const, now, before, change, commit };
+			return { kind: 'file' as const, now, before, change, commit: shown };
 		}
 		if (commit) return { kind: 'commit' as const, commit, changes };
 		const col = cols?.find((c) => c.dir === dir);

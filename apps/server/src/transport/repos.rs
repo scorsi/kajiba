@@ -601,21 +601,27 @@ impl RepoService for Repos {
         let request = request.into_inner();
         kajiba_gitstore::check_revision(&request.revision)
             .map_err(git_error("REVISION_NOT_FOUND"))?;
+        path(&request.path)?;
         let size = cursor::page_size(request.page_size)? as usize;
-        // The cursor holds the first page's tip and the commits already returned, so
-        // pages stay stable under pushes and follow every parent of a merge.
+        // The cursor holds the first page's tip (and the path of a filtered listing)
+        // and the commits already walked, so pages stay stable under pushes and follow
+        // every parent of a merge.
         let cursor = match cursor::decode(METHOD, &request.page_token)? {
-            Some((tip, skip)) => Some((
-                tip,
-                usize::try_from(skip)
-                    .map_err(|_| cursor::invalid_field("page_token", "malformed cursor"))?,
-            )),
+            Some((key, skip)) => {
+                let (tip, filter) = key.split_once('\n').unwrap_or((&key, ""));
+                Some((
+                    tip.to_owned(),
+                    filter.to_owned(),
+                    usize::try_from(skip)
+                        .map_err(|_| cursor::invalid_field("page_token", "malformed cursor"))?,
+                ))
+            }
             None => None,
         };
         // Issued cursors never pass the bound: a deeper one is forged (ADR 0043).
         if cursor
             .as_ref()
-            .is_some_and(|(_, skip)| *skip > MAX_COMMIT_SKIP)
+            .is_some_and(|(_, _, skip)| *skip > MAX_COMMIT_SKIP)
         {
             return Err(refused(
                 tonic::Code::ResourceExhausted,
@@ -630,10 +636,25 @@ impl RepoService for Repos {
         let root = self.0.git_state_dir.join("repos");
         blocking(permit, move |cancelled| {
             let store = Gix::shared(&root).cancellable(cancelled);
-            let (tip, skip) = match cursor {
+            let (tip, filter, skip) = match cursor {
                 Some(cursor) => cursor,
-                None => (revision(&store, &dir, &request.revision)?, 0),
+                None => (revision(&store, &dir, &request.revision)?, request.path, 0),
             };
+            if !filter.is_empty() {
+                let (page, next) = store
+                    .log_path(&dir, &tip, &filter, skip, size, MAX_COMMIT_PAGE_BYTES)
+                    .map_err(git_error("REVISION_NOT_FOUND"))?;
+                let next_page_token = match next {
+                    Some(next) if next <= MAX_COMMIT_SKIP => {
+                        cursor::encode(METHOD, &format!("{tip}\n{filter}"), next as i64)
+                    }
+                    _ => String::new(),
+                };
+                return Ok(Response::new(ListCommitsResponse {
+                    commits: page.into_iter().map(commit).collect(),
+                    next_page_token,
+                }));
+            }
             // shortcut: each page walks the history from the tip again, quadratic over deep paging; keep the walk state if that gets slow.
             let mut page = store
                 .log(&dir, &tip, skip, size + 1, MAX_COMMIT_PAGE_BYTES)

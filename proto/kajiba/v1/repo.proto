@@ -198,6 +198,10 @@ message ListCommitsRequest {
   string revision = 2;
   int32 page_size = 3;
   string page_token = 4;
+  // Only the commits whose change against their first parent touches this file or
+  // directory (ADR 0137); empty for all. Kept by a page token. A page may hold fewer
+  // commits than requested, even none, and still carry a next_page_token.
+  string path = 5;
 }
 
 message ListCommitsResponse {

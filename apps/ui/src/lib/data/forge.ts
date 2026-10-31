@@ -48,7 +48,7 @@ export async function loadForge(): Promise<Forge> {
     repos.map(async (repo) => {
       const key = `${repo.owner}/${repo.name}`;
       const [commits, refs] = await Promise.all([
-        listCommits({ repo: key, revision: repo.defaultBranch, pageSize: 300 })
+        listCommits({ repo: key, revision: repo.defaultBranch, want: 300 })
           .then((l) => l.commits)
           .catch(() => [] as Commit[]),
         listRefs({ repo: key }).then((r) => r.refs),
