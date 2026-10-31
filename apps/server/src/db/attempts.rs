@@ -304,7 +304,7 @@ pub async fn accept(
     ))
 }
 
-/// A heartbeat renews the unexpired leases of the runner's running attempts (0008).
+/// A heartbeat renews unexpired leases only after the runner accepts the job (0008).
 pub async fn heartbeat(
     writer: &mut SqliteConnection,
     runner_id: i64,
@@ -312,7 +312,8 @@ pub async fn heartbeat(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE job_attempt SET lease_expires_at = ?
-         WHERE runner_id = ? AND state = 'running' AND lease_expires_at >= ?",
+         WHERE runner_id = ? AND state = 'running' AND lease_expires_at >= ?
+           AND job_id IN (SELECT id FROM job WHERE state = 'running')",
     )
     .bind(now + LEASE_MS)
     .bind(runner_id)

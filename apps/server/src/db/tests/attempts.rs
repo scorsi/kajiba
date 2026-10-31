@@ -727,6 +727,48 @@ async fn heartbeats_renew_live_leases_and_steps_are_recorded() {
     writer.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn heartbeats_do_not_keep_unaccepted_replays_alive_after_a_runner_resumes() {
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    populate(&mut writer).await;
+    let (_, first) = running(&mut writer).await;
+    let offers = [offer(1, &["nix"], &[], 1)];
+    // The runner freezes with its only worker occupied; the server replays its job.
+    let expired = lease(&mut writer).await + 1;
+    sweep(&mut writer, expired).await;
+    let (assigned, _) = pass(&mut writer, &offers, expired).await;
+    assert_eq!(assigned.len(), 1);
+    assert_ne!(assigned[0].attempt, first);
+    let deadline = lease(&mut writer).await;
+    // On resuming, the runner refuses the replay at max_jobs = 1 but heartbeats work.
+    for now in [expired + 10_000, expired + 20_000, deadline] {
+        heartbeat(&mut writer, 1, now).await.unwrap();
+        assert_eq!(lease(&mut writer).await, deadline);
+    }
+    sweep(&mut writer, deadline + 1).await;
+    assert_eq!(jobs(&mut writer).await, [("pending".into(), None)]);
+    let (assigned, _) = pass(&mut writer, &[offer(2, &["nix"], &[], 1)], deadline + 1).await;
+    assert_eq!(assigned.len(), 1);
+    assert_eq!(assigned[0].runner_id, 2);
+    assert!(matches!(
+        accept(
+            &mut writer,
+            (2, "build-2"),
+            &assigned[0].attempt,
+            "accept",
+            deadline + 2
+        )
+        .await
+        .unwrap(),
+        Outcome::Done(_)
+    ));
+    heartbeat(&mut writer, 2, deadline + 10_000).await.unwrap();
+    assert_eq!(lease(&mut writer).await, deadline + 10_000 + LEASE_MS);
+    readers.close().await;
+    writer.close().await.unwrap();
+}
+
 async fn sweep(writer: &mut SqliteConnection, now: i64) -> Vec<(String, RunState)> {
     let mut tx = writer.begin().await.unwrap();
     let changes = expire(&mut tx, now).await.unwrap();
