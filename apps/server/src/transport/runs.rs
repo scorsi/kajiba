@@ -955,16 +955,35 @@ impl RunService for Runs {
             Some((_, id)) => id,
             None => i64::MAX,
         };
+        // The stored state of each requested one: `RUN_STATE_QUEUED` → `queued`.
+        let states = request
+            .states
+            .iter()
+            .map(|&state| match RunState::try_from(state) {
+                Ok(RunState::Unspecified) | Err(_) => Err(cursor::invalid_field(
+                    "states",
+                    "unknown or unspecified run state",
+                )),
+                Ok(state) => Ok(state.as_str_name()["RUN_STATE_".len()..].to_lowercase()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let filter = match states.len() {
+            0 => String::new(),
+            n => format!(" AND run.state IN ({})", vec!["?"; n].join(", ")),
+        };
+        let sql = format!(
+            "{SELECT} WHERE run.repo_id = ? AND run.id < ?{filter} ORDER BY run.id DESC LIMIT ?"
+        );
+        let mut query = sqlx::query_as(&sql).bind(repo_id).bind(after);
+        for state in &states {
+            query = query.bind(state);
+        }
         let mut connection = self.readers()?.begin().await.map_err(internal)?;
-        let mut rows: Vec<Row> = sqlx::query_as(&format!(
-            "{SELECT} WHERE run.repo_id = ? AND run.id < ? ORDER BY run.id DESC LIMIT ?"
-        ))
-        .bind(repo_id)
-        .bind(after)
-        .bind(size + 1)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(internal)?;
+        let mut rows: Vec<Row> = query
+            .bind(size + 1)
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(internal)?;
         let more = rows.len() as i64 > size;
         rows.truncate(size as usize);
         let next_page_token = match rows.last() {

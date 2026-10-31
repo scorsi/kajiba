@@ -3,7 +3,7 @@ use crate::client::{
     connect,
     tests::{Fake, TOKEN, refusal},
 };
-use kajiba_proto::v1::{Attempt, FailureSummary, Job};
+use kajiba_proto::v1::{Attempt, FailureSummary, Job, RunTrigger};
 use tonic::Status;
 
 const ID: &str = "01JBRUN0000000000000000000";
@@ -400,4 +400,106 @@ async fn logs_into_a_closed_stdout_exits_quietly() {
             .all(|line| line.starts_with("kajiba: warning: development mode")),
         "{stderr}"
     );
+}
+
+#[tokio::test]
+async fn list_prints_recent_runs_filtered_and_bounded() {
+    let (fake, url) = fake(run_in(RunState::Succeeded)).await;
+    let run = |id: u8, state: RunState, trigger: RunTrigger, reference: &str| Run {
+        public_id: format!("01JBRUN00000000000000000{id:02}"),
+        r#ref: reference.into(),
+        trigger: trigger.into(),
+        created_at: Some(kajiba_proto::google::protobuf::Timestamp {
+            seconds: 1_800_000_000 + i64::from(id),
+            nanos: 0,
+        }),
+        ..run_in(state)
+    };
+    fake.0.lock().unwrap().runs = vec![
+        run(3, RunState::Running, RunTrigger::Push, "refs/heads/main"),
+        run(2, RunState::Failed, RunTrigger::Manual, ""),
+        run(1, RunState::Succeeded, RunTrigger::Push, "refs/tags/v1"),
+    ];
+    let list = |states: Vec<RunState>, limit| Command::List {
+        repo: Some("alice/demo".into()),
+        states,
+        limit,
+    };
+    let (code, out, _) = output(&url, list(vec![], 20), false).await;
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert_eq!(
+        out,
+        "01JBRUN0000000000000000003  running    push      111111111111  refs/heads/main  2027-01-15T08:00:03Z\n\
+         01JBRUN0000000000000000002  failed     manual    111111111111  -  2027-01-15T08:00:02Z\n\
+         01JBRUN0000000000000000001  succeeded  push      111111111111  refs/tags/v1  2027-01-15T08:00:01Z\n"
+    );
+    // The limit bounds the page asked for.
+    let (_, out, _) = output(&url, list(vec![], 2), false).await;
+    assert_eq!(out.lines().count(), 2);
+    let (_, out, _) = output(
+        &url,
+        list(vec![RunState::Failed, RunState::Succeeded], 20),
+        true,
+    )
+    .await;
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(json[0]["publicId"], "01JBRUN0000000000000000002");
+    assert_eq!(json[1]["state"], "RUN_STATE_SUCCEEDED");
+    assert_eq!(json.as_array().unwrap().len(), 2);
+    let listed = std::mem::take(&mut fake.0.lock().unwrap().listed);
+    let asked = listed
+        .iter()
+        .map(|request| {
+            (
+                request.repo.as_str(),
+                request.page_size,
+                request.states.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        asked,
+        [
+            ("alice/demo", 20, 0),
+            ("alice/demo", 2, 0),
+            ("alice/demo", 20, 2)
+        ]
+    );
+}
+
+#[test]
+fn list_parses_states_repeated_or_comma_separated() {
+    use clap::Parser;
+    #[derive(Parser)]
+    struct Cli {
+        #[command(subcommand)]
+        command: Command,
+    }
+    let Command::List {
+        states,
+        limit,
+        repo,
+    } = Cli::try_parse_from([
+        "kajiba",
+        "list",
+        "--state",
+        "failed,running",
+        "--state",
+        "queued",
+    ])
+    .unwrap()
+    .command
+    else {
+        panic!("list");
+    };
+    assert_eq!(
+        (states, limit, repo),
+        (
+            vec![RunState::Failed, RunState::Running, RunState::Queued],
+            20,
+            None
+        )
+    );
+    assert!(Cli::try_parse_from(["kajiba", "list", "--state", "done"]).is_err());
+    assert!(Cli::try_parse_from(["kajiba", "list", "--limit", "0"]).is_err());
 }

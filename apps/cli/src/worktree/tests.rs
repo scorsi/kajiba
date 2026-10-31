@@ -470,3 +470,21 @@ async fn ci_run_worktree_detaches_like_ci_run() {
     assert_eq!(String::from_utf8(out).unwrap(), format!("{RUN}\n"));
     clone.untouched();
 }
+
+#[tokio::test]
+async fn ci_list_lists_the_clones_repository() {
+    let clone = clone();
+    let (fake, url) = forge(&[&clone.second]).await;
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let list = Ci::List {
+        repo: None,
+        states: Vec::new(),
+        limit: 20,
+    };
+    let api = connect(&url, TOKEN, true).unwrap();
+    let code = ci::run(list, api, &clone.local(), false, &mut out, &mut err)
+        .await
+        .unwrap();
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert_eq!(fake.0.lock().unwrap().listed[0].repo, "alice/demo");
+}

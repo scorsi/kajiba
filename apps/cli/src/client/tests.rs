@@ -81,6 +81,10 @@ pub struct State {
     pub drops: Vec<(u64, Option<Status>)>,
     /// Every WatchRun request: offset and follow.
     pub watches: Vec<(u64, bool)>,
+    /// ListRuns serves these, newest first, filtered by state; the page token is the
+    /// index of the next one. Every request is recorded.
+    pub runs: Vec<Run>,
+    pub listed: Vec<ListRunsRequest>,
     /// GetWorktreeBase answers these ids and records each spec.
     pub base: Vec<String>,
     pub specs: Vec<WorktreeRunSpec>,
@@ -276,9 +280,35 @@ impl RunService for Fake {
     }
     async fn list_runs(
         &self,
-        _: tonic::Request<ListRunsRequest>,
+        request: tonic::Request<ListRunsRequest>,
     ) -> Result<Response<ListRunsResponse>, Status> {
-        unimplemented()
+        let request = self
+            .answer("ListRuns", request, |_, request| Ok(request))?
+            .into_inner();
+        let mut state = self.0.lock().unwrap();
+        state.listed.push(request.clone());
+        let start = request.page_token.parse().unwrap_or(0);
+        let matching = state
+            .runs
+            .iter()
+            .filter(|run| request.states.is_empty() || request.states.contains(&run.state))
+            .skip(start);
+        let runs: Vec<Run> = matching.take(request.page_size as usize).cloned().collect();
+        let next = start + runs.len();
+        let more = state
+            .runs
+            .iter()
+            .filter(|run| request.states.is_empty() || request.states.contains(&run.state))
+            .count()
+            > next;
+        Ok(Response::new(ListRunsResponse {
+            runs,
+            next_page_token: if more {
+                next.to_string()
+            } else {
+                String::new()
+            },
+        }))
     }
     async fn get_worktree_base(
         &self,

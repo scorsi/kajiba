@@ -1,10 +1,11 @@
-//! `kajiba ci run|status|watch|logs` (0007, 0010, ADR 0117): trigger, follow and read runs.
+//! `kajiba ci run|status|watch|logs|list` (0007, 0010, ADRs 0117, 0131): trigger, follow,
+//! read and list runs.
 use crate::client::{self, Api, Error};
 use crate::repo::{pretty, protojson};
 use crate::worktree::{self, Local};
 use clap::Subcommand;
 use kajiba_proto::v1::{
-    GetRunRequest, Run, RunState, TriggerRunRequest, WatchRunRequest,
+    GetRunRequest, ListRunsRequest, Run, RunState, RunTrigger, TriggerRunRequest, WatchRunRequest,
     run_service_client::RunServiceClient, watch_run_response::Event,
 };
 use std::{io::Write, process::ExitCode, time::Duration};
@@ -51,6 +52,28 @@ pub enum Command {
     Watch { run: String },
     /// Print a run's stored log.
     Logs { run: String },
+    /// List a repository's recent runs, newest first: id, state, trigger, commit, ref and
+    /// creation time.
+    List {
+        /// The repository (`<owner>/<name>` or a public id) instead of the one this
+        /// clone's remote addresses on the forge.
+        #[arg(long, value_name = "OWNER/NAME")]
+        repo: Option<String>,
+        /// Only runs in this state: queued, running, succeeded, failed or cancelled
+        /// (repeatable, or comma-separated).
+        #[arg(long = "state", value_name = "STATE", value_delimiter = ',', value_parser = run_state)]
+        states: Vec<RunState>,
+        /// At most this many runs.
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
+        limit: u32,
+    },
+}
+
+/// `failed` → `RunState::Failed`.
+fn run_state(name: &str) -> Result<RunState, String> {
+    RunState::from_str_name(&format!("RUN_STATE_{}", name.to_uppercase()))
+        .filter(|state| *state != RunState::Unspecified)
+        .ok_or_else(|| "expected queued, running, succeeded, failed or cancelled".into())
 }
 
 /// `EX_TEMPFAIL`: the run has not ended yet.
@@ -132,7 +155,70 @@ pub async fn run(
             follow(&mut runs, &run.public_id, true, out, err).await
         }
         Command::Logs { run } => follow(&mut runs, &run, false, out, err).await,
+        Command::List {
+            repo,
+            states,
+            limit,
+        } => {
+            let repo = match repo {
+                Some(repo) => repo,
+                None => worktree::repository(&local.dir, &local.forge)?,
+            };
+            let (mut found, mut page_token) = (Vec::new(), String::new());
+            loop {
+                let page = client::answer(
+                    runs.list_runs(ListRunsRequest {
+                        repo: repo.clone(),
+                        page_size: (limit as usize - found.len()).min(200) as i32,
+                        page_token,
+                        states: states.iter().map(|&state| state.into()).collect(),
+                    })
+                    .await,
+                )?;
+                found.extend(page.runs);
+                if page.next_page_token.is_empty() || found.len() >= limit as usize {
+                    break;
+                }
+                page_token = page.next_page_token;
+            }
+            found.truncate(limit as usize);
+            let text = if json {
+                let list = found
+                    .iter()
+                    .map(|run| protojson("kajiba.v1.Run", run))
+                    .collect::<Result<Vec<_>, _>>()?;
+                pretty(serde_json::to_string_pretty(&list))?
+            } else {
+                found.iter().map(row).collect::<Result<String, _>>()?
+            };
+            print(out, &text)?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
+}
+
+/// `<id>  <state>  <trigger>  <short sha>  <ref or ->  <created, RFC 3339>`.
+fn row(run: &Run) -> Result<String, Error> {
+    let short = |name: &str, prefix: &str| name.strip_prefix(prefix).unwrap_or(name).to_lowercase();
+    let trigger = RunTrigger::try_from(run.trigger).unwrap_or_default();
+    let created = match &run.created_at {
+        Some(time) => serde_json::to_string(&protojson("google.protobuf.Timestamp", time)?)
+            .map_err(|err| Error(format!("protojson: {err}")))?
+            .trim_matches('"')
+            .to_owned(),
+        None => "-".into(),
+    };
+    Ok(format!(
+        "{}  {:<9}  {:<8}  {:.12}  {}  {created}\n",
+        run.public_id,
+        short(state(run).as_str_name(), "RUN_STATE_"),
+        short(trigger.as_str_name(), "RUN_TRIGGER_"),
+        run.sha,
+        match run.r#ref.as_str() {
+            "" => "-",
+            reference => reference,
+        },
+    ))
 }
 
 async fn get(runs: &mut RunServiceClient<Api>, run: String) -> Result<Run, Error> {

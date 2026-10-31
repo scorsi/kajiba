@@ -159,7 +159,7 @@ fn git(dir: &Path, args: &[&str], input: Option<&str>) -> Result<String, Error> 
 
 /// The repository the clone's remotes address on `forge` (0021: HTTP or SSH form); none
 /// or several different ones is an error naming them.
-fn repository(dir: &Path, forge: &str) -> Result<String, Error> {
+pub fn repository(dir: &Path, forge: &str) -> Result<String, Error> {
     // No remote at all: `git config` exits 1.
     let urls =
         git(dir, &["config", "--get-regexp", r"^remote\..*\.url$"], None).unwrap_or_default();

@@ -636,6 +636,7 @@ async fn runs_are_listed_newest_first_by_cursor() {
                 repo: repo.into(),
                 page_size: 2,
                 page_token,
+                ..Default::default()
             },
         ))
     };
@@ -660,6 +661,43 @@ async fn runs_are_listed_newest_first_by_cursor() {
     );
     let status = list("alice/nope", String::new()).await.unwrap_err();
     assert_eq!(refusal(status), (Code::NotFound, "REPO_NOT_FOUND".into()));
+
+    // Filtered by state, still newest first.
+    sqlx::query("UPDATE run SET state = 'failed' WHERE public_id = ?")
+        .bind(&created[1])
+        .execute(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    let only = |states: Vec<RunState>| {
+        runs.list_runs(as_user(
+            ALICE,
+            ListRunsRequest {
+                repo: "alice/ci".into(),
+                states: states.into_iter().map(i32::from).collect(),
+                ..Default::default()
+            },
+        ))
+    };
+    let failed = only(vec![RunState::Failed]).await.unwrap().into_inner();
+    assert_eq!(ids(&failed.runs), [created[1].clone()]);
+    let both = only(vec![RunState::Queued, RunState::Failed])
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ids(&both.runs).len(), 3);
+    assert!(
+        only(vec![RunState::Succeeded])
+            .await
+            .unwrap()
+            .into_inner()
+            .runs
+            .is_empty()
+    );
+    let status = only(vec![RunState::Unspecified]).await.unwrap_err();
+    assert_eq!(
+        refusal(status),
+        (Code::InvalidArgument, "INVALID_FIELD".into())
+    );
 }
 
 #[tokio::test]

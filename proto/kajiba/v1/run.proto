@@ -73,6 +73,9 @@ message ListRunsRequest {
   string repo = 1;
   int32 page_size = 2;
   string page_token = 3;
+  // Only runs in one of these states; empty for all. INVALID_FIELD for an unknown or
+  // unspecified state (ADR 0131).
+  repeated RunState states = 4;
 }
 
 message ListRunsResponse {
