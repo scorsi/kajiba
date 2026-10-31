@@ -1,5 +1,5 @@
-//! A bounded response channel supervises git, raw and browsing bodies even when HTTP
-//! stops polling them (ADR 0040, 0043, 0050).
+//! A bounded response channel supervises git, raw, browsing and CI watch bodies even
+//! when HTTP stops polling them (ADRs 0040, 0043, 0050, 0120).
 use axum::{
     body::{Body, Bytes},
     extract::Request as HttpRequest,
@@ -27,7 +27,16 @@ pub(super) const STREAM_IDLE: Duration = Duration::from_secs(60);
 /// Whatever its progress, a streaming body ends.
 pub(super) const STREAM_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
-type Chunk = (Frame<Bytes>, oneshot::Sender<()>);
+type Chunk = (Arc<Mutex<Option<Frame<Bytes>>>>, oneshot::Sender<()>);
+
+/// Drop undelivered bytes even when the response is never polled again.
+struct PendingFrame(Arc<Mutex<Option<Frame<Bytes>>>>);
+
+impl Drop for PendingFrame {
+    fn drop(&mut self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+    }
+}
 pub(super) type Sender = mpsc::Sender<Chunk>;
 
 struct Supervised {
@@ -47,9 +56,11 @@ impl HttpBody for Supervised {
         if self.finished {
             return Poll::Ready(None);
         }
-        if let Some((frame, consumed)) = std::task::ready!(self.chunks.poll_recv(cx)) {
-            let _ = consumed.send(());
-            return Poll::Ready(Some(Ok(frame)));
+        while let Some((frame, consumed)) = std::task::ready!(self.chunks.poll_recv(cx)) {
+            if let Some(frame) = frame.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = consumed.send(());
+                return Poll::Ready(Some(Ok(frame)));
+            }
         }
         let result = std::task::ready!(Pin::new(&mut self.completion).poll(cx));
         self.finished = true;
@@ -64,8 +75,9 @@ impl HttpBody for Supervised {
 
 pub(super) async fn send(chunks: &Sender, frame: Frame<Bytes>) -> io::Result<()> {
     let (consumed, received) = oneshot::channel();
+    let pending = PendingFrame(Arc::new(Mutex::new(Some(frame))));
     chunks
-        .send((frame, consumed))
+        .send((pending.0.clone(), consumed))
         .await
         .map_err(io::Error::other)?;
     // Progress means HTTP polled a chunk, not merely that git wrote into its pipe.
@@ -74,10 +86,7 @@ pub(super) async fn send(chunks: &Sender, frame: Frame<Bytes>) -> io::Result<()>
 
 /// A body fed by `transfer` from its own task, which holds `permit` until it returns;
 /// its result ends the body as a clean EOF or an error.
-pub(super) fn supervised<F>(
-    permit: OwnedSemaphorePermit,
-    transfer: impl FnOnce(Sender) -> F,
-) -> Body
+pub(super) fn supervised<F>(permit: impl Send + 'static, transfer: impl FnOnce(Sender) -> F) -> Body
 where
     F: Future<Output = io::Result<()>> + Send + 'static,
 {
@@ -106,18 +115,38 @@ impl ReadPermit {
     }
 }
 
-/// Carries a browsing response's permit through its encoded body: the response is
-/// bounded like a `/raw/` body, and the permit ends with the delivery or a bound.
+/// A watch slot carried through encoded delivery, without an absolute lifetime (0120).
+#[derive(Clone)]
+pub(super) struct WatchPermit(Arc<Mutex<Option<super::slots::Slot<i64>>>>);
+
+impl WatchPermit {
+    pub(super) fn new(slot: super::slots::Slot<i64>) -> Self {
+        Self(Arc::new(Mutex::new(Some(slot))))
+    }
+}
+
+/// Carries browsing permits and watch slots through encoded delivery under their bounds.
 pub(super) async fn guarded(request: HttpRequest, next: Next) -> HttpResponse {
     let mut response = next.run(request).await;
     let permit = response
         .extensions_mut()
         .remove::<ReadPermit>()
         .and_then(|held| held.0.lock().unwrap_or_else(|e| e.into_inner()).take());
+    let watch = response
+        .extensions_mut()
+        .remove::<WatchPermit>()
+        .and_then(|held| held.0.lock().unwrap_or_else(|e| e.into_inner()).take());
+    if let Some(slot) = watch {
+        let (parts, body) = response.into_parts();
+        return HttpResponse::from_parts(parts, carry(body, slot, STREAM_IDLE, None));
+    }
     match permit {
         Some(permit) => {
             let (parts, body) = response.into_parts();
-            HttpResponse::from_parts(parts, carry(body, permit, STREAM_IDLE, STREAM_LIFETIME))
+            HttpResponse::from_parts(
+                parts,
+                carry(body, permit, STREAM_IDLE, Some(STREAM_LIFETIME)),
+            )
         }
         None => response,
     }
@@ -127,23 +156,27 @@ pub(super) async fn guarded(request: HttpRequest, next: Next) -> HttpResponse {
 /// `permit`, and drops both when the body ends or the first bound fires.
 pub(super) fn carry(
     mut body: Body,
-    permit: OwnedSemaphorePermit,
+    permit: impl Send + 'static,
     idle: Duration,
-    lifetime: Duration,
+    lifetime: Option<Duration>,
 ) -> Body {
     supervised(permit, |chunks| async move {
         let transfer = async {
-            while let Some(frame) =
-                std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await
-            {
+            while let Some(frame) = tokio::select! {
+                () = chunks.closed() => return Err(io::Error::other("response closed")),
+                frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)) => frame,
+            } {
                 let frame = frame.map_err(io::Error::other)?;
                 timeout(idle, send(&chunks, frame)).await??;
             }
             Ok(())
         };
-        timeout(lifetime, transfer)
-            .await
-            .unwrap_or_else(|err| Err(err.into()))
+        match lifetime {
+            Some(lifetime) => timeout(lifetime, transfer)
+                .await
+                .unwrap_or_else(|err| Err(err.into())),
+            None => transfer.await,
+        }
     })
 }
 
@@ -422,7 +455,7 @@ mod tests {
             inner(trailers.clone()),
             budget.clone().try_acquire_owned().unwrap(),
             Duration::from_secs(5),
-            Duration::from_secs(20),
+            Some(Duration::from_secs(20)),
         );
         let mut frames = Vec::new();
         while let Some(frame) =
@@ -442,13 +475,69 @@ mod tests {
             inner(trailers),
             permit,
             Duration::from_millis(100),
-            Duration::from_secs(20),
+            Some(Duration::from_secs(20)),
         );
         let _released = timeout(Duration::from_secs(5), budget.clone().acquire_owned())
             .await
             .unwrap()
             .unwrap();
         assert!(axum::body::to_bytes(response, 1024).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn watch_delivery_stall_releases_the_slot_and_drops_the_producer() {
+        let slots = super::super::slots::Slots::new(1);
+        let (producer, events) = mpsc::channel::<Result<Bytes, io::Error>>(1);
+        let mut response = carry(
+            Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(events)),
+            slots.take(1, 1).unwrap(),
+            Duration::from_millis(100),
+            None,
+        );
+        // A quiet live run has no delivery pending and must keep its follower.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(slots.held(&1), 1);
+        assert!(!producer.is_closed());
+        producer
+            .send(Ok(Bytes::from_static(b"terminal message")))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), producer.closed())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while slots.held(&1) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // The cut must discard queued bytes, not return a stale terminal message.
+        assert!(
+            std::future::poll_fn(|cx| Pin::new(&mut response).poll_frame(cx))
+                .await
+                .unwrap()
+                .is_err()
+        );
+
+        let (producer, events) = mpsc::channel::<Result<Bytes, io::Error>>(1);
+        let response = carry(
+            Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(events)),
+            slots.take(1, 1).unwrap(),
+            Duration::from_secs(60),
+            None,
+        );
+        drop(response);
+        tokio::time::timeout(Duration::from_secs(5), producer.closed())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while slots.held(&1) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

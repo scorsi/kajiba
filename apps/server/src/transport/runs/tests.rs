@@ -821,7 +821,16 @@ async fn watch(
         },
     ))
     .await
-    .map(Response::into_inner)
+    .map(|mut response| {
+        use tokio_stream::StreamExt;
+        let permit = response
+            .extensions_mut()
+            .remove::<super::super::stream::WatchPermit>();
+        Box::pin(response.into_inner().map(move |event| {
+            let _ = &permit;
+            event
+        })) as Events
+    })
 }
 
 /// The next event, `None` once the stream ended.
@@ -1385,6 +1394,83 @@ async fn run_watches_are_bounded_per_caller_and_in_all() {
     assert_eq!(held.len(), MAX_WATCHERS);
     let status = watch(&runs, ALICE, &run, 0, true).await.err().unwrap();
     assert_eq!(status.code(), Code::ResourceExhausted);
+}
+
+#[tokio::test]
+async fn terminal_watches_hold_slots_through_encoded_delivery() {
+    use tonic::codegen::Service;
+    let (fixture, runs) = fixture(&tokens()).await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, ALICE, "alice/ci", &tip)
+        .await
+        .unwrap()
+        .public_id;
+    sqlx::query("UPDATE run SET state = 'cancelled' WHERE public_id = ?")
+        .bind(&run)
+        .execute(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    let mut app = super::super::router(
+        runs.0.clone(),
+        false,
+        Default::default(),
+        "https://example.org",
+    )
+    .unwrap();
+    let message = WatchRunRequest {
+        run: run.clone(),
+        offset: 0,
+        follow: true,
+    }
+    .encode_to_vec();
+    let mut encoded = vec![0];
+    encoded.extend((message.len() as u32).to_be_bytes());
+    encoded.extend(message);
+    let mut bodies = Vec::new();
+    for _ in 0..WATCHERS_PER_PRINCIPAL {
+        let response = app
+            .call(
+                axum::http::Request::post("/kajiba.v1.RunService/WatchRun")
+                    .header("content-type", "application/grpc")
+                    .header("authorization", format!("Bearer {READ}"))
+                    .body(axum::body::Body::from(encoded.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        bodies.push(response.into_body());
+    }
+    // Let the producers finish; unread terminal messages must still occupy slots.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(runs.0.watchers.held(&ALICE), WATCHERS_PER_PRINCIPAL);
+    let status = watch(&runs, ALICE, &run, 0, true).await.err().unwrap();
+    assert_eq!(
+        (status.code(), reason(&status).as_str()),
+        (Code::ResourceExhausted, "WATCH_STREAMS_LIMIT")
+    );
+    drop(bodies.pop());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while runs.0.watchers.held(&ALICE) == WATCHERS_PER_PRINCIPAL {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    for body in bodies {
+        let bytes = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+        let message = WatchRunResponse::decode(&bytes[5..]).unwrap();
+        assert!(matches!(
+            message.event,
+            Some(watch_run_response::Event::Finished(_))
+        ));
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while runs.0.watchers.held(&ALICE) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

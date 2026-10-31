@@ -669,7 +669,6 @@ impl RunService for Runs {
         let (watcher, events) = mpsc::channel(4);
         let runs = self.clone();
         tokio::spawn(async move {
-            let _slot = slot;
             if let Err(status) = runs
                 .watch(&run, request.offset, request.follow, progress, &watcher)
                 .await
@@ -677,9 +676,13 @@ impl RunService for Runs {
                 deliver(&watcher, Err(status)).await;
             }
         });
-        Ok(Response::new(Box::pin(
-            tokio_stream::wrappers::ReceiverStream::new(events),
-        )))
+        let mut response = Response::new(Box::pin(tokio_stream::wrappers::ReceiverStream::new(
+            events,
+        )) as Self::WatchRunStream);
+        response
+            .extensions_mut()
+            .insert(super::stream::WatchPermit::new(slot));
+        Ok(response)
     }
 
     async fn trigger_run(
