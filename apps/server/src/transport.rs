@@ -39,6 +39,8 @@ pub struct Health {
     passkeys: Arc<OnceLock<webauthn::Passkeys>>,
     ui_dir: Arc<OnceLock<PathBuf>>,
     runners: Arc<OnceLock<runners::Declared>>,
+    /// Bumped after each commit that stores log bytes or ends attempts: wakes run watchers.
+    ci_progress: Arc<watch::Sender<()>>,
     state_dir: PathBuf,
     git_state_dir: PathBuf,
     local_serving: Arc<local::Serving>,
@@ -61,6 +63,7 @@ impl Health {
             passkeys: Arc::default(),
             ui_dir: Arc::default(),
             runners: Arc::default(),
+            ci_progress: Arc::new(watch::Sender::new(())),
             git_state_dir,
             state_dir,
             local_serving: Arc::default(),
@@ -175,6 +178,7 @@ fn router(
                 // Bound inbound work before handler admission (ADR 0057).
                 .max_decoding_message_size(16 * 1024),
         )
+        // WatchRun's stream outlives the request timeout, which bounds response heads only.
         .add_service(
             RunServiceServer::new(runs::Runs(health.clone())).max_decoding_message_size(16 * 1024),
         )

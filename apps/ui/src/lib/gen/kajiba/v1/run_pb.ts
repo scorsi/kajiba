@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file kajiba/v1/run.proto.
  */
 export const file_kajiba_v1_run: GenFile = /*@__PURE__*/
-  fileDesc("ChNrYWppYmEvdjEvcnVuLnByb3RvEglrYWppYmEudjEiLgoRVHJpZ2dlclJ1blJlcXVlc3QSDAoEcmVwbxgBIAEoCRILCgNzaGEYAiABKAkiMQoSVHJpZ2dlclJ1blJlc3BvbnNlEhsKA3J1bhgBIAEoCzIOLmthamliYS52MS5SdW4iHAoNR2V0UnVuUmVxdWVzdBILCgNydW4YASABKAkiLQoOR2V0UnVuUmVzcG9uc2USGwoDcnVuGAEgASgLMg4ua2FqaWJhLnYxLlJ1biJGCg9MaXN0UnVuc1JlcXVlc3QSDAoEcmVwbxgBIAEoCRIRCglwYWdlX3NpemUYAiABKAUSEgoKcGFnZV90b2tlbhgDIAEoCSJJChBMaXN0UnVuc1Jlc3BvbnNlEhwKBHJ1bnMYASADKAsyDi5rYWppYmEudjEuUnVuEhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSKGAwoDUnVuEhEKCXB1YmxpY19pZBgBIAEoCRIWCg5yZXBvX3B1YmxpY19pZBgCIAEoCRILCgNzaGEYAyABKAkSCwoDcmVmGAQgASgJEiYKB3RyaWdnZXIYBSABKA4yFS5rYWppYmEudjEuUnVuVHJpZ2dlchIUCgx0cmlnZ2VyZWRfYnkYBiABKAkSIgoFc3RhdGUYByABKA4yEy5rYWppYmEudjEuUnVuU3RhdGUSLgoKY3JlYXRlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKc3RhcnRlZF9hdBgJIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLwoLZmluaXNoZWRfYXQYCiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhsKA2pvYhgLIAEoCzIOLmthamliYS52MS5Kb2ISKgoHZmFpbHVyZRgMIAEoCzIZLmthamliYS52MS5GYWlsdXJlU3VtbWFyeSKPAQoDSm9iEhEKCXB1YmxpY19pZBgBIAEoCRIMCgRuYW1lGAIgASgJEiIKBXN0YXRlGAMgASgOMhMua2FqaWJhLnYxLkpvYlN0YXRlEhYKDnBlbmRpbmdfcmVhc29uGAQgASgJEisKD2N1cnJlbnRfYXR0ZW1wdBgFIAEoCzISLmthamliYS52MS5BdHRlbXB0IoQCCgdBdHRlbXB0EhEKCXB1YmxpY19pZBgBIAEoCRIOCgZudW1iZXIYAiABKA0SJgoFc3RhdGUYAyABKA4yFy5rYWppYmEudjEuQXR0ZW1wdFN0YXRlEg4KBnJ1bm5lchgEIAEoCRIXCg9ydW5uZXJfaG9zdG5hbWUYBSABKAkSFgoJZXhpdF9jb2RlGAYgASgFSACIAQESLgoKc3RhcnRlZF9hdBgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLwoLZmluaXNoZWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wQgwKCl9leGl0X2NvZGUiRwoORmFpbHVyZVN1bW1hcnkSDQoFY2hlY2sYASABKAkSDgoGcmVhc29uGAIgASgJEhYKDmxhc3RfbG9nX2xpbmVzGAMgAygJKlcKClJ1blRyaWdnZXISGwoXUlVOX1RSSUdHRVJfVU5TUEVDSUZJRUQQABIUChBSVU5fVFJJR0dFUl9QVVNIEAESFgoSUlVOX1RSSUdHRVJfTUFOVUFMEAIqmgEKCFJ1blN0YXRlEhkKFVJVTl9TVEFURV9VTlNQRUNJRklFRBAAEhQKEFJVTl9TVEFURV9RVUVVRUQQARIVChFSVU5fU1RBVEVfUlVOTklORxACEhcKE1JVTl9TVEFURV9TVUNDRUVERUQQAxIUChBSVU5fU1RBVEVfRkFJTEVEEAQSFwoTUlVOX1NUQVRFX0NBTkNFTExFRBAFKscBCghKb2JTdGF0ZRIZChVKT0JfU1RBVEVfVU5TUEVDSUZJRUQQABIVChFKT0JfU1RBVEVfUEVORElORxABEhYKEkpPQl9TVEFURV9BU1NJR05FRBACEhUKEUpPQl9TVEFURV9SVU5OSU5HEAMSFwoTSk9CX1NUQVRFX1NVQ0NFRURFRBAEEhQKEEpPQl9TVEFURV9GQUlMRUQQBRIXChNKT0JfU1RBVEVfQ0FOQ0VMTEVEEAYSEgoOSk9CX1NUQVRFX0xPU1QQByq0AQoMQXR0ZW1wdFN0YXRlEh0KGUFUVEVNUFRfU1RBVEVfVU5TUEVDSUZJRUQQABIZChVBVFRFTVBUX1NUQVRFX1JVTk5JTkcQARIbChdBVFRFTVBUX1NUQVRFX1NVQ0NFRURFRBACEhgKFEFUVEVNUFRfU1RBVEVfRkFJTEVEEAMSGwoXQVRURU1QVF9TVEFURV9DQU5DRUxMRUQQBBIWChJBVFRFTVBUX1NUQVRFX0xPU1QQBTLtAQoKUnVuU2VydmljZRJPCgpUcmlnZ2VyUnVuEhwua2FqaWJhLnYxLlRyaWdnZXJSdW5SZXF1ZXN0Gh0ua2FqaWJhLnYxLlRyaWdnZXJSdW5SZXNwb25zZSIEgLUYAxJDCgZHZXRSdW4SGC5rYWppYmEudjEuR2V0UnVuUmVxdWVzdBoZLmthamliYS52MS5HZXRSdW5SZXNwb25zZSIEgLUYARJJCghMaXN0UnVucxIaLmthamliYS52MS5MaXN0UnVuc1JlcXVlc3QaGy5rYWppYmEudjEuTGlzdFJ1bnNSZXNwb25zZSIEgLUYAWIGcHJvdG8z", [file_google_protobuf_timestamp, file_kajiba_v1_options]);
+  fileDesc("ChNrYWppYmEvdjEvcnVuLnByb3RvEglrYWppYmEudjEiLgoRVHJpZ2dlclJ1blJlcXVlc3QSDAoEcmVwbxgBIAEoCRILCgNzaGEYAiABKAkiMQoSVHJpZ2dlclJ1blJlc3BvbnNlEhsKA3J1bhgBIAEoCzIOLmthamliYS52MS5SdW4iHAoNR2V0UnVuUmVxdWVzdBILCgNydW4YASABKAkiLQoOR2V0UnVuUmVzcG9uc2USGwoDcnVuGAEgASgLMg4ua2FqaWJhLnYxLlJ1biJGCg9MaXN0UnVuc1JlcXVlc3QSDAoEcmVwbxgBIAEoCRIRCglwYWdlX3NpemUYAiABKAUSEgoKcGFnZV90b2tlbhgDIAEoCSJJChBMaXN0UnVuc1Jlc3BvbnNlEhwKBHJ1bnMYASADKAsyDi5rYWppYmEudjEuUnVuEhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSKGAwoDUnVuEhEKCXB1YmxpY19pZBgBIAEoCRIWCg5yZXBvX3B1YmxpY19pZBgCIAEoCRILCgNzaGEYAyABKAkSCwoDcmVmGAQgASgJEiYKB3RyaWdnZXIYBSABKA4yFS5rYWppYmEudjEuUnVuVHJpZ2dlchIUCgx0cmlnZ2VyZWRfYnkYBiABKAkSIgoFc3RhdGUYByABKA4yEy5rYWppYmEudjEuUnVuU3RhdGUSLgoKY3JlYXRlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKc3RhcnRlZF9hdBgJIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLwoLZmluaXNoZWRfYXQYCiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhsKA2pvYhgLIAEoCzIOLmthamliYS52MS5Kb2ISKgoHZmFpbHVyZRgMIAEoCzIZLmthamliYS52MS5GYWlsdXJlU3VtbWFyeSKPAQoDSm9iEhEKCXB1YmxpY19pZBgBIAEoCRIMCgRuYW1lGAIgASgJEiIKBXN0YXRlGAMgASgOMhMua2FqaWJhLnYxLkpvYlN0YXRlEhYKDnBlbmRpbmdfcmVhc29uGAQgASgJEisKD2N1cnJlbnRfYXR0ZW1wdBgFIAEoCzISLmthamliYS52MS5BdHRlbXB0IoQCCgdBdHRlbXB0EhEKCXB1YmxpY19pZBgBIAEoCRIOCgZudW1iZXIYAiABKA0SJgoFc3RhdGUYAyABKA4yFy5rYWppYmEudjEuQXR0ZW1wdFN0YXRlEg4KBnJ1bm5lchgEIAEoCRIXCg9ydW5uZXJfaG9zdG5hbWUYBSABKAkSFgoJZXhpdF9jb2RlGAYgASgFSACIAQESLgoKc3RhcnRlZF9hdBgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLwoLZmluaXNoZWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wQgwKCl9leGl0X2NvZGUiRwoORmFpbHVyZVN1bW1hcnkSDQoFY2hlY2sYASABKAkSDgoGcmVhc29uGAIgASgJEhYKDmxhc3RfbG9nX2xpbmVzGAMgAygJIj4KD1dhdGNoUnVuUmVxdWVzdBILCgNydW4YASABKAkSDgoGb2Zmc2V0GAIgASgEEg4KBmZvbGxvdxgDIAEoCCKNAQoQV2F0Y2hSdW5SZXNwb25zZRIoCgdzZWN0aW9uGAEgASgLMhUua2FqaWJhLnYxLkxvZ1NlY3Rpb25IABIiCgNsb2cYAiABKAsyEy5rYWppYmEudjEuTG9nQnl0ZXNIABIiCghmaW5pc2hlZBgDIAEoCzIOLmthamliYS52MS5SdW5IAEIHCgVldmVudCJBCgpMb2dTZWN0aW9uEiMKB2F0dGVtcHQYASABKAsyEi5rYWppYmEudjEuQXR0ZW1wdBIOCgZvZmZzZXQYAiABKAQiKAoITG9nQnl0ZXMSDgoGb2Zmc2V0GAEgASgEEgwKBGRhdGEYAiABKAwqVwoKUnVuVHJpZ2dlchIbChdSVU5fVFJJR0dFUl9VTlNQRUNJRklFRBAAEhQKEFJVTl9UUklHR0VSX1BVU0gQARIWChJSVU5fVFJJR0dFUl9NQU5VQUwQAiqaAQoIUnVuU3RhdGUSGQoVUlVOX1NUQVRFX1VOU1BFQ0lGSUVEEAASFAoQUlVOX1NUQVRFX1FVRVVFRBABEhUKEVJVTl9TVEFURV9SVU5OSU5HEAISFwoTUlVOX1NUQVRFX1NVQ0NFRURFRBADEhQKEFJVTl9TVEFURV9GQUlMRUQQBBIXChNSVU5fU1RBVEVfQ0FOQ0VMTEVEEAUqxwEKCEpvYlN0YXRlEhkKFUpPQl9TVEFURV9VTlNQRUNJRklFRBAAEhUKEUpPQl9TVEFURV9QRU5ESU5HEAESFgoSSk9CX1NUQVRFX0FTU0lHTkVEEAISFQoRSk9CX1NUQVRFX1JVTk5JTkcQAxIXChNKT0JfU1RBVEVfU1VDQ0VFREVEEAQSFAoQSk9CX1NUQVRFX0ZBSUxFRBAFEhcKE0pPQl9TVEFURV9DQU5DRUxMRUQQBhISCg5KT0JfU1RBVEVfTE9TVBAHKrQBCgxBdHRlbXB0U3RhdGUSHQoZQVRURU1QVF9TVEFURV9VTlNQRUNJRklFRBAAEhkKFUFUVEVNUFRfU1RBVEVfUlVOTklORxABEhsKF0FUVEVNUFRfU1RBVEVfU1VDQ0VFREVEEAISGAoUQVRURU1QVF9TVEFURV9GQUlMRUQQAxIbChdBVFRFTVBUX1NUQVRFX0NBTkNFTExFRBAEEhYKEkFUVEVNUFRfU1RBVEVfTE9TVBAFMroCCgpSdW5TZXJ2aWNlEk8KClRyaWdnZXJSdW4SHC5rYWppYmEudjEuVHJpZ2dlclJ1blJlcXVlc3QaHS5rYWppYmEudjEuVHJpZ2dlclJ1blJlc3BvbnNlIgSAtRgDEkMKBkdldFJ1bhIYLmthamliYS52MS5HZXRSdW5SZXF1ZXN0Ghkua2FqaWJhLnYxLkdldFJ1blJlc3BvbnNlIgSAtRgBEkkKCExpc3RSdW5zEhoua2FqaWJhLnYxLkxpc3RSdW5zUmVxdWVzdBobLmthamliYS52MS5MaXN0UnVuc1Jlc3BvbnNlIgSAtRgBEksKCFdhdGNoUnVuEhoua2FqaWJhLnYxLldhdGNoUnVuUmVxdWVzdBobLmthamliYS52MS5XYXRjaFJ1blJlc3BvbnNlIgSAtRgBMAFiBnByb3RvMw", [file_google_protobuf_timestamp, file_kajiba_v1_options]);
 
 /**
  * @generated from message kajiba.v1.TriggerRunRequest
@@ -353,6 +353,124 @@ export const FailureSummarySchema: GenMessage<FailureSummary> = /*@__PURE__*/
   messageDesc(file_kajiba_v1_run, 9);
 
 /**
+ * @generated from message kajiba.v1.WatchRunRequest
+ */
+export type WatchRunRequest = Message<"kajiba.v1.WatchRunRequest"> & {
+  /**
+   * @generated from field: string run = 1;
+   */
+  run: string;
+
+  /**
+   * Bytes of the run's log already received: resume after them.
+   *
+   * @generated from field: uint64 offset = 2;
+   */
+  offset: bigint;
+
+  /**
+   * Wait for new bytes and the terminal state; otherwise end after the stored bytes.
+   *
+   * @generated from field: bool follow = 3;
+   */
+  follow: boolean;
+};
+
+/**
+ * Describes the message kajiba.v1.WatchRunRequest.
+ * Use `create(WatchRunRequestSchema)` to create a new message.
+ */
+export const WatchRunRequestSchema: GenMessage<WatchRunRequest> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_run, 10);
+
+/**
+ * @generated from message kajiba.v1.WatchRunResponse
+ */
+export type WatchRunResponse = Message<"kajiba.v1.WatchRunResponse"> & {
+  /**
+   * @generated from oneof kajiba.v1.WatchRunResponse.event
+   */
+  event: {
+    /**
+     * @generated from field: kajiba.v1.LogSection section = 1;
+     */
+    value: LogSection;
+    case: "section";
+  } | {
+    /**
+     * @generated from field: kajiba.v1.LogBytes log = 2;
+     */
+    value: LogBytes;
+    case: "log";
+  } | {
+    /**
+     * The run, sent once terminal (with its failure summary); the stream then ends.
+     *
+     * @generated from field: kajiba.v1.Run finished = 3;
+     */
+    value: Run;
+    case: "finished";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message kajiba.v1.WatchRunResponse.
+ * Use `create(WatchRunResponseSchema)` to create a new message.
+ */
+export const WatchRunResponseSchema: GenMessage<WatchRunResponse> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_run, 11);
+
+/**
+ * The start of an attempt's bytes in the run's log.
+ *
+ * @generated from message kajiba.v1.LogSection
+ */
+export type LogSection = Message<"kajiba.v1.LogSection"> & {
+  /**
+   * @generated from field: kajiba.v1.Attempt attempt = 1;
+   */
+  attempt?: Attempt | undefined;
+
+  /**
+   * Where the attempt's bytes start in the run's log.
+   *
+   * @generated from field: uint64 offset = 2;
+   */
+  offset: bigint;
+};
+
+/**
+ * Describes the message kajiba.v1.LogSection.
+ * Use `create(LogSectionSchema)` to create a new message.
+ */
+export const LogSectionSchema: GenMessage<LogSection> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_run, 12);
+
+/**
+ * @generated from message kajiba.v1.LogBytes
+ */
+export type LogBytes = Message<"kajiba.v1.LogBytes"> & {
+  /**
+   * Where `data` starts in the run's log: the attempts' logs one after the other.
+   *
+   * @generated from field: uint64 offset = 1;
+   */
+  offset: bigint;
+
+  /**
+   * @generated from field: bytes data = 2;
+   */
+  data: Uint8Array;
+};
+
+/**
+ * Describes the message kajiba.v1.LogBytes.
+ * Use `create(LogBytesSchema)` to create a new message.
+ */
+export const LogBytesSchema: GenMessage<LogBytes> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_run, 13);
+
+/**
  * @generated from enum kajiba.v1.RunTrigger
  */
 export enum RunTrigger {
@@ -550,6 +668,19 @@ export const RunService: GenService<{
     methodKind: "unary";
     input: typeof ListRunsRequestSchema;
     output: typeof ListRunsResponseSchema;
+  },
+  /**
+   * A run's log: the stored bytes from `offset`, then, when following, live bytes as
+   * the forge stores them, then the run once terminal, and the stream ends. Each
+   * attempt's bytes are preceded by its section marker; a replayed attempt opens a new
+   * section. Not bound by the request timeout.
+   *
+   * @generated from rpc kajiba.v1.RunService.WatchRun
+   */
+  watchRun: {
+    methodKind: "server_streaming";
+    input: typeof WatchRunRequestSchema;
+    output: typeof WatchRunResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_kajiba_v1_run, 0);

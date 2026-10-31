@@ -282,7 +282,7 @@ fn commit(commit: kajiba_gitstore::Commit) -> Commit {
     }
 }
 
-fn not_found() -> Status {
+pub(super) fn not_found() -> Status {
     refused(
         tonic::Code::NotFound,
         "REPO_NOT_FOUND",

@@ -454,6 +454,9 @@ impl Runners {
         drop(writer);
         let assigned = match result {
             Ok((changes, (assigned, pending))) => {
+                if !changes.is_empty() || !assigned.is_empty() {
+                    self.health.ci_progress.send_replace(());
+                }
                 self.runs_changed(changes);
                 self.registry.set_jobs_pending(pending as u64);
                 assigned
@@ -642,6 +645,7 @@ impl Runners {
         };
         declared.bus.commit(tx).await.map_err(internal)?;
         drop(writer);
+        self.health.ci_progress.send_replace(());
         Ok(match outcome {
             Outcome::Cancel => vec![cancel(&attempt)],
             Outcome::Done(changes) => {

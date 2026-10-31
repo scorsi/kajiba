@@ -6,7 +6,7 @@ use crate::transport::{
 };
 use kajiba_proto::v1::Scope;
 use prost::Message;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tonic::Code;
 
 /// `alice` owns `ci` (CI on, `bob` writes) and `off` (CI off); `bob` owns `zeta`.
@@ -474,4 +474,254 @@ async fn get_run_answers_a_grpc_web_unary_call() {
         .run
         .unwrap();
     assert_eq!((run.state(), run.public_id), (RunState::Queued, id));
+}
+
+/// A runner's progress on a triggered run, written as the runner handler would.
+struct Progress<'a> {
+    fixture: &'a Fixture,
+    runs: &'a Runs,
+    job: i64,
+}
+
+impl<'a> Progress<'a> {
+    async fn new(fixture: &'a Fixture, runs: &'a Runs, run: &str) -> Self {
+        let mut writer = fixture.writer.lock().await;
+        sqlx::query(
+            "INSERT OR IGNORE INTO runner (public_id, name, capabilities, version, connected)
+             VALUES ('01J00000000000000000000001', 'build-1', '{}', '0.1.0', 1)",
+        )
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+        let job = sqlx::query_scalar(
+            "SELECT job.id FROM job JOIN run ON run.id = run_id WHERE run.public_id = ?",
+        )
+        .bind(run)
+        .fetch_one(&mut *writer)
+        .await
+        .unwrap();
+        Self { fixture, runs, job }
+    }
+
+    /// Attempt `number`, running, with public id `01J…<number>`.
+    async fn attempt(&self, number: i64) -> String {
+        let public_id = format!("01J{number:0>23}");
+        sqlx::query("UPDATE job_attempt SET state = 'lost' WHERE job_id = ? AND state = 'running'")
+            .bind(self.job)
+            .execute(&mut *self.fixture.writer.lock().await)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO job_attempt (public_id, job_id, number, runner_id, state, lease_expires_at, started_at)
+             VALUES (?, ?, ?, 1, 'running', 0, 0)",
+        )
+        .bind(&public_id)
+        .bind(self.job)
+        .bind(number)
+        .execute(&mut *self.fixture.writer.lock().await)
+        .await
+        .unwrap();
+        public_id
+    }
+
+    /// Append `data` to the attempt's log and index it, then signal watchers.
+    async fn log(&self, attempt: &str, data: &str) {
+        let path = self.runs.log(attempt);
+        let offset = std::fs::metadata(&path).map_or(0, |meta| meta.len());
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, data.as_bytes()).unwrap();
+        sqlx::query(
+            "INSERT INTO log_chunk (attempt_id, seq, step_idx, offset, length)
+             SELECT id, (SELECT count(*) + 1 FROM log_chunk WHERE attempt_id = job_attempt.id), 0, ?, ?
+             FROM job_attempt WHERE public_id = ?",
+        )
+        .bind(offset as i64)
+        .bind(data.len() as i64)
+        .bind(attempt)
+        .execute(&mut *self.fixture.writer.lock().await)
+        .await
+        .unwrap();
+        self.runs.0.ci_progress.send_replace(());
+    }
+
+    async fn fail(&self, run: &str) {
+        let mut writer = self.fixture.writer.lock().await;
+        for sql in [
+            "UPDATE job_attempt SET state = 'failed', exit_code = 1 WHERE job_id = ?1 AND state = 'running'",
+            "UPDATE job SET state = 'failed' WHERE id = ?1",
+        ] {
+            sqlx::query(sql)
+                .bind(self.job)
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "UPDATE run SET state = 'failed', failure_reason = 'exit status 1' WHERE public_id = ?",
+        )
+        .bind(run)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+        drop(writer);
+        self.runs.0.ci_progress.send_replace(());
+    }
+}
+
+type Events = <Runs as RunService>::WatchRunStream;
+
+async fn watch(
+    runs: &Runs,
+    user: i64,
+    run: &str,
+    offset: u64,
+    follow: bool,
+) -> Result<Events, Status> {
+    runs.watch_run(as_user(
+        user,
+        WatchRunRequest {
+            run: run.into(),
+            offset,
+            follow,
+        },
+    ))
+    .await
+    .map(Response::into_inner)
+}
+
+/// The next event, `None` once the stream ended.
+async fn next(events: &mut Events) -> Option<watch_run_response::Event> {
+    use tokio_stream::StreamExt;
+    tokio::time::timeout(Duration::from_secs(5), events.next())
+        .await
+        .expect("an event or the end")
+        .map(|event| event.unwrap().event.unwrap())
+}
+
+/// Events until `bytes` of log arrived: the sections' attempt ids, then the bytes, each
+/// starting where the previous one ended.
+async fn read(events: &mut Events, from: u64, bytes: usize) -> (Vec<(String, u64)>, String) {
+    let (mut sections, mut data) = (Vec::new(), String::new());
+    while data.len() < bytes {
+        match next(events).await.unwrap() {
+            watch_run_response::Event::Section(section) => {
+                sections.push((section.attempt.unwrap().public_id, section.offset))
+            }
+            watch_run_response::Event::Log(log) => {
+                assert_eq!(log.offset, from + data.len() as u64, "no gap, no duplicate");
+                data.push_str(std::str::from_utf8(&log.data).unwrap());
+            }
+            watch_run_response::Event::Finished(_) => panic!("finished early"),
+        }
+    }
+    (sections, data)
+}
+
+#[tokio::test]
+async fn followers_get_stored_then_live_bytes_then_the_terminal_run() {
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, ALICE, "alice/ci", &tip)
+        .await
+        .unwrap()
+        .public_id;
+    let progress = Progress::new(&fixture, &runs, &run).await;
+    let attempt = progress.attempt(1).await;
+    progress.log(&attempt, "stored ").await;
+    let mut first = watch(&runs, BOB, &run, 0, true).await.unwrap();
+    let mut second = watch(&runs, ALICE, &run, 0, true).await.unwrap();
+    for events in [&mut first, &mut second] {
+        assert_eq!(
+            read(events, 0, 7).await,
+            (vec![(attempt.clone(), 0)], "stored ".into())
+        );
+    }
+    progress.log(&attempt, "live\n").await;
+    progress.log(&attempt, "error: boom\n").await;
+    for events in [&mut first, &mut second] {
+        assert_eq!(
+            read(events, 7, 17).await,
+            (vec![], "live\nerror: boom\n".into())
+        );
+    }
+    progress.fail(&run).await;
+    for events in [&mut first, &mut second] {
+        let Some(watch_run_response::Event::Finished(finished)) = next(events).await else {
+            panic!("the terminal run");
+        };
+        assert_eq!(finished.state(), RunState::Failed);
+        assert_eq!(
+            finished.failure.unwrap().last_log_lines,
+            ["stored live", "error: boom"]
+        );
+        assert!(next(events).await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_one_shot_read_of_a_running_run_ends_after_the_stored_bytes() {
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, ALICE, "alice/ci", &tip)
+        .await
+        .unwrap()
+        .public_id;
+    // A queued run without attempt: nothing yet.
+    let mut events = watch(&runs, ALICE, &run, 0, false).await.unwrap();
+    assert!(next(&mut events).await.is_none());
+    let progress = Progress::new(&fixture, &runs, &run).await;
+    let attempt = progress.attempt(1).await;
+    progress.log(&attempt, "partial").await;
+    let mut events = watch(&runs, ALICE, &run, 3, false).await.unwrap();
+    assert_eq!(
+        read(&mut events, 3, 4).await,
+        (vec![(attempt, 0)], "tial".into())
+    );
+    assert!(next(&mut events).await.is_none());
+}
+
+#[tokio::test]
+async fn a_replayed_attempt_opens_a_new_section() {
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, ALICE, "alice/ci", &tip)
+        .await
+        .unwrap()
+        .public_id;
+    let progress = Progress::new(&fixture, &runs, &run).await;
+    let lost = progress.attempt(1).await;
+    progress.log(&lost, "one\n").await;
+    let replayed = progress.attempt(2).await;
+    progress.log(&replayed, "two\n").await;
+    let mut events = watch(&runs, ALICE, &run, 0, false).await.unwrap();
+    assert_eq!(
+        read(&mut events, 0, 8).await,
+        (vec![(lost, 0), (replayed.clone(), 4)], "one\ntwo\n".into())
+    );
+    // Resuming past the lost attempt starts at the replayed one's section.
+    let mut events = watch(&runs, ALICE, &run, 4, false).await.unwrap();
+    assert_eq!(
+        read(&mut events, 4, 4).await,
+        (vec![(replayed, 4)], "two\n".into())
+    );
+    assert!(next(&mut events).await.is_none());
+}
+
+#[tokio::test]
+async fn watching_needs_a_readable_run() {
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, ALICE, "alice/ci", &tip)
+        .await
+        .unwrap()
+        .public_id;
+    // An unknown or disabled user reads nothing.
+    let status = watch(&runs, 99, &run, 0, false).await.err().unwrap();
+    assert_eq!(refusal(status), (Code::NotFound, "REPO_NOT_FOUND".into()));
+    let status = watch(&runs, ALICE, ATTEMPT, 0, false).await.err().unwrap();
+    assert_eq!(refusal(status), (Code::NotFound, "RUN_NOT_FOUND".into()));
 }

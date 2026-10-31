@@ -23,6 +23,13 @@ service RunService {
   rpc ListRuns(ListRunsRequest) returns (ListRunsResponse) {
     option (kajiba.v1.scope) = SCOPE_REPO_READ;
   }
+  // A run's log: the stored bytes from `offset`, then, when following, live bytes as
+  // the forge stores them, then the run once terminal, and the stream ends. Each
+  // attempt's bytes are preceded by its section marker; a replayed attempt opens a new
+  // section. Not bound by the request timeout.
+  rpc WatchRun(WatchRunRequest) returns (stream WatchRunResponse) {
+    option (kajiba.v1.scope) = SCOPE_REPO_READ;
+  }
 }
 
 message TriggerRunRequest {
@@ -140,4 +147,34 @@ message FailureSummary {
   string reason = 2;
   // The last lines (at most 20) of the current attempt's stored log.
   repeated string last_log_lines = 3;
+}
+
+message WatchRunRequest {
+  string run = 1;
+  // Bytes of the run's log already received: resume after them.
+  uint64 offset = 2;
+  // Wait for new bytes and the terminal state; otherwise end after the stored bytes.
+  bool follow = 3;
+}
+
+message WatchRunResponse {
+  oneof event {
+    LogSection section = 1;
+    LogBytes log = 2;
+    // The run, sent once terminal (with its failure summary); the stream then ends.
+    Run finished = 3;
+  }
+}
+
+// The start of an attempt's bytes in the run's log.
+message LogSection {
+  Attempt attempt = 1;
+  // Where the attempt's bytes start in the run's log.
+  uint64 offset = 2;
+}
+
+message LogBytes {
+  // Where `data` starts in the run's log: the attempts' logs one after the other.
+  uint64 offset = 1;
+  bytes data = 2;
 }

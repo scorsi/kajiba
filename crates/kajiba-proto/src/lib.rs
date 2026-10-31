@@ -2,6 +2,8 @@
 
 // Nested as the package path: generated code reaches `google.protobuf` through `super::super`.
 pub mod kajiba {
+    // `WatchRunResponse` carries small log events beside one terminal `Run`.
+    #[allow(clippy::large_enum_variant)]
     pub mod v1 {
         tonic::include_proto!("kajiba.v1");
     }

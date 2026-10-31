@@ -13,12 +13,14 @@ use kajiba_proto::{
     google::protobuf::Timestamp,
     v1::{
         Attempt, AttemptState, FailureSummary, GetRunRequest, GetRunResponse, Job, JobState,
-        ListRunsRequest, ListRunsResponse, Run, RunState, RunTrigger, TriggerRunRequest,
-        TriggerRunResponse, run_service_server::RunService,
+        ListRunsRequest, ListRunsResponse, LogBytes, LogSection, Run, RunState, RunTrigger,
+        TriggerRunRequest, TriggerRunResponse, WatchRunRequest, WatchRunResponse,
+        run_service_server::RunService, watch_run_response,
     },
 };
 use sqlx::SqliteConnection;
-use std::{io::Read, path::Path};
+use std::{io::Read, path::Path, time::Duration};
+use tokio::sync::{mpsc, watch};
 use tonic::{Request, Response, Status};
 
 /// Lines of the failure summary (0112), read from at most this many trailing log bytes.
@@ -90,6 +92,10 @@ fn last_lines(path: &Path, end: u64) -> Vec<String> {
 }
 
 impl Runs {
+    fn log(&self, attempt: &str) -> std::path::PathBuf {
+        self.0.state_dir.join(format!("ci/logs/{attempt}.log"))
+    }
+
     fn readers(&self) -> Result<&sqlx::SqlitePool, Status> {
         self.0
             .database
@@ -113,30 +119,14 @@ impl Runs {
         let mut current = None;
         let job = match job {
             Some((job_id, public_id, name, job_state, pending_reason)) => {
-                let attempt: Option<AttemptRow> = sqlx::query_as(
-                    "SELECT job_attempt.id, job_attempt.public_id, number, state, runner.name,
-                            runner.hostname, exit_code, started_at, finished_at,
-                            (SELECT MAX(offset + length) FROM log_chunk WHERE attempt_id = job_attempt.id)
-                     FROM job_attempt JOIN runner ON runner.id = runner_id
-                     WHERE job_id = ? ORDER BY number DESC LIMIT 1",
-                )
-                .bind(job_id)
-                .fetch_optional(&mut *connection)
-                .await
-                .map_err(internal)?;
-                let current_attempt = attempt.map(|attempt| {
-                    current = Some((attempt.1.clone(), attempt.9.unwrap_or(0)));
-                    Attempt {
-                        public_id: attempt.1,
-                        number: attempt.2 as u32,
-                        state: attempt_state(&attempt.3).into(),
-                        runner: attempt.4,
-                        runner_hostname: attempt.5.unwrap_or_default(),
-                        exit_code: attempt.6,
-                        started_at: time(Some(attempt.7)),
-                        finished_at: time(attempt.8),
-                    }
-                });
+                let current_attempt =
+                    attempts(connection, job_id)
+                        .await?
+                        .pop()
+                        .map(|(attempt, end)| {
+                            current = Some((attempt.public_id.clone(), end));
+                            attempt
+                        });
                 Some(Job {
                     public_id,
                     name,
@@ -151,12 +141,7 @@ impl Runs {
             check: check.unwrap_or_default(),
             reason: reason.unwrap_or_default(),
             last_log_lines: current
-                .map(|(attempt, end)| {
-                    last_lines(
-                        &self.0.state_dir.join(format!("ci/logs/{attempt}.log")),
-                        end as u64,
-                    )
-                })
+                .map(|(attempt, end)| last_lines(&self.log(&attempt), end))
                 .unwrap_or_default(),
         });
         Ok(Run {
@@ -190,7 +175,6 @@ impl Runs {
 }
 
 type AttemptRow = (
-    i64,
     String,
     i64,
     String,
@@ -201,6 +185,40 @@ type AttemptRow = (
     Option<i64>,
     Option<i64>,
 );
+
+/// A job's attempts in order, each with the end of its indexed log bytes.
+async fn attempts(
+    connection: &mut SqliteConnection,
+    job_id: i64,
+) -> Result<Vec<(Attempt, u64)>, Status> {
+    let rows: Vec<AttemptRow> = sqlx::query_as(
+        "SELECT job_attempt.public_id, number, state, runner.name, runner.hostname, exit_code,
+                started_at, finished_at,
+                (SELECT MAX(offset + length) FROM log_chunk WHERE attempt_id = job_attempt.id)
+         FROM job_attempt JOIN runner ON runner.id = runner_id
+         WHERE job_id = ? ORDER BY number",
+    )
+    .bind(job_id)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(internal)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let attempt = Attempt {
+                public_id: row.0,
+                number: row.1 as u32,
+                state: attempt_state(&row.2).into(),
+                runner: row.3,
+                runner_hostname: row.4.unwrap_or_default(),
+                exit_code: row.5,
+                started_at: time(Some(row.6)),
+                finished_at: time(row.7),
+            };
+            (attempt, row.8.unwrap_or(0) as u64)
+        })
+        .collect())
+}
 
 fn attempt_state(state: &str) -> AttemptState {
     match state {
@@ -226,8 +244,173 @@ fn job_state_of(state: &str) -> JobState {
     }
 }
 
+/// A run of a repository the caller can read: RUN_NOT_FOUND for an unknown id,
+/// REPO_NOT_FOUND when its repository is not readable (0020).
+async fn readable_run(
+    connection: &mut SqliteConnection,
+    user: i64,
+    run: &str,
+) -> Result<Row, Status> {
+    let row: Row = sqlx::query_as(&format!("{SELECT} WHERE run.public_id = ?"))
+        .bind(run)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(internal)?
+        .ok_or_else(run_not_found)?;
+    let repo_id: i64 = sqlx::query_scalar("SELECT repo_id FROM run WHERE id = ?")
+        .bind(row.0)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(internal)?;
+    crate::db::permissions::role(&mut *connection, user, repo_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(super::repos::not_found)?;
+    Ok(row)
+}
+
+type Watcher = mpsc::Sender<Result<WatchRunResponse, Status>>;
+
+/// Watchers re-read the run this often even without a progress signal.
+const WATCH_PERIOD: Duration = Duration::from_secs(1);
+
+impl Runs {
+    /// Stream the run's log from `position`, then its terminal state; returns when the
+    /// stream ends or the watcher is gone (`Ok`), or on an error to send.
+    async fn watch(
+        &self,
+        run_id: i64,
+        mut position: u64,
+        follow: bool,
+        mut progress: watch::Receiver<()>,
+        watcher: &Watcher,
+    ) -> Result<(), Status> {
+        let send = async |event| {
+            watcher
+                .send(Ok(WatchRunResponse { event: Some(event) }))
+                .await
+                .is_ok()
+        };
+        let mut marked: Option<String> = None;
+        loop {
+            // Marked seen before the snapshot: a commit after it wakes the next wait.
+            progress.borrow_and_update();
+            let mut connection = self.readers()?.begin().await.map_err(internal)?;
+            let row: Row = sqlx::query_as(&format!("{SELECT} WHERE run.id = ?"))
+                .bind(run_id)
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(internal)?;
+            let job: Option<i64> =
+                sqlx::query_scalar("SELECT id FROM job WHERE run_id = ? ORDER BY id LIMIT 1")
+                    .bind(run_id)
+                    .fetch_optional(&mut *connection)
+                    .await
+                    .map_err(internal)?;
+            let sections = match job {
+                Some(job) => attempts(&mut connection, job).await?,
+                None => Vec::new(),
+            };
+            // A terminal run's attempts have all ended: its log is complete in this snapshot.
+            let finished = match row.7.as_str() {
+                "succeeded" | "failed" | "cancelled" => {
+                    Some(self.message(&mut connection, row).await?)
+                }
+                _ => None,
+            };
+            drop(connection);
+            let mut start = 0;
+            for (attempt, length) in sections {
+                let stop = start + length;
+                if start < position && stop <= position {
+                    start = stop;
+                    continue;
+                }
+                let path = self.log(&attempt.public_id);
+                if marked.as_deref() != Some(attempt.public_id.as_str()) {
+                    marked = Some(attempt.public_id.clone());
+                    let section = LogSection {
+                        attempt: Some(attempt),
+                        offset: start,
+                    };
+                    if !send(watch_run_response::Event::Section(section)).await {
+                        return Ok(());
+                    }
+                }
+                while position < stop {
+                    let data = read_at(&path, position - start, (stop - position).min(LOG_PIECE))
+                        .map_err(|err| Status::internal(format!("log: {err}")))?;
+                    let log = LogBytes {
+                        offset: position,
+                        data,
+                    };
+                    position += log.data.len() as u64;
+                    if !send(watch_run_response::Event::Log(log)).await {
+                        return Ok(());
+                    }
+                }
+                start = stop;
+            }
+            if let Some(run) = finished {
+                send(watch_run_response::Event::Finished(run)).await;
+                return Ok(());
+            }
+            if !follow {
+                return Ok(());
+            }
+            tokio::select! {
+                _ = progress.changed() => {}
+                () = tokio::time::sleep(WATCH_PERIOD) => {}
+                () = watcher.closed() => return Ok(()),
+            }
+        }
+    }
+}
+
+/// Bytes sent per log message, as a runner's chunk (0105).
+const LOG_PIECE: u64 = 64 * 1024;
+
+/// `length` bytes at `offset` of a log file, all of them indexed hence present.
+fn read_at(path: &Path, offset: u64, length: u64) -> std::io::Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path)?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(offset))?;
+    let mut data = vec![0; length as usize];
+    file.read_exact(&mut data)?;
+    Ok(data)
+}
+
 #[tonic::async_trait]
 impl RunService for Runs {
+    type WatchRunStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<WatchRunResponse, Status>> + Send>,
+    >;
+
+    async fn watch_run(
+        &self,
+        request: Request<WatchRunRequest>,
+    ) -> Result<Response<Self::WatchRunStream>, Status> {
+        let user = caller(&request)?;
+        let request = request.into_inner();
+        let mut connection = self.readers()?.begin().await.map_err(internal)?;
+        let run = readable_run(&mut connection, user, &request.run).await?.0;
+        drop(connection);
+        // Subscribed before the first snapshot: nothing stored after it is missed.
+        let progress = self.0.ci_progress.subscribe();
+        let (watcher, events) = mpsc::channel(4);
+        let runs = self.clone();
+        tokio::spawn(async move {
+            if let Err(status) = runs
+                .watch(run, request.offset, request.follow, progress, &watcher)
+                .await
+            {
+                let _ = watcher.send(Err(status)).await;
+            }
+        });
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(events),
+        )))
+    }
+
     async fn trigger_run(
         &self,
         request: Request<TriggerRunRequest>,
@@ -326,21 +509,7 @@ impl RunService for Runs {
     ) -> Result<Response<GetRunResponse>, Status> {
         let user = caller(&request)?;
         let mut connection = self.readers()?.begin().await.map_err(internal)?;
-        let row: Row = sqlx::query_as(&format!("{SELECT} WHERE run.public_id = ?"))
-            .bind(&request.get_ref().run)
-            .fetch_optional(&mut *connection)
-            .await
-            .map_err(internal)?
-            .ok_or_else(run_not_found)?;
-        let repo_id: i64 = sqlx::query_scalar("SELECT repo_id FROM run WHERE id = ?")
-            .bind(row.0)
-            .fetch_one(&mut *connection)
-            .await
-            .map_err(internal)?;
-        crate::db::permissions::role(&mut *connection, user, repo_id)
-            .await
-            .map_err(internal)?
-            .ok_or_else(run_not_found)?;
+        let row = readable_run(&mut connection, user, &request.get_ref().run).await?;
         let run = self.message(&mut connection, row).await?;
         Ok(Response::new(GetRunResponse { run: Some(run) }))
     }
