@@ -561,6 +561,7 @@ impl RepoService for Repos {
                     }
                     .into(),
                     id: entry.id,
+                    size: entry.size,
                 })
                 .collect();
             Ok(Response::new(GetTreeResponse { commit_id, entries }))

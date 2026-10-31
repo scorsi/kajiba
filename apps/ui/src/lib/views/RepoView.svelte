@@ -19,6 +19,7 @@
 	import { tick, type Snippet } from 'svelte';
 	import {
 		ChangeKind,
+		Code,
 		EntryKind,
 		CiMode,
 		MirrorState,
@@ -193,8 +194,25 @@
 			? (await listCommits({ repo: repoKey, revision: at, pageSize: 1 })).commits[0]
 			: undefined;
 		const changes = at ? (await getCommitDiff({ repo: repoKey, revision: at })).changes : [];
+		if (sel?.kind === EntryKind.SUBMODULE) return { kind: 'submodule' as const, id: sel.id };
+		if (sel?.kind === EntryKind.LINK) {
+			const target = new TextDecoder().decode(
+				(await getBlob({ repo: repoKey, revision: rev, path: p })).content
+			);
+			return { kind: 'link' as const, target, to: linkTarget(p, target) };
+		}
 		if (file && sel) {
-			const now = (await getBlob({ repo: repoKey, revision: rev, path: p })).content;
+			// Above the display cap the content is not fetched; GetBlob itself refuses 1 MiB.
+			if (sel.size !== undefined && sel.size > DISPLAY_CAP)
+				return { kind: 'large' as const, size: sel.size };
+			let now: Uint8Array;
+			try {
+				now = (await getBlob({ repo: repoKey, revision: rev, path: p })).content;
+			} catch (e) {
+				if ((e as { code?: number }).code === Code.ResourceExhausted)
+					return { kind: 'large' as const, size: sel.size };
+				throw e;
+			}
 			const change = changes.find((c) => c.path === p);
 			let before: Uint8Array | undefined;
 			if (change?.kind === ChangeKind.ADDED) before = new Uint8Array();
@@ -222,6 +240,25 @@
 			: undefined;
 		return { kind: 'readme' as const, readme, name: entry?.name };
 	});
+	const DISPLAY_CAP = 512 * 1024;
+	/** The server-side raw download of the selected file (0021). */
+	const rawHref = $derived(
+		`/raw/${repoKey}/${encodeURI(at || q.get('ref') || refShortName(repo?.defaultBranch ?? ''))}/${path
+			.split('/')
+			.map(encodeURIComponent)
+			.join('/')}`
+	);
+	/** A symlink target resolved against the link's directory; undefined if it leaves the repository. */
+	function linkTarget(from: string, target: string) {
+		const out = from.split('/').slice(0, -1);
+		for (const part of target.split('/')) {
+			if (part === '..') {
+				if (!out.length) return undefined;
+				out.pop();
+			} else if (part && part !== '.') out.push(part);
+		}
+		return target.startsWith('/') ? undefined : out.join('/');
+	}
 	let fileMode = $state<'diff' | 'file'>('diff');
 
 	let scroller = $state<HTMLElement>();
@@ -745,6 +782,9 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 													class={e.kind === EntryKind.TREE ? 'text-accent/80' : 'text-fg-subtle'}
 												/>
 												<span class="min-w-0 flex-1 truncate">{e.name}</span>
+												{#if e.size !== undefined}<span class="tabular text-xs text-fg-subtle"
+														>{formatBytes(e.size)}</span
+													>{/if}
 											</a>
 										</li>
 									{/each}
@@ -775,6 +815,36 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 								No README here. Open Files, or pick a day in the activity ribbon.
 							</p>
 						{/if}
+					{:else if preview.data?.kind === 'submodule'}
+						<div class="p-6 text-[0.8125rem] text-fg-muted">
+							<p class="font-mono text-xs text-fg-subtle">{path}</p>
+							<p class="mt-2">Submodule at commit <span class="font-mono">{preview.data.id}</span></p>
+							<p class="mt-1 text-xs text-fg-subtle">Its content lives in another repository.</p>
+						</div>
+					{:else if preview.data?.kind === 'link'}
+						<div class="p-6 text-[0.8125rem] text-fg-muted">
+							<p class="font-mono text-xs text-fg-subtle">{path}</p>
+							<p class="mt-2">
+								Symbolic link to
+								{#if preview.data.to !== undefined}
+									<a
+										href={hrefFor({ path: preview.data.to })}
+										data-sveltekit-noscroll
+										class="font-mono text-accent hover:underline">{preview.data.target}</a
+									>
+								{:else}<span class="font-mono">{preview.data.target}</span>{/if}
+							</p>
+						</div>
+					{:else if preview.data?.kind === 'large'}
+						<div class="p-6 text-[0.8125rem] text-fg-muted">
+							<p class="font-mono text-xs text-fg-subtle">{path}</p>
+							<p class="mt-2">
+								Large file{preview.data.size !== undefined
+									? ` (${formatBytes(preview.data.size)})`
+									: ''}: not previewed.
+								<a href={rawHref} class="text-accent hover:underline">Download the raw file</a>
+							</p>
+						</div>
 					{:else if preview.data?.kind === 'commit'}
 						{@const c = preview.data.commit}
 						{@const run = runByCommit.get(c.id)}
@@ -831,6 +901,7 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 										? ` · ${languageFor(path)}`
 										: ''}</span
 								>
+								<a href={rawHref} class="hover:text-fg hover:underline">Raw</a>
 								{#if f.commit}<span class={f.change ? CHANGE[f.change.kind].cls : ''}
 										>{f.change ? CHANGE[f.change.kind].label : 'unchanged'} in {shortId(
 											f.commit.id
@@ -860,10 +931,6 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 								{#if isBinary(f.now)}
 									<p class="p-4 text-[0.8125rem] text-fg-muted">
 										Binary file, {formatBytes(f.now.length)}.
-									</p>
-								{:else if f.now.length > 512 * 1024}
-									<p class="p-4 text-[0.8125rem] text-fg-muted">
-										Large file ({formatBytes(f.now.length)}): not previewed.
 									</p>
 								{:else if hunks && fileMode === 'diff'}
 									<table

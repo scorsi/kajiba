@@ -39,3 +39,35 @@ test("alice/demo: README, refs, clone URLs and read-only declared access", async
     page.getByRole("button", { name: /edit|remove|add/i }),
   ).toHaveCount(0);
 });
+
+test("alice/demo: open a nested file from the Files band, its size and raw bytes", async ({
+  page,
+}) => {
+  await authenticator(page);
+  await enroll(page, enrollLink());
+  await page.getByRole("link", { name: "Continue to kajiba" }).click();
+  await page.goto("/alice/demo?files=1");
+
+  // Descend from the root column: docs, guide, intro.md.
+  const column = (name: string) => page.getByRole("region", { name });
+  await column("root").getByRole("link", { name: /^docs/ }).click();
+  await column("docs")
+    .getByRole("link", { name: /^guide/ })
+    .click();
+  const intro = column("docs/guide").getByRole("link", { name: /intro\.md/ });
+  await expect(intro).toContainText("12 B");
+  await intro.click();
+  await expect(page).toHaveURL(/path=docs%2Fguide%2Fintro\.md/);
+  await expect(page.getByText("Start here.")).toBeVisible();
+
+  // The raw link answers the same bytes.
+  const raw = page.getByRole("link", { name: "Raw" });
+  await expect(raw).toHaveAttribute(
+    "href",
+    "/raw/alice/demo/main/docs/guide/intro.md",
+  );
+  const response = await page.request.get(
+    "/raw/alice/demo/main/docs/guide/intro.md",
+  );
+  expect(await response.text()).toBe("Start here.\n");
+});

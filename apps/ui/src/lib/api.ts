@@ -47,6 +47,7 @@ export enum Code {
   Unknown = 2,
   NotFound = 5,
   PermissionDenied = 7,
+  ResourceExhausted = 8,
   FailedPrecondition = 9,
   Unavailable = 14,
   Unauthenticated = 16,
@@ -133,6 +134,8 @@ export interface TreeEntry {
   name: string;
   kind: EntryKind;
   id: string;
+  /** Bytes of a file; absent for directories, links and submodules. */
+  size?: number;
 }
 
 export interface Commit {
@@ -226,6 +229,7 @@ export async function getTree(req: {
       name: e.name,
       kind: e.kind as number as EntryKind,
       id: e.id,
+      size: e.size === undefined ? undefined : Number(e.size),
     })),
   };
 }

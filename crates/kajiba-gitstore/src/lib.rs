@@ -104,6 +104,9 @@ pub struct TreeEntry {
     pub name: String,
     pub kind: EntryKind,
     pub id: String,
+    /// Bytes of a file (blob or executable), read from its object header; `None` for
+    /// trees, links and submodules.
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1110,16 +1113,25 @@ impl GitStore for Gix<'_> {
                 return Err(Error::TooLarge(Limit::Tree));
             }
             use gix::object::tree::EntryKind as K;
+            let kind = match entry.mode().kind() {
+                K::Tree => EntryKind::Tree,
+                K::Blob => EntryKind::Blob,
+                K::BlobExecutable => EntryKind::Executable,
+                K::Link => EntryKind::Link,
+                K::Commit => EntryKind::Submodule,
+            };
+            // A header read is an object read of the budget (0059); no content is read.
+            let size = if matches!(kind, EntryKind::Blob | EntryKind::Executable) {
+                work.object(0)?;
+                Some(repo.find_header(entry.id())?.size())
+            } else {
+                None
+            };
             entries.push(TreeEntry {
                 name: entry.filename().to_string(),
-                kind: match entry.mode().kind() {
-                    K::Tree => EntryKind::Tree,
-                    K::Blob => EntryKind::Blob,
-                    K::BlobExecutable => EntryKind::Executable,
-                    K::Link => EntryKind::Link,
-                    K::Commit => EntryKind::Submodule,
-                },
+                kind,
                 id: entry.oid().to_string(),
+                size,
             });
         }
         work.check()?;

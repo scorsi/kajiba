@@ -430,6 +430,46 @@ fn refs_match_the_git_binary() {
 }
 
 #[test]
+fn tree_entries_carry_the_size_of_files_only() {
+    let f = fixture("tree-sizes");
+    let sizes = |commit: &str, path: &str| -> Vec<(String, Option<u64>)> {
+        Gix.tree(&f.bare, commit, path, usize::MAX)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.size))
+            .collect()
+    };
+    // "hello\n", the symlink target (no size), "#!/bin/sh\n", a directory (no size).
+    assert_eq!(
+        sizes(&f.first, ""),
+        [
+            ("README.md".to_owned(), Some(6)),
+            ("link".to_owned(), None),
+            ("run.sh".to_owned(), Some(10)),
+            ("src".to_owned(), None),
+        ]
+    );
+    assert_eq!(sizes(&f.first, "src"), [("lib.rs".to_owned(), Some(13))]);
+    // An empty file, an executable and a submodule.
+    let t = "1700000300 +0000";
+    let empty = git(&f.bare, &["hash-object", "-w", "/dev/null"], t);
+    let listing = format!(
+        "100644 blob {empty}\tempty\n100755 blob {empty}\texec\n160000 commit {}\tsub\n",
+        f.first
+    );
+    let root = mktree(&f.bare, &listing);
+    let commit = git(&f.bare, &["commit-tree", &root, "-m", "sizes"], t);
+    assert_eq!(
+        sizes(&commit, ""),
+        [
+            ("empty".to_owned(), Some(0)),
+            ("exec".to_owned(), Some(0)),
+            ("sub".to_owned(), None),
+        ]
+    );
+}
+
+#[test]
 fn tree_lists_entries_with_their_kind() {
     let f = fixture("tree");
     let root = Gix.tree(&f.bare, &f.first, "", usize::MAX).unwrap();

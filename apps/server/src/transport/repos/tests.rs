@@ -1165,6 +1165,42 @@ async fn refs(repos: &Repos, repo: &str) -> Result<Vec<GitRef>, Status> {
 }
 
 #[tokio::test]
+async fn tree_entries_report_file_sizes_and_none_for_directories() {
+    let fixture = Fixture::new(DEMO).await;
+    fixture
+        .fill("alice/demo", &[("a.txt", "12345"), ("src/b.txt", "")], &[])
+        .await;
+    let response = fixture
+        .repos
+        .get_tree(as_alice(GetTreeRequest {
+            repo: "alice/demo".into(),
+            revision: "main".into(),
+            path: String::new(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let sizes: Vec<_> = response
+        .entries
+        .iter()
+        .map(|e| (&e.name[..], e.size))
+        .collect();
+    assert_eq!(sizes, [("a.txt", Some(5)), ("src", None)]);
+    let nested = fixture
+        .repos
+        .get_tree(as_alice(GetTreeRequest {
+            repo: "alice/demo".into(),
+            revision: "main".into(),
+            path: "src".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    // An empty file has the size 0, which is not "absent".
+    assert_eq!(nested.entries[0].size, Some(0));
+}
+
+#[tokio::test]
 async fn list_refs_gives_branches_and_tags_with_their_commits() {
     let fixture = Fixture::new(&format!(
         "{DEMO}[repos.empty]\nowner='alice'\ndescription=''\n"
