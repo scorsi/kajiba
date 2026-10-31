@@ -1303,3 +1303,41 @@ async fn ui_dir_serves_pages_and_assets_behind_every_route() {
     assert_eq!(response.headers()["grpc-status"], "12");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn runner_listener_requires_h2_alpn() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/kajiba-core/tests/fixtures/svid");
+    let source = |leaf: &str| {
+        svid::Source::load(svid::Files {
+            trust_domain: "example.org".into(),
+            svid_file: dir.join(format!("{leaf}.pem")),
+            key_file: dir.join(format!("{leaf}.key")),
+            bundle_file: dir.join("ca.pem"),
+        })
+        .unwrap()
+    };
+    let forge = source("forge");
+    let runner = source("runner");
+    for advertise in [false, true] {
+        let mut config = runner.client_config("spiffe://example.org/forge/kajiba-server");
+        if !advertise {
+            config.alpn_protocols.clear();
+        }
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+        let (client, server) = tokio::io::duplex(16 * 1024);
+        let (client, server) = tokio::join!(
+            connector.connect(
+                tokio_rustls::rustls::pki_types::ServerName::try_from("runners.example.org")
+                    .unwrap(),
+                client,
+            ),
+            accept_runner(server, &forge),
+        );
+        assert!(client.is_ok());
+        assert_eq!(server.is_some(), advertise);
+        if let Some((_, peer)) = server {
+            assert_eq!(peer.id, "spiffe://example.org/build-1/kajiba-runner");
+        }
+    }
+}

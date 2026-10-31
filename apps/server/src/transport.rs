@@ -454,19 +454,33 @@ async fn serve_runners(
         move |stream| {
             let (app, source) = (app.clone(), source.clone());
             async move {
-                let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(source.server_config()));
-                let tls = tokio::time::timeout(RUNNER_HANDSHAKE, acceptor.accept(stream))
-                    .await
-                    .ok()?
-                    .ok()?;
-                // The verifier accepted this leaf: it parses as a SPIFFE ID in the trust domain.
-                let leaf = tls.get_ref().1.peer_certificates()?.first()?;
-                let peer = svid::peer(leaf, source.trust_domain()).ok()?;
+                let (tls, peer) = accept_runner(stream, &source).await?;
                 Some((tls, app.layer(axum::Extension(peer))))
             }
         },
     )
     .await
+}
+
+async fn accept_runner<S>(
+    stream: S,
+    source: &Arc<svid::Source>,
+) -> Option<(tokio_rustls::server::TlsStream<S>, svid::Peer)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(source.server_config()));
+    let tls = tokio::time::timeout(RUNNER_HANDSHAKE, acceptor.accept(stream))
+        .await
+        .ok()?
+        .ok()?;
+    if tls.get_ref().1.alpn_protocol() != Some(b"h2") {
+        return None;
+    }
+    // The verifier accepted this leaf: it parses as a SPIFFE ID in the trust domain.
+    let leaf = tls.get_ref().1.peer_certificates()?.first()?;
+    let peer = svid::peer(leaf, source.trust_domain()).ok()?;
+    Some((tls, peer))
 }
 
 /// Accept connections, each holding one of `connections` permits from its acceptance

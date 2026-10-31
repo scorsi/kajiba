@@ -33,6 +33,27 @@ pub fn endpoint(url: &str, tls: &RunnerTlsConfig) -> Result<(Endpoint, Tls), Str
 #[derive(Clone)]
 pub struct Tls(Arc<svid::Source>, String);
 
+impl Tls {
+    async fn connect<S>(
+        &self,
+        name: ServerName<'static>,
+        stream: S,
+    ) -> std::io::Result<TlsStream<S>>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let config = Arc::new(self.0.client_config(&self.1));
+        let tls = TlsConnector::from(config).connect(name, stream).await?;
+        if tls.get_ref().1.alpn_protocol() != Some(b"h2") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "runner TLS requires ALPN h2",
+            ));
+        }
+        Ok(tls)
+    }
+}
+
 impl tonic::codegen::Service<Uri> for Tls {
     type Response = TokioIo<TlsStream<TcpStream>>;
     type Error = std::io::Error;
@@ -58,8 +79,7 @@ impl tonic::codegen::Service<Uri> for Tls {
             let name = ServerName::try_from(host.clone())
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
             let tcp = TcpStream::connect((host.as_str(), port)).await?;
-            let config = Arc::new(source.client_config(&server_id));
-            let tls = TlsConnector::from(config).connect(name, tcp).await?;
+            let tls = Tls(source, server_id).connect(name, tcp).await?;
             Ok(TokioIo::new(tls))
         })
     }
@@ -106,6 +126,36 @@ mod tests {
             connection.alpn_protocol().map(<[u8]>::to_vec),
             svid::peer(leaf, "example.org").unwrap().id,
         ))
+    }
+
+    #[tokio::test]
+    async fn the_connector_requires_h2_alpn() {
+        let forge = files("forge");
+        let source = svid::Source::load(svid::Files {
+            trust_domain: forge.trust_domain,
+            svid_file: forge.svid_file,
+            key_file: forge.key_file,
+            bundle_file: forge.bundle_file,
+        })
+        .unwrap();
+        let (_, connector) = endpoint("https://runners.example.org", &files("runner")).unwrap();
+        for advertise in [false, true] {
+            let mut config = source.server_config();
+            if !advertise {
+                config.alpn_protocols.clear();
+            }
+            let acceptor = TlsAcceptor::from(Arc::new(config));
+            let (client, server) = tokio::io::duplex(16 * 1024);
+            let (client, server) = tokio::join!(
+                connector.connect(ServerName::try_from("runners.example.org").unwrap(), client),
+                acceptor.accept(server),
+            );
+            assert_eq!(client.is_ok(), advertise);
+            if !advertise {
+                assert_eq!(client.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+            }
+            assert!(server.is_ok());
+        }
     }
 
     #[tokio::test]
