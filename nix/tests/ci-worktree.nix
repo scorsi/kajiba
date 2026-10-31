@@ -1,8 +1,8 @@
 # J6 task 27: `kajiba ci run --worktree` from a client clone, end to end behind the nginx TLS
-# front of `nixos-ci`: uncommitted changes run on the runner without a push, selected checks,
+# front of `nixos-ci-*`: uncommitted changes run on the runner without a push, selected checks,
 # routing by `requiredSystemFeatures`, the refusals and the worktree retention (every
 # acceptance criterion of J6 marked worktree). Runner mTLS task 8: runners by SVID through the
-# SNI relay of `nixos-ci`, and a runner whose declaration is removed refused as disabled (0124).
+# SNI relay of `nixos-ci-*`, and a runner whose declaration is removed refused as disabled (0124).
 {
   pkgs,
   kajibaServerPackage,
@@ -155,7 +155,7 @@ pkgs.testers.runNixOSTest {
     specialisation.retired.configuration.services.kajiba-server.runners = lib.mkForce {
       inherit build-1;
     };
-    # The reverse proxy as in nixos-ci: `runners.forge` relayed as raw TCP by SNI to the runner
+    # The reverse proxy as in nixos-ci-*: `runners.forge` relayed as raw TCP by SNI to the runner
     # listener, any other name to the TLS front: gRPC (HTTP/2) to the server, streams kept
     # open, request bodies (bundle uploads) unbounded.
     services.nginx = {
