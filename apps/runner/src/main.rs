@@ -2,6 +2,7 @@ mod cache;
 mod host;
 mod metrics;
 mod session;
+mod work;
 
 use clap::{Parser, Subcommand};
 use kajiba_core::{config::RunnerConfig, log};
@@ -176,11 +177,24 @@ async fn serve(config: RunnerConfig) -> Result<(), String> {
         let app = metrics::router(metrics.clone());
         tokio::spawn(async move { axum::serve(listener, app).await });
     }
-    let (jobs, mut assigned) = tokio::sync::mpsc::channel(16);
-    // shortcut: assignments are left to lease expiry until J6 task 13 executes them.
-    tokio::spawn(async move { while assigned.recv().await.is_some() {} });
-    tracing::info!(event = "ready");
+    let (jobs, assigned) = tokio::sync::mpsc::channel(16);
     let attempts = session::Attempts::default();
+    let client = kajiba_proto::runner::v1::runner_service_client::RunnerServiceClient::new(
+        endpoint.connect_lazy(),
+    );
+    let worker = work::Worker {
+        attempts: attempts.clone(),
+        cache: Arc::new(cache::Cache::new(
+            &config.state_dir,
+            client,
+            identity.clone(),
+        )),
+        executor: kajiba_exec::Nix::default(),
+        metrics,
+        max_jobs: config.max_jobs as usize,
+    };
+    tokio::spawn(work::serve(worker, assigned));
+    tracing::info!(event = "ready");
     let connection = session::run(endpoint, identity, attempts, jobs, tokio::time::sleep);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|err| err.to_string())?;

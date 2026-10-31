@@ -14,6 +14,7 @@ axum.workspace = true
 clap.workspace = true
 kajiba-proto = { path = "../../crates/kajiba-proto" }
 kajiba-core = { path = "../../crates/kajiba-core" }
+kajiba-exec = { path = "../../crates/kajiba-exec" }
 # Already transitive: the hostname from the OS (0019 as amended).
 libc.workspace = true
 # Reads `nix config show --json` (0009).

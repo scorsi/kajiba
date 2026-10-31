@@ -4,4 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[lib]
+[dependencies]
+# Already transitive: signals the step's process group on cancellation (0009).
+libc.workspace = true
+tokio.workspace = true

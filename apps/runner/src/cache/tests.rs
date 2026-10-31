@@ -82,10 +82,10 @@ fn run(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-struct Setup {
-    dir: PathBuf,
+pub(crate) struct Setup {
+    pub(crate) dir: PathBuf,
     fake: Fake,
-    cache: Arc<Cache>,
+    pub(crate) cache: Arc<Cache>,
     /// Commit `n` sets `file` to `n`, each a child of the previous one.
     commits: Vec<String>,
 }
@@ -98,7 +98,7 @@ impl Drop for Setup {
 
 const REPO: &str = "00000000000000000000000001";
 
-async fn setup(name: &str, commits: usize) -> Setup {
+pub(crate) async fn setup(name: &str, commits: usize) -> Setup {
     let dir =
         std::env::temp_dir().join(format!("kajiba-runner-cache-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -150,7 +150,7 @@ async fn setup(name: &str, commits: usize) -> Setup {
 
 impl Setup {
     /// Attempt `0…0<n>` of `REPO` at commit `index` (0-based).
-    fn assignment(&self, n: usize, index: usize) -> Assignment {
+    pub(crate) fn assignment(&self, n: usize, index: usize) -> Assignment {
         let attempt = format!("{n:0>26}");
         self.fake
             .attempts

@@ -2194,6 +2194,10 @@ dependencies = [
 [[package]]
 name = "kajiba-exec"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "tokio",
+]
 
 [[package]]
 name = "kajiba-git"
@@ -2238,6 +2242,7 @@ dependencies = [
  "axum",
  "clap",
  "kajiba-core",
+ "kajiba-exec",
  "kajiba-gitstore",
  "kajiba-proto",
  "libc",

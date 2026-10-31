@@ -24,7 +24,6 @@ pub struct Metrics {
 
 impl Metrics {
     /// An attempt this runner completed (`lost` is the server's, 0008).
-    #[allow(dead_code)] // called through `Attempts::finish` from J6 task 13
     pub fn job_finished(&self, state: ResultState) {
         if let Some(index) = RESULTS.iter().position(|(result, _)| *result == state) {
             self.jobs[index].fetch_add(1, Ordering::Relaxed);

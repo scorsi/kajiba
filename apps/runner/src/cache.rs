@@ -22,8 +22,6 @@ pub const KEPT: usize = 16;
 const RECENT: &str = "kajiba-recent";
 const INCOMING: &str = "kajiba-incoming.bundle";
 
-// shortcut: the job side using the cache arrives with J6 task 13; drop the allowance then.
-#[allow(dead_code)]
 pub struct Cache {
     dir: PathBuf,
     client: RunnerServiceClient<Channel>,
@@ -75,7 +73,6 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-#[allow(dead_code)]
 impl Cache {
     pub fn new(state_dir: &Path, client: RunnerServiceClient<Channel>, identity: Identity) -> Self {
         Self {
@@ -197,4 +194,4 @@ impl Cache {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

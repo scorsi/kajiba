@@ -90,8 +90,6 @@ impl Inner {
 #[derive(Clone, Default)]
 pub struct Attempts(Arc<Mutex<Inner>>);
 
-// shortcut: the job side calling these arrives with J6 task 13; drop the allowance then.
-#[allow(dead_code)]
 impl Attempts {
     /// Hold an assigned attempt and accept it.
     pub fn accept(&self, attempt: &str) {
@@ -139,7 +137,7 @@ impl Attempts {
         self.0.lock().unwrap().attempts.keys().cloned().collect()
     }
 
-    fn attach(&self, outbound: Option<mpsc::UnboundedSender<ConnectRequest>>) {
+    pub(crate) fn attach(&self, outbound: Option<mpsc::UnboundedSender<ConnectRequest>>) {
         self.0.lock().unwrap().outbound = outbound;
     }
 
