@@ -73,11 +73,12 @@ pub struct State {
     /// Answered by TriggerRun, and by GetRun for its id.
     pub run: Option<Run>,
     /// WatchRun: the attempt of the single section, the run's log, the run sent once
-    /// the log is out, and a byte offset where the next stream drops (Unavailable).
+    /// the log is out, and where the next streams drop: a byte offset, then the status
+    /// ending the stream or, for `None`, a broken connection.
     pub attempt: kajiba_proto::v1::Attempt,
     pub log: Vec<u8>,
     pub finished: Option<Run>,
-    pub drop_at: Option<u64>,
+    pub drops: Vec<(u64, Option<Status>)>,
     /// Every WatchRun request: offset and follow.
     pub watches: Vec<(u64, bool)>,
     /// GetWorktreeBase answers these ids and records each spec.
@@ -347,7 +348,13 @@ impl RunService for Fake {
             offset: 0,
         }))];
         events.push(event(Event::Keepalive(WatchKeepalive {})));
-        let end = state.drop_at.take().unwrap_or(state.log.len() as u64);
+        let (end, cut) = match state.drops.is_empty() {
+            true => (state.log.len() as u64, None),
+            false => {
+                let (end, cut) = state.drops.remove(0);
+                (end, Some(cut))
+            }
+        };
         let mut offset = request.offset;
         while offset < end {
             let stop = (offset + 4).min(end);
@@ -357,10 +364,31 @@ impl RunService for Fake {
             })));
             offset = stop;
         }
-        if end < state.log.len() as u64 {
-            events.push(Err(Status::unavailable("dropped")));
-        } else if let Some(run) = &state.finished {
-            events.push(event(Event::Finished(run.clone())));
+        use tonic::codegen::tokio_stream::{self, StreamExt, wrappers::ReceiverStream};
+        match cut {
+            Some(Some(status)) => events.push(Err(status)),
+            Some(None) => {
+                // The bytes go out while the stream waits, then the connection task dies
+                // and its socket closes under the client, as a crashed proxy's would.
+                let (open, waiting) = tokio::sync::mpsc::channel(1);
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    drop(open);
+                });
+                let broken = std::iter::from_fn(|| -> Option<Result<WatchRunResponse, Status>> {
+                    panic!("fake connection broken")
+                });
+                return Ok(Response::new(Box::pin(
+                    tokio_stream::iter(events)
+                        .chain(ReceiverStream::new(waiting))
+                        .chain(tokio_stream::iter(broken)),
+                )));
+            }
+            None => {
+                if let Some(run) = &state.finished {
+                    events.push(event(Event::Finished(run.clone())));
+                }
+            }
         }
         Ok(Response::new(Box::pin(tonic::codegen::tokio_stream::iter(
             events,

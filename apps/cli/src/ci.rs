@@ -55,7 +55,8 @@ pub enum Command {
 
 /// `EX_TEMPFAIL`: the run has not ended yet.
 const PENDING: u8 = 75;
-/// A dropped stream is resumed after this delay, at most `RETRIES` times in a row.
+/// A dropped stream is resumed after this delay, at most `RETRIES` times in a row
+/// without new bytes (ADRs 0117, 0130).
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 const RETRIES: u32 = 30;
 
@@ -259,14 +260,8 @@ async fn follow(
             }
             Err(status) => Some(status),
         };
-        if let Some(status) = dropped {
-            if !matches!(
-                status.code(),
-                Code::Unavailable | Code::Unknown | Code::Cancelled | Code::DeadlineExceeded
-            ) || !live
-            {
-                return Err(status.into());
-            }
+        if let Some(status) = dropped.filter(|status| !live || !resumable(status)) {
+            return Err(status.into());
         }
         retries += 1;
         if retries > RETRIES {
@@ -276,6 +271,27 @@ async fn follow(
         }
         tokio::time::sleep(RETRY_DELAY).await;
     }
+}
+
+/// A broken transport or an intermediary's answer, rather than the forge's own: the
+/// forge refuses with one of the excluded codes (ADR 0130). An error raised by the
+/// client's transport (an h2 reset, a closed connection) always resumes, whatever the
+/// code it maps to.
+fn resumable(status: &tonic::Status) -> bool {
+    std::error::Error::source(status).is_some()
+        || !matches!(
+            status.code(),
+            Code::Ok
+                | Code::InvalidArgument
+                | Code::NotFound
+                | Code::AlreadyExists
+                | Code::PermissionDenied
+                | Code::ResourceExhausted
+                | Code::FailedPrecondition
+                | Code::OutOfRange
+                | Code::Unimplemented
+                | Code::Unauthenticated
+        )
 }
 
 #[cfg(test)]

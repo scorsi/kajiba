@@ -4,6 +4,7 @@ use crate::client::{
     tests::{Fake, TOKEN, refusal},
 };
 use kajiba_proto::v1::{Attempt, FailureSummary, Job};
+use tonic::Status;
 
 const ID: &str = "01JBRUN0000000000000000000";
 const SHA: &str = "1111111111111111111111111111111111111111";
@@ -255,13 +256,61 @@ async fn watching_a_terminal_run_prints_its_outcome_once() {
 #[tokio::test]
 async fn an_interrupted_stream_resumes_from_the_received_offset() {
     let (fake, url) = fake(run_in(RunState::Succeeded)).await;
-    fake.0.lock().unwrap().drop_at = Some(10);
+    fake.0.lock().unwrap().drops = vec![(10, Some(Status::unavailable("dropped")))];
     let (code, out, err) = output(&url, Command::Watch { run: ID.into() }, false).await;
     assert_eq!(code, ExitCode::SUCCESS);
     // Neither lost nor duplicated, and the attempt marked once.
     assert_eq!(out.as_bytes(), LOG);
     assert_eq!(err, MARK);
     assert_eq!(fake.0.lock().unwrap().watches, [(0, true), (10, true)]);
+}
+
+#[tokio::test]
+async fn every_transport_break_resumes_and_forge_refusals_end() {
+    let (fake, url) = fake(run_in(RunState::Succeeded)).await;
+    // A broken connection, then what proxies and h2 resets surface as.
+    fake.0.lock().unwrap().drops = vec![
+        (4, None),
+        (
+            8,
+            Some(Status::internal(
+                "h2 protocol error: error reading a body from connection",
+            )),
+        ),
+        (12, Some(Status::cancelled("upstream reset"))),
+        (16, Some(Status::unknown("stream error"))),
+        (20, Some(Status::deadline_exceeded("timeout"))),
+    ];
+    for command in [trigger(false), Command::Watch { run: ID.into() }] {
+        let (code, out, _) = output(&url, command, false).await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(out.as_bytes(), LOG, "nothing lost nor duplicated");
+    }
+    let watches = std::mem::take(&mut fake.0.lock().unwrap().watches);
+    assert_eq!(
+        watches,
+        [0, 4, 8, 12, 16, 20, 0].map(|offset| (offset, true)),
+        "the run resumed at each break, the watch went through"
+    );
+    for (code, reason) in [
+        (Code::NotFound, "RUN_NOT_FOUND"),
+        (Code::PermissionDenied, "ROLE_MISSING"),
+        (Code::Unauthenticated, "CREDENTIAL_EXPIRED"),
+        (Code::InvalidArgument, "INVALID_FIELD"),
+        (Code::ResourceExhausted, "WATCH_STREAMS_LIMIT"),
+    ] {
+        fake.0.lock().unwrap().drops = vec![(4, Some(refusal(code, reason, "refused")))];
+        let (exit, out, err) = output(&url, trigger(false), false).await;
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert_eq!(out, "buil");
+        assert!(
+            err.ends_with(&format!(
+                "({reason}, request 01JBREQUEST0000000000000000)\n"
+            )),
+            "{err}"
+        );
+    }
+    assert_eq!(fake.0.lock().unwrap().watches.len(), 5, "never resumed");
 }
 
 #[tokio::test]
