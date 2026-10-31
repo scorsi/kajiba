@@ -858,6 +858,7 @@ async fn read(events: &mut Events, from: u64, bytes: usize) -> (Vec<(String, u64
                 data.push_str(std::str::from_utf8(&log.data).unwrap());
             }
             watch_run_response::Event::Finished(_) => panic!("finished early"),
+            watch_run_response::Event::Keepalive(_) => {}
         }
     }
     (sections, data)
@@ -968,6 +969,57 @@ async fn a_one_shot_read_of_a_running_run_ends_after_the_stored_bytes() {
         (vec![(attempt, 0)], "tial".into())
     );
     assert!(next(&mut events).await.is_none());
+}
+
+#[tokio::test]
+async fn a_quiet_follower_gets_keepalives_between_bytes() {
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, ALICE, "alice/ci", &tip)
+        .await
+        .unwrap()
+        .public_id;
+    let progress = Progress::new(&fixture, &runs, &run).await;
+    let attempt = progress.attempt(1).await;
+    progress.log(&attempt, "start\n").await;
+    let (watcher, mut events) = tokio::sync::mpsc::channel(4);
+    let quiet = Duration::from_millis(100);
+    let task = {
+        let (runs, run) = (runs.clone(), run.clone());
+        let signal = runs.0.ci_progress.subscribe();
+        tokio::spawn(async move { runs.watch(&run, 0, true, signal, &watcher, quiet).await })
+    };
+    let mut next = async || {
+        let started = tokio::time::Instant::now();
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .event
+            .unwrap();
+        (event, started.elapsed())
+    };
+    assert!(matches!(
+        next().await.0,
+        watch_run_response::Event::Section(_)
+    ));
+    assert!(matches!(next().await.0, watch_run_response::Event::Log(_)));
+    for _ in 0..2 {
+        let (event, waited) = next().await;
+        assert!(matches!(event, watch_run_response::Event::Keepalive(_)));
+        assert!(
+            waited >= quiet / 2,
+            "not before the run was quiet: {waited:?}"
+        );
+    }
+    progress.log(&attempt, "more\n").await;
+    let watch_run_response::Event::Log(log) = next().await.0 else {
+        panic!("bytes after keepalives");
+    };
+    assert_eq!((log.offset, log.data.as_slice()), (6, &b"more\n"[..]));
+    drop(events);
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]

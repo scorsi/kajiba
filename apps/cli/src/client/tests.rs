@@ -8,7 +8,7 @@ use kajiba_proto::v1::{
     GetWorktreeBaseRequest, GetWorktreeBaseResponse, ListCommitsRequest, ListCommitsResponse,
     ListReposRequest, ListReposResponse, ListRunsRequest, ListRunsResponse, LogBytes, LogSection,
     LogoutRequest, LogoutResponse, Repo, Run, TriggerRunRequest, TriggerRunResponse,
-    WatchRunRequest, WatchRunResponse, WorktreeRunSpec,
+    WatchKeepalive, WatchRunRequest, WatchRunResponse, WorktreeRunSpec,
     auth_service_server::{AuthService, AuthServiceServer},
     create_worktree_run_request::Part,
     get_repo_request,
@@ -330,7 +330,8 @@ impl RunService for Fake {
         >,
     >;
 
-    /// The section, the log from the offset in 4-byte pieces, then the finished run.
+    /// The section, a keepalive (which the CLI ignores, ADR 0129), the log from the
+    /// offset in 4-byte pieces, then the finished run.
     async fn watch_run(
         &self,
         request: tonic::Request<WatchRunRequest>,
@@ -345,6 +346,7 @@ impl RunService for Fake {
             attempt: Some(state.attempt.clone()),
             offset: 0,
         }))];
+        events.push(event(Event::Keepalive(WatchKeepalive {})));
         let end = state.drop_at.take().unwrap_or(state.log.len() as u64);
         let mut offset = request.offset;
         while offset < end {

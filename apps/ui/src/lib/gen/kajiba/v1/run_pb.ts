@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file kajiba/v1/run.proto.
  */
 export const file_kajiba_v1_run: GenFile = /*@__PURE__*/
-  fileDesc("ChNrYWppYmEvdjEvcnVuLnByb3RvEglrYWppYmEudjEiLgoRVHJpZ2dlclJ1blJlcXVlc3QSDAoEcmVwbxgBIAEoCRILCgNzaGEYAiABKAkiMQoSVHJpZ2dlclJ1blJlc3BvbnNlEhsKA3J1bhgBIAEoCzIOLmthamliYS52MS5SdW4iHAoNR2V0UnVuUmVxdWVzdBILCgNydW4YASABKAkiLQoOR2V0UnVuUmVzcG9uc2USGwoDcnVuGAEgASgLMg4ua2FqaWJhLnYxLlJ1biJGCg9MaXN0UnVuc1JlcXVlc3QSDAoEcmVwbxgBIAEoCRIRCglwYWdlX3NpemUYAiABKAUSEgoKcGFnZV90b2tlbhgDIAEoCSJJChBMaXN0UnVuc1Jlc3BvbnNlEhwKBHJ1bnMYASADKAsyDi5rYWppYmEudjEuUnVuEhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSKWAwoDUnVuEhEKCXB1YmxpY19pZBgBIAEoCRIWCg5yZXBvX3B1YmxpY19pZBgCIAEoCRILCgNzaGEYAyABKAkSCwoDcmVmGAQgASgJEiYKB3RyaWdnZXIYBSABKA4yFS5rYWppYmEudjEuUnVuVHJpZ2dlchIUCgx0cmlnZ2VyZWRfYnkYBiABKAkSIgoFc3RhdGUYByABKA4yEy5rYWppYmEudjEuUnVuU3RhdGUSLgoKY3JlYXRlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKc3RhcnRlZF9hdBgJIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLwoLZmluaXNoZWRfYXQYCiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhsKA2pvYhgLIAEoCzIOLmthamliYS52MS5Kb2ISKgoHZmFpbHVyZRgMIAEoCzIZLmthamliYS52MS5GYWlsdXJlU3VtbWFyeRIOCgZjaGVja3MYDSADKAkijwEKA0pvYhIRCglwdWJsaWNfaWQYASABKAkSDAoEbmFtZRgCIAEoCRIiCgVzdGF0ZRgDIAEoDjITLmthamliYS52MS5Kb2JTdGF0ZRIWCg5wZW5kaW5nX3JlYXNvbhgEIAEoCRIrCg9jdXJyZW50X2F0dGVtcHQYBSABKAsyEi5rYWppYmEudjEuQXR0ZW1wdCKEAgoHQXR0ZW1wdBIRCglwdWJsaWNfaWQYASABKAkSDgoGbnVtYmVyGAIgASgNEiYKBXN0YXRlGAMgASgOMhcua2FqaWJhLnYxLkF0dGVtcHRTdGF0ZRIOCgZydW5uZXIYBCABKAkSFwoPcnVubmVyX2hvc3RuYW1lGAUgASgJEhYKCWV4aXRfY29kZRgGIAEoBUgAiAEBEi4KCnN0YXJ0ZWRfYXQYByABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi8KC2ZpbmlzaGVkX2F0GAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEIMCgpfZXhpdF9jb2RlIkcKDkZhaWx1cmVTdW1tYXJ5Eg0KBWNoZWNrGAEgASgJEg4KBnJlYXNvbhgCIAEoCRIWCg5sYXN0X2xvZ19saW5lcxgDIAMoCSI+Cg9XYXRjaFJ1blJlcXVlc3QSCwoDcnVuGAEgASgJEg4KBm9mZnNldBgCIAEoBBIOCgZmb2xsb3cYAyABKAgijQEKEFdhdGNoUnVuUmVzcG9uc2USKAoHc2VjdGlvbhgBIAEoCzIVLmthamliYS52MS5Mb2dTZWN0aW9uSAASIgoDbG9nGAIgASgLMhMua2FqaWJhLnYxLkxvZ0J5dGVzSAASIgoIZmluaXNoZWQYAyABKAsyDi5rYWppYmEudjEuUnVuSABCBwoFZXZlbnQiQQoKTG9nU2VjdGlvbhIjCgdhdHRlbXB0GAEgASgLMhIua2FqaWJhLnYxLkF0dGVtcHQSDgoGb2Zmc2V0GAIgASgEIigKCExvZ0J5dGVzEg4KBm9mZnNldBgBIAEoBBIMCgRkYXRhGAIgASgMIlEKD1dvcmt0cmVlUnVuU3BlYxIMCgRyZXBvGAEgASgJEg4KBnN5c3RlbRgCIAEoCRIOCgZjaGVja3MYAyADKAkSEAoIZmVhdHVyZXMYBCADKAkiQgoWR2V0V29ya3RyZWVCYXNlUmVxdWVzdBIoCgRzcGVjGAEgASgLMhoua2FqaWJhLnYxLldvcmt0cmVlUnVuU3BlYyImChdHZXRXb3JrdHJlZUJhc2VSZXNwb25zZRILCgNpZHMYASADKAkiXwoYQ3JlYXRlV29ya3RyZWVSdW5SZXF1ZXN0EioKBHNwZWMYASABKAsyGi5rYWppYmEudjEuV29ya3RyZWVSdW5TcGVjSAASDwoFY2h1bmsYAiABKAxIAEIGCgRwYXJ0IjgKGUNyZWF0ZVdvcmt0cmVlUnVuUmVzcG9uc2USGwoDcnVuGAEgASgLMg4ua2FqaWJhLnYxLlJ1bipxCgpSdW5UcmlnZ2VyEhsKF1JVTl9UUklHR0VSX1VOU1BFQ0lGSUVEEAASFAoQUlVOX1RSSUdHRVJfUFVTSBABEhYKElJVTl9UUklHR0VSX01BTlVBTBACEhgKFFJVTl9UUklHR0VSX1dPUktUUkVFEAMqmgEKCFJ1blN0YXRlEhkKFVJVTl9TVEFURV9VTlNQRUNJRklFRBAAEhQKEFJVTl9TVEFURV9RVUVVRUQQARIVChFSVU5fU1RBVEVfUlVOTklORxACEhcKE1JVTl9TVEFURV9TVUNDRUVERUQQAxIUChBSVU5fU1RBVEVfRkFJTEVEEAQSFwoTUlVOX1NUQVRFX0NBTkNFTExFRBAFKscBCghKb2JTdGF0ZRIZChVKT0JfU1RBVEVfVU5TUEVDSUZJRUQQABIVChFKT0JfU1RBVEVfUEVORElORxABEhYKEkpPQl9TVEFURV9BU1NJR05FRBACEhUKEUpPQl9TVEFURV9SVU5OSU5HEAMSFwoTSk9CX1NUQVRFX1NVQ0NFRURFRBAEEhQKEEpPQl9TVEFURV9GQUlMRUQQBRIXChNKT0JfU1RBVEVfQ0FOQ0VMTEVEEAYSEgoOSk9CX1NUQVRFX0xPU1QQByq0AQoMQXR0ZW1wdFN0YXRlEh0KGUFUVEVNUFRfU1RBVEVfVU5TUEVDSUZJRUQQABIZChVBVFRFTVBUX1NUQVRFX1JVTk5JTkcQARIbChdBVFRFTVBUX1NUQVRFX1NVQ0NFRURFRBACEhgKFEFUVEVNUFRfU1RBVEVfRkFJTEVEEAMSGwoXQVRURU1QVF9TVEFURV9DQU5DRUxMRUQQBBIWChJBVFRFTVBUX1NUQVRFX0xPU1QQBTKCBAoKUnVuU2VydmljZRJPCgpUcmlnZ2VyUnVuEhwua2FqaWJhLnYxLlRyaWdnZXJSdW5SZXF1ZXN0Gh0ua2FqaWJhLnYxLlRyaWdnZXJSdW5SZXNwb25zZSIEgLUYAxJDCgZHZXRSdW4SGC5rYWppYmEudjEuR2V0UnVuUmVxdWVzdBoZLmthamliYS52MS5HZXRSdW5SZXNwb25zZSIEgLUYARJJCghMaXN0UnVucxIaLmthamliYS52MS5MaXN0UnVuc1JlcXVlc3QaGy5rYWppYmEudjEuTGlzdFJ1bnNSZXNwb25zZSIEgLUYARJLCghXYXRjaFJ1bhIaLmthamliYS52MS5XYXRjaFJ1blJlcXVlc3QaGy5rYWppYmEudjEuV2F0Y2hSdW5SZXNwb25zZSIEgLUYATABEl4KD0dldFdvcmt0cmVlQmFzZRIhLmthamliYS52MS5HZXRXb3JrdHJlZUJhc2VSZXF1ZXN0GiIua2FqaWJhLnYxLkdldFdvcmt0cmVlQmFzZVJlc3BvbnNlIgSAtRgDEmYKEUNyZWF0ZVdvcmt0cmVlUnVuEiMua2FqaWJhLnYxLkNyZWF0ZVdvcmt0cmVlUnVuUmVxdWVzdBokLmthamliYS52MS5DcmVhdGVXb3JrdHJlZVJ1blJlc3BvbnNlIgSAtRgDKAFiBnByb3RvMw", [file_google_protobuf_timestamp, file_kajiba_v1_options]);
+  fileDesc("ChNrYWppYmEvdjEvcnVuLnByb3RvEglrYWppYmEudjEiLgoRVHJpZ2dlclJ1blJlcXVlc3QSDAoEcmVwbxgBIAEoCRILCgNzaGEYAiABKAkiMQoSVHJpZ2dlclJ1blJlc3BvbnNlEhsKA3J1bhgBIAEoCzIOLmthamliYS52MS5SdW4iHAoNR2V0UnVuUmVxdWVzdBILCgNydW4YASABKAkiLQoOR2V0UnVuUmVzcG9uc2USGwoDcnVuGAEgASgLMg4ua2FqaWJhLnYxLlJ1biJGCg9MaXN0UnVuc1JlcXVlc3QSDAoEcmVwbxgBIAEoCRIRCglwYWdlX3NpemUYAiABKAUSEgoKcGFnZV90b2tlbhgDIAEoCSJJChBMaXN0UnVuc1Jlc3BvbnNlEhwKBHJ1bnMYASADKAsyDi5rYWppYmEudjEuUnVuEhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSKWAwoDUnVuEhEKCXB1YmxpY19pZBgBIAEoCRIWCg5yZXBvX3B1YmxpY19pZBgCIAEoCRILCgNzaGEYAyABKAkSCwoDcmVmGAQgASgJEiYKB3RyaWdnZXIYBSABKA4yFS5rYWppYmEudjEuUnVuVHJpZ2dlchIUCgx0cmlnZ2VyZWRfYnkYBiABKAkSIgoFc3RhdGUYByABKA4yEy5rYWppYmEudjEuUnVuU3RhdGUSLgoKY3JlYXRlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKc3RhcnRlZF9hdBgJIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLwoLZmluaXNoZWRfYXQYCiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhsKA2pvYhgLIAEoCzIOLmthamliYS52MS5Kb2ISKgoHZmFpbHVyZRgMIAEoCzIZLmthamliYS52MS5GYWlsdXJlU3VtbWFyeRIOCgZjaGVja3MYDSADKAkijwEKA0pvYhIRCglwdWJsaWNfaWQYASABKAkSDAoEbmFtZRgCIAEoCRIiCgVzdGF0ZRgDIAEoDjITLmthamliYS52MS5Kb2JTdGF0ZRIWCg5wZW5kaW5nX3JlYXNvbhgEIAEoCRIrCg9jdXJyZW50X2F0dGVtcHQYBSABKAsyEi5rYWppYmEudjEuQXR0ZW1wdCKEAgoHQXR0ZW1wdBIRCglwdWJsaWNfaWQYASABKAkSDgoGbnVtYmVyGAIgASgNEiYKBXN0YXRlGAMgASgOMhcua2FqaWJhLnYxLkF0dGVtcHRTdGF0ZRIOCgZydW5uZXIYBCABKAkSFwoPcnVubmVyX2hvc3RuYW1lGAUgASgJEhYKCWV4aXRfY29kZRgGIAEoBUgAiAEBEi4KCnN0YXJ0ZWRfYXQYByABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi8KC2ZpbmlzaGVkX2F0GAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEIMCgpfZXhpdF9jb2RlIkcKDkZhaWx1cmVTdW1tYXJ5Eg0KBWNoZWNrGAEgASgJEg4KBnJlYXNvbhgCIAEoCRIWCg5sYXN0X2xvZ19saW5lcxgDIAMoCSI+Cg9XYXRjaFJ1blJlcXVlc3QSCwoDcnVuGAEgASgJEg4KBm9mZnNldBgCIAEoBBIOCgZmb2xsb3cYAyABKAgivQEKEFdhdGNoUnVuUmVzcG9uc2USKAoHc2VjdGlvbhgBIAEoCzIVLmthamliYS52MS5Mb2dTZWN0aW9uSAASIgoDbG9nGAIgASgLMhMua2FqaWJhLnYxLkxvZ0J5dGVzSAASIgoIZmluaXNoZWQYAyABKAsyDi5rYWppYmEudjEuUnVuSAASLgoJa2VlcGFsaXZlGAQgASgLMhkua2FqaWJhLnYxLldhdGNoS2VlcGFsaXZlSABCBwoFZXZlbnQiEAoOV2F0Y2hLZWVwYWxpdmUiQQoKTG9nU2VjdGlvbhIjCgdhdHRlbXB0GAEgASgLMhIua2FqaWJhLnYxLkF0dGVtcHQSDgoGb2Zmc2V0GAIgASgEIigKCExvZ0J5dGVzEg4KBm9mZnNldBgBIAEoBBIMCgRkYXRhGAIgASgMIlEKD1dvcmt0cmVlUnVuU3BlYxIMCgRyZXBvGAEgASgJEg4KBnN5c3RlbRgCIAEoCRIOCgZjaGVja3MYAyADKAkSEAoIZmVhdHVyZXMYBCADKAkiQgoWR2V0V29ya3RyZWVCYXNlUmVxdWVzdBIoCgRzcGVjGAEgASgLMhoua2FqaWJhLnYxLldvcmt0cmVlUnVuU3BlYyImChdHZXRXb3JrdHJlZUJhc2VSZXNwb25zZRILCgNpZHMYASADKAkiXwoYQ3JlYXRlV29ya3RyZWVSdW5SZXF1ZXN0EioKBHNwZWMYASABKAsyGi5rYWppYmEudjEuV29ya3RyZWVSdW5TcGVjSAASDwoFY2h1bmsYAiABKAxIAEIGCgRwYXJ0IjgKGUNyZWF0ZVdvcmt0cmVlUnVuUmVzcG9uc2USGwoDcnVuGAEgASgLMg4ua2FqaWJhLnYxLlJ1bipxCgpSdW5UcmlnZ2VyEhsKF1JVTl9UUklHR0VSX1VOU1BFQ0lGSUVEEAASFAoQUlVOX1RSSUdHRVJfUFVTSBABEhYKElJVTl9UUklHR0VSX01BTlVBTBACEhgKFFJVTl9UUklHR0VSX1dPUktUUkVFEAMqmgEKCFJ1blN0YXRlEhkKFVJVTl9TVEFURV9VTlNQRUNJRklFRBAAEhQKEFJVTl9TVEFURV9RVUVVRUQQARIVChFSVU5fU1RBVEVfUlVOTklORxACEhcKE1JVTl9TVEFURV9TVUNDRUVERUQQAxIUChBSVU5fU1RBVEVfRkFJTEVEEAQSFwoTUlVOX1NUQVRFX0NBTkNFTExFRBAFKscBCghKb2JTdGF0ZRIZChVKT0JfU1RBVEVfVU5TUEVDSUZJRUQQABIVChFKT0JfU1RBVEVfUEVORElORxABEhYKEkpPQl9TVEFURV9BU1NJR05FRBACEhUKEUpPQl9TVEFURV9SVU5OSU5HEAMSFwoTSk9CX1NUQVRFX1NVQ0NFRURFRBAEEhQKEEpPQl9TVEFURV9GQUlMRUQQBRIXChNKT0JfU1RBVEVfQ0FOQ0VMTEVEEAYSEgoOSk9CX1NUQVRFX0xPU1QQByq0AQoMQXR0ZW1wdFN0YXRlEh0KGUFUVEVNUFRfU1RBVEVfVU5TUEVDSUZJRUQQABIZChVBVFRFTVBUX1NUQVRFX1JVTk5JTkcQARIbChdBVFRFTVBUX1NUQVRFX1NVQ0NFRURFRBACEhgKFEFUVEVNUFRfU1RBVEVfRkFJTEVEEAMSGwoXQVRURU1QVF9TVEFURV9DQU5DRUxMRUQQBBIWChJBVFRFTVBUX1NUQVRFX0xPU1QQBTKCBAoKUnVuU2VydmljZRJPCgpUcmlnZ2VyUnVuEhwua2FqaWJhLnYxLlRyaWdnZXJSdW5SZXF1ZXN0Gh0ua2FqaWJhLnYxLlRyaWdnZXJSdW5SZXNwb25zZSIEgLUYAxJDCgZHZXRSdW4SGC5rYWppYmEudjEuR2V0UnVuUmVxdWVzdBoZLmthamliYS52MS5HZXRSdW5SZXNwb25zZSIEgLUYARJJCghMaXN0UnVucxIaLmthamliYS52MS5MaXN0UnVuc1JlcXVlc3QaGy5rYWppYmEudjEuTGlzdFJ1bnNSZXNwb25zZSIEgLUYARJLCghXYXRjaFJ1bhIaLmthamliYS52MS5XYXRjaFJ1blJlcXVlc3QaGy5rYWppYmEudjEuV2F0Y2hSdW5SZXNwb25zZSIEgLUYATABEl4KD0dldFdvcmt0cmVlQmFzZRIhLmthamliYS52MS5HZXRXb3JrdHJlZUJhc2VSZXF1ZXN0GiIua2FqaWJhLnYxLkdldFdvcmt0cmVlQmFzZVJlc3BvbnNlIgSAtRgDEmYKEUNyZWF0ZVdvcmt0cmVlUnVuEiMua2FqaWJhLnYxLkNyZWF0ZVdvcmt0cmVlUnVuUmVxdWVzdBokLmthamliYS52MS5DcmVhdGVXb3JrdHJlZVJ1blJlc3BvbnNlIgSAtRgDKAFiBnByb3RvMw", [file_google_protobuf_timestamp, file_kajiba_v1_options]);
 
 /**
  * @generated from message kajiba.v1.TriggerRunRequest
@@ -417,6 +417,15 @@ export type WatchRunResponse = Message<"kajiba.v1.WatchRunResponse"> & {
      */
     value: Run;
     case: "finished";
+  } | {
+    /**
+     * Sent after 20 s without another message on a following stream, so that proxies
+     * timing out idle streams keep it open; carries nothing and is to be ignored (ADR 0129).
+     *
+     * @generated from field: kajiba.v1.WatchKeepalive keepalive = 4;
+     */
+    value: WatchKeepalive;
+    case: "keepalive";
   } | { case: undefined; value?: undefined };
 };
 
@@ -426,6 +435,19 @@ export type WatchRunResponse = Message<"kajiba.v1.WatchRunResponse"> & {
  */
 export const WatchRunResponseSchema: GenMessage<WatchRunResponse> = /*@__PURE__*/
   messageDesc(file_kajiba_v1_run, 11);
+
+/**
+ * @generated from message kajiba.v1.WatchKeepalive
+ */
+export type WatchKeepalive = Message<"kajiba.v1.WatchKeepalive"> & {
+};
+
+/**
+ * Describes the message kajiba.v1.WatchKeepalive.
+ * Use `create(WatchKeepaliveSchema)` to create a new message.
+ */
+export const WatchKeepaliveSchema: GenMessage<WatchKeepalive> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_run, 12);
 
 /**
  * The start of an attempt's bytes in the run's log.
@@ -451,7 +473,7 @@ export type LogSection = Message<"kajiba.v1.LogSection"> & {
  * Use `create(LogSectionSchema)` to create a new message.
  */
 export const LogSectionSchema: GenMessage<LogSection> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_run, 12);
+  messageDesc(file_kajiba_v1_run, 13);
 
 /**
  * @generated from message kajiba.v1.LogBytes
@@ -475,7 +497,7 @@ export type LogBytes = Message<"kajiba.v1.LogBytes"> & {
  * Use `create(LogBytesSchema)` to create a new message.
  */
 export const LogBytesSchema: GenMessage<LogBytes> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_run, 13);
+  messageDesc(file_kajiba_v1_run, 14);
 
 /**
  * A worktree run to create (0097, ADR 0118).
@@ -515,7 +537,7 @@ export type WorktreeRunSpec = Message<"kajiba.v1.WorktreeRunSpec"> & {
  * Use `create(WorktreeRunSpecSchema)` to create a new message.
  */
 export const WorktreeRunSpecSchema: GenMessage<WorktreeRunSpec> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_run, 14);
+  messageDesc(file_kajiba_v1_run, 15);
 
 /**
  * @generated from message kajiba.v1.GetWorktreeBaseRequest
@@ -532,7 +554,7 @@ export type GetWorktreeBaseRequest = Message<"kajiba.v1.GetWorktreeBaseRequest">
  * Use `create(GetWorktreeBaseRequestSchema)` to create a new message.
  */
 export const GetWorktreeBaseRequestSchema: GenMessage<GetWorktreeBaseRequest> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_run, 15);
+  messageDesc(file_kajiba_v1_run, 16);
 
 /**
  * @generated from message kajiba.v1.GetWorktreeBaseResponse
@@ -551,7 +573,7 @@ export type GetWorktreeBaseResponse = Message<"kajiba.v1.GetWorktreeBaseResponse
  * Use `create(GetWorktreeBaseResponseSchema)` to create a new message.
  */
 export const GetWorktreeBaseResponseSchema: GenMessage<GetWorktreeBaseResponse> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_run, 16);
+  messageDesc(file_kajiba_v1_run, 17);
 
 /**
  * @generated from message kajiba.v1.CreateWorktreeRunRequest
@@ -585,7 +607,7 @@ export type CreateWorktreeRunRequest = Message<"kajiba.v1.CreateWorktreeRunReque
  * Use `create(CreateWorktreeRunRequestSchema)` to create a new message.
  */
 export const CreateWorktreeRunRequestSchema: GenMessage<CreateWorktreeRunRequest> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_run, 17);
+  messageDesc(file_kajiba_v1_run, 18);
 
 /**
  * @generated from message kajiba.v1.CreateWorktreeRunResponse
@@ -602,7 +624,7 @@ export type CreateWorktreeRunResponse = Message<"kajiba.v1.CreateWorktreeRunResp
  * Use `create(CreateWorktreeRunResponseSchema)` to create a new message.
  */
 export const CreateWorktreeRunResponseSchema: GenMessage<CreateWorktreeRunResponse> = /*@__PURE__*/
-  messageDesc(file_kajiba_v1_run, 18);
+  messageDesc(file_kajiba_v1_run, 19);
 
 /**
  * @generated from enum kajiba.v1.RunTrigger
@@ -814,6 +836,7 @@ export const RunService: GenService<{
    * attempt's bytes are preceded by its section marker; a replayed attempt opens a new
    * section. Not bound by the request timeout. At most 16 open per caller and 256 in all
    * (RESOURCE_EXHAUSTED / WATCH_STREAMS_LIMIT); a stream not read for 60 s is cut (ADR 0120).
+   * A following stream quiet for 20 s carries a keepalive (ADR 0129).
    *
    * @generated from rpc kajiba.v1.RunService.WatchRun
    */

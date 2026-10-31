@@ -28,6 +28,7 @@ service RunService {
   // attempt's bytes are preceded by its section marker; a replayed attempt opens a new
   // section. Not bound by the request timeout. At most 16 open per caller and 256 in all
   // (RESOURCE_EXHAUSTED / WATCH_STREAMS_LIMIT); a stream not read for 60 s is cut (ADR 0120).
+  // A following stream quiet for 20 s carries a keepalive (ADR 0129).
   rpc WatchRun(WatchRunRequest) returns (stream WatchRunResponse) {
     option (kajiba.v1.scope) = SCOPE_REPO_READ;
   }
@@ -184,8 +185,13 @@ message WatchRunResponse {
     LogBytes log = 2;
     // The run, sent once terminal (with its failure summary); the stream then ends.
     Run finished = 3;
+    // Sent after 20 s without another message on a following stream, so that proxies
+    // timing out idle streams keep it open; carries nothing and is to be ignored (ADR 0129).
+    WatchKeepalive keepalive = 4;
   }
 }
+
+message WatchKeepalive {}
 
 // The start of an attempt's bytes in the run's log.
 message LogSection {

@@ -15,9 +15,9 @@ use kajiba_proto::{
         Attempt, AttemptState, CreateWorktreeRunRequest, CreateWorktreeRunResponse, FailureSummary,
         GetRunRequest, GetRunResponse, GetWorktreeBaseRequest, GetWorktreeBaseResponse, Job,
         JobState, ListRunsRequest, ListRunsResponse, LogBytes, LogSection, Run, RunState,
-        RunTrigger, TriggerRunRequest, TriggerRunResponse, WatchRunRequest, WatchRunResponse,
-        WorktreeRunSpec, create_worktree_run_request::Part, run_service_server::RunService,
-        watch_run_response,
+        RunTrigger, TriggerRunRequest, TriggerRunResponse, WatchKeepalive, WatchRunRequest,
+        WatchRunResponse, WorktreeRunSpec, create_worktree_run_request::Part,
+        run_service_server::RunService, watch_run_response,
     },
 };
 use sqlx::SqliteConnection;
@@ -522,6 +522,9 @@ const WATCHERS_PER_PRINCIPAL: usize = 16;
 pub const MAX_WATCHERS: usize = 256;
 /// ADR 0120: a watcher whose delivery is stalled this long is cut.
 const WATCH_STALL: Duration = Duration::from_secs(60);
+/// ADR 0129: a following stream quiet this long gets a keepalive, well under the 60 s
+/// idle timeout of a reverse proxy.
+const WATCH_KEEPALIVE: Duration = Duration::from_secs(20);
 
 /// Hand `item` to the watcher's stream; false once it is gone or stalled.
 async fn deliver(watcher: &Watcher, item: Result<WatchRunResponse, Status>) -> bool {
@@ -541,10 +544,13 @@ impl Runs {
         follow: bool,
         mut progress: watch::Receiver<()>,
         watcher: &Watcher,
+        keepalive: Duration,
     ) -> Result<(), Status> {
         let send =
             async |event| deliver(watcher, Ok(WatchRunResponse { event: Some(event) })).await;
         let mut marked: Option<String> = None;
+        // When the watcher last got a message.
+        let mut sent = tokio::time::Instant::now();
         loop {
             // Marked seen before the snapshot: a commit after it wakes the next wait.
             progress.borrow_and_update();
@@ -590,6 +596,7 @@ impl Runs {
                     if !send(watch_run_response::Event::Section(section)).await {
                         return Ok(());
                     }
+                    sent = tokio::time::Instant::now();
                 }
                 if !available {
                     position = position.max(stop);
@@ -605,6 +612,7 @@ impl Runs {
                     if !send(watch_run_response::Event::Log(log)).await {
                         return Ok(());
                     }
+                    sent = tokio::time::Instant::now();
                 }
                 start = stop;
             }
@@ -618,6 +626,12 @@ impl Runs {
             tokio::select! {
                 _ = progress.changed() => {}
                 () = tokio::time::sleep(WATCH_PERIOD) => {}
+                () = tokio::time::sleep_until(sent + keepalive) => {
+                    if !send(watch_run_response::Event::Keepalive(WatchKeepalive {})).await {
+                        return Ok(());
+                    }
+                    sent = tokio::time::Instant::now();
+                }
                 () = watcher.closed() => return Ok(()),
             }
         }
@@ -670,7 +684,14 @@ impl RunService for Runs {
         let runs = self.clone();
         tokio::spawn(async move {
             if let Err(status) = runs
-                .watch(&run, request.offset, request.follow, progress, &watcher)
+                .watch(
+                    &run,
+                    request.offset,
+                    request.follow,
+                    progress,
+                    &watcher,
+                    WATCH_KEEPALIVE,
+                )
                 .await
             {
                 deliver(&watcher, Err(status)).await;
