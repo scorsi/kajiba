@@ -138,7 +138,7 @@ impl gate::gate_service_server::GateService for Server {
         if !self.acknowledge.load(Ordering::SeqCst) {
             return Err(Status::unavailable("server restarting"));
         }
-        Ok(Response::new(gate::SessionExitedResponse {}))
+        Ok(Response::new(gate::SessionExitedResponse::default()))
     }
 }
 

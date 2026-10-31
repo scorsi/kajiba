@@ -266,10 +266,13 @@ pkgs.testers.runNixOSTest {
 
 
     def push(sha):
-        forge.succeed(f"env GIT_SSH_COMMAND={shlex.quote(ssh_command)} git -C /root/work push -q kajiba-git@127.0.0.1:alice/demo.git {sha}:refs/heads/main")
+        out = forge.succeed(f"env GIT_SSH_COMMAND={shlex.quote(ssh_command)} git -C /root/work push -q kajiba-git@127.0.0.1:alice/demo.git {sha}:refs/heads/main 2>&1")
         query = f"SELECT public_id FROM run WHERE sha = '{sha}' AND trigger = 'push'"
         forge.wait_until_succeeds(f"test -n \"$(sqlite3 {db} {shlex.quote(query)})\"")
-        return sql(query)
+        run_id = sql(query)
+        # ADR 0132: the pusher sees the run the push created.
+        assert f"kajiba: CI run {run_id} on refs/heads/main" in out, out
+        return run_id
 
 
     def finished(run_id):

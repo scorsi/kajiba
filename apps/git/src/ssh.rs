@@ -100,6 +100,11 @@ pub async fn run(path: &Path, user: &str, original: &str) -> ExitCode {
         if !message.is_empty() {
             return Err(message);
         }
+        // The push's CI runs (ADR 0132), on the session's stderr; a daemon from before
+        // them sends nothing.
+        if let Ok(notice) = handoff::read_text(&mut stream, u16::MAX.into()).await {
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), notice.as_bytes());
+        }
         Ok(status)
     }
     .await;
@@ -146,18 +151,36 @@ pub async fn serve(
                     .map_err(|e| e.message().to_owned())
             }
             .await;
-            let (status, message) = match result {
-                Ok(status) => (status, String::new()),
-                Err(message) => (1, message),
+            let (status, message, runs) = match result {
+                Ok((status, runs)) => (status, String::new(), runs),
+                Err(message) => (1, message, Vec::new()),
             };
             let _ = tokio::time::timeout(Duration::from_secs(5), async {
                 stream.write_u8(status).await?;
-                handoff::write_text(&mut stream, &message).await
+                handoff::write_text(&mut stream, &message).await?;
+                handoff::write_text(&mut stream, &notice(&runs)).await
             })
             .await;
         });
     }
     Ok(())
+}
+
+/// One line per CI run a push created (ADR 0132), within a hand-off message's bound.
+fn notice(runs: &[gate::PushRun]) -> String {
+    let mut text = String::new();
+    for run in runs {
+        let line = format!(
+            "kajiba: CI run {id} on {reference} — kajiba ci watch {id}\n",
+            id = run.run_public_id,
+            reference = run.ref_name
+        );
+        if text.len() + line.len() > usize::from(u16::MAX) {
+            break;
+        }
+        text += &line;
+    }
+    text
 }
 
 async fn receive(stream: &mut UnixStream) -> io::Result<([OwnedFd; 3], String, GitCommand)> {
@@ -179,7 +202,7 @@ async fn spawn(
     fds: [OwnedFd; 3],
     user: String,
     command: GitCommand,
-) -> Result<u8, tonic::Status> {
+) -> Result<(u8, Vec<gate::PushRun>), tonic::Status> {
     use kajiba_gitstore::{GitStore, Gix};
     use std::os::unix::process::ExitStatusExt;
     let mut server = crate::service::server_client(&git.server_socket, &git.generation).await?;
@@ -276,29 +299,56 @@ async fn spawn(
     .await;
     // A wait error is not proof of exit: retain the session until a new generation.
     if !exited {
-        return result;
+        return result.map(|status| (status, Vec::new()));
     }
     git.repositories.finished(
         &session.session_id,
         result.as_ref().copied().unwrap_or(1).into(),
     );
     // Retained by finished() for retry if the server is restarting.
-    if server
+    let mut runs = Vec::new();
+    if let Ok(response) = server
         .session_exited(gate::SessionExitedRequest {
             session_id: session.session_id.clone(),
             exit_status: result.as_ref().copied().unwrap_or(1).into(),
         })
         .await
-        .is_ok()
     {
         git.repositories.acknowledged(&session.session_id);
+        runs = response.into_inner().runs;
     }
-    result
+    result.map(|status| (status, runs))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_notice_names_each_run_within_the_hand_off_bound() {
+        let run = |id: &str, reference: &str| gate::PushRun {
+            run_public_id: id.into(),
+            ref_name: reference.into(),
+        };
+        assert_eq!(notice(&[]), "");
+        assert_eq!(
+            notice(&[
+                run("01JBRUN0000000000000000001", "refs/heads/main"),
+                run("01JBRUN0000000000000000002", "refs/tags/v1"),
+            ]),
+            "kajiba: CI run 01JBRUN0000000000000000001 on refs/heads/main — kajiba ci watch 01JBRUN0000000000000000001\n\
+             kajiba: CI run 01JBRUN0000000000000000002 on refs/tags/v1 — kajiba ci watch 01JBRUN0000000000000000002\n"
+        );
+        let many = vec![
+            run(
+                "01JBRUN0000000000000000001",
+                &format!("refs/tags/{}", "x".repeat(200))
+            );
+            1000
+        ];
+        let text = notice(&many);
+        assert!(text.len() <= usize::from(u16::MAX) && text.ends_with('\n'));
+    }
 
     fn command(service: Service, owner: &str, name: &str) -> Option<GitCommand> {
         Some(GitCommand {
@@ -528,7 +578,7 @@ mod opening_tests {
                 return Err(Status::unavailable("cancellation reply lost"));
             }
             *opened = None;
-            Ok(Response::new(gate::SessionExitedResponse {}))
+            Ok(Response::new(gate::SessionExitedResponse::default()))
         }
         async fn get_auth_key(
             &self,

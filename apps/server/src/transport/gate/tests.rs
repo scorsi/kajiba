@@ -1417,3 +1417,133 @@ async fn lost_open_response_can_be_retried_or_cancelled_without_leaking_admissio
     gate.open_session(Request::new(competing)).await.unwrap();
     assert!(gate.admission.running(1));
 }
+
+#[tokio::test]
+async fn session_exit_answers_the_runs_its_push_created() {
+    use crate::db::{events::Handler, pushes::ZERO};
+    use kajiba_proto::git::v1::SessionKind;
+    use std::process::Command;
+    let (_state, admin, gate, alice) = session_fixture().await;
+    let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+    let mut ci = crate::db::runs::Ci {
+        now: crate::db::runs::now,
+        repos: admin.state_dir.join("repos"),
+        wake,
+    };
+    assert_eq!(<crate::db::runs::Ci as Handler>::NAME, "ci");
+    // One push: admitted, applied by a stand-in for receive-pack, then its session exits.
+    let push = |ci_enabled: bool| {
+        let (admin, gate, alice) = (&admin, &gate, &alice);
+        async move {
+            sqlx::query("UPDATE repo SET ci_enabled = ?")
+                .bind(ci_enabled)
+                .execute(&mut *admin.writer.lock().await)
+                .await
+                .unwrap();
+            let session = gate
+                .open_session(Request::new(OpenSessionRequest {
+                    generation: gate.admission.generation().unwrap(),
+                    user_public_id: alice.clone(),
+                    kind: SessionKind::ReceivePack.into(),
+                    repository: Some(open_session_request::Repository::RepoAddress(
+                        "alice/demo".into(),
+                    )),
+                    correlation_id: kajiba_core::new_id().unwrap(),
+                    session_id: kajiba_core::new_id().unwrap(),
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .session
+                .unwrap();
+            let path = admin
+                .state_dir
+                .join(format!("repos/{}.git", session.repo_public_id));
+            let git = |args: &[&str]| {
+                let output = Command::new("git")
+                    .arg("--git-dir")
+                    .arg(&path)
+                    .args(args)
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_AUTHOR_NAME", "test")
+                    .env("GIT_AUTHOR_EMAIL", "test@example.org")
+                    .env("GIT_COMMITTER_NAME", "test")
+                    .env("GIT_COMMITTER_EMAIL", "test@example.org")
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+                String::from_utf8(output.stdout).unwrap().trim().to_owned()
+            };
+            let tree = git(&["mktree"]);
+            let commit = git(&["commit-tree", &tree, "-m", &session.session_id]);
+            let old = git(&["for-each-ref", "--format=%(objectname)", "refs/heads/main"]);
+            let old = if old.is_empty() { ZERO.to_owned() } else { old };
+            let updates = vec![RefUpdate {
+                ref_name: "refs/heads/main".into(),
+                old_id: old,
+                new_id: commit.clone(),
+                fast_forward: Some(true),
+                signature: SignatureVerdict::Verified.into(),
+                signature_reason: String::new(),
+            }];
+            let admitted = gate
+                .pre_receive(Request::new(PreReceiveRequest {
+                    session_id: session.session_id.clone(),
+                    updates,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(admitted.allowed, "{admitted:?}");
+            git(&["update-ref", "refs/heads/main", &commit]);
+            let started = tokio::time::Instant::now();
+            let runs = gate
+                .session_exited(Request::new(SessionExitedRequest {
+                    session_id: session.session_id,
+                    exit_status: 0,
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .runs;
+            (runs, started.elapsed())
+        }
+    };
+    // Nothing takes the events: the answer comes empty after the bound.
+    let (runs, waited) = push(true).await;
+    assert!(runs.is_empty());
+    assert!(waited >= PUSH_RUNS_WAIT, "{waited:?}");
+    // The `ci` handler catches up, and keeps up from then on.
+    let dispatcher = async {
+        loop {
+            {
+                let mut writer = admin.writer.lock().await;
+                while admin.bus.dispatch_next(&mut writer, &mut ci).await.unwrap() {}
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let pushes = async {
+        let (runs, _) = push(true).await;
+        let created: String =
+            sqlx::query_scalar("SELECT public_id FROM run ORDER BY id DESC LIMIT 1")
+                .fetch_one(&mut *admin.writer.lock().await)
+                .await
+                .unwrap();
+        assert_eq!(
+            runs.iter()
+                .map(|run| (run.run_public_id.as_str(), run.ref_name.as_str()))
+                .collect::<Vec<_>>(),
+            [(created.as_str(), "refs/heads/main")]
+        );
+        // CI off: no run, and no wait.
+        let (runs, waited) = push(false).await;
+        assert!(runs.is_empty());
+        assert!(waited < PUSH_RUNS_WAIT, "{waited:?}");
+    };
+    tokio::select! {
+        () = dispatcher => unreachable!(),
+        () = pushes => {}
+    }
+}

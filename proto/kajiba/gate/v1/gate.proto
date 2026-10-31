@@ -90,4 +90,12 @@ message SessionExitedRequest {
   string session_id = 1;
   int32 exit_status = 2;
 }
-message SessionExitedResponse {}
+message SessionExitedResponse {
+  // The CI runs the session's push created, in ref order, once the `ci` handler took
+  // its events; empty when it created none or took longer than 2 s (ADR 0132).
+  repeated PushRun runs = 1;
+}
+message PushRun {
+  string run_public_id = 1;
+  string ref_name = 2;
+}

@@ -65,7 +65,7 @@ impl gate::gate_service_server::GateService for ImportGate {
         &self,
         _: Request<gate::SessionExitedRequest>,
     ) -> Result<Response<gate::SessionExitedResponse>, Status> {
-        Ok(Response::new(gate::SessionExitedResponse {}))
+        Ok(Response::new(gate::SessionExitedResponse::default()))
     }
     async fn get_auth_key(
         &self,

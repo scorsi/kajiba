@@ -153,7 +153,13 @@ impl GateService for Gate {
                 "invalid session_id",
             ));
         }
+        // The session's identity is gone once it exits; its push events carry it.
+        let push = self.admission.session(&request.session_id);
         let mut writer = self.writer.lock().await;
+        let before: i64 = sqlx::query_scalar("SELECT COALESCE(max(id), 0) FROM event")
+            .fetch_one(&mut *writer)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
         // Also cancel an OpenSession still waiting for the writer lock (0061).
         self.closed
             .lock()
@@ -176,7 +182,79 @@ impl GateService for Gate {
                 .await
                 .map_err(Status::internal)?;
         }
-        Ok(Response::new(SessionExitedResponse {}))
+        let events: Vec<i64> = match &push {
+            Some((repo, session)) => sqlx::query_scalar(
+                "SELECT id FROM event WHERE repo_id = ? AND id > ? AND kind = 'push' AND correlation_id = ?",
+            )
+            .bind(repo)
+            .bind(before)
+            .bind(&session.correlation_id)
+            .fetch_all(&mut *writer)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?,
+            None => Vec::new(),
+        };
+        drop(writer);
+        let runs = match (&push, events.first(), events.last()) {
+            (Some((repo, _)), Some(&first), Some(&last)) => {
+                self.push_runs(*repo, first, last).await
+            }
+            _ => Vec::new(),
+        };
+        Ok(Response::new(SessionExitedResponse { runs }))
+    }
+}
+
+/// How long SessionExited waits for the `ci` handler to take a push's events (ADR 0132).
+const PUSH_RUNS_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl Gate {
+    /// The runs the `ci` handler created for the push events `first..=last`, once it
+    /// took them; none after `PUSH_RUNS_WAIT` or on an error: the push never waits longer.
+    async fn push_runs(&self, repo: i64, first: i64, last: i64) -> Vec<PushRun> {
+        let deadline = tokio::time::Instant::now() + PUSH_RUNS_WAIT;
+        loop {
+            let found = async {
+                let mut writer = self.writer.lock().await;
+                let handled: i64 = sqlx::query_scalar(
+                    "SELECT COALESCE((SELECT last_event_id FROM handler_checkpoint WHERE handler = 'ci'), 0)",
+                )
+                .fetch_one(&mut *writer)
+                .await?;
+                if handled < last {
+                    return Ok(None);
+                }
+                let runs: Vec<(String, String)> = sqlx::query_as(
+                    "SELECT public_id, ref FROM run WHERE repo_id = ? AND event_id BETWEEN ? AND ? ORDER BY event_id",
+                )
+                .bind(repo)
+                .bind(first)
+                .bind(last)
+                .fetch_all(&mut *writer)
+                .await?;
+                Ok::<_, sqlx::Error>(Some(runs))
+            }
+            .await;
+            match found {
+                Ok(Some(runs)) => {
+                    return runs
+                        .into_iter()
+                        .map(|(run_public_id, ref_name)| PushRun {
+                            run_public_id,
+                            ref_name,
+                        })
+                        .collect();
+                }
+                Ok(None) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Ok(None) => return Vec::new(),
+                Err(err) => {
+                    tracing::warn!(event = "push-runs-unavailable", err = %err);
+                    return Vec::new();
+                }
+            }
+        }
     }
 }
 
