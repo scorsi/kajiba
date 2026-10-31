@@ -17,6 +17,7 @@ mod ci;
 mod client;
 mod login;
 mod repo;
+mod worktree;
 
 #[derive(Parser)]
 #[command(
@@ -132,9 +133,15 @@ async fn run(
         }
         Command::Ci { command } => {
             let saved = client::credentials(args.url.as_deref(), &token_file, env)?;
+            let local = worktree::Local {
+                forge: saved.url.clone(),
+                nix: "nix".into(),
+                dir: ".".into(),
+            };
             return ci::run(
                 command,
                 client::connect(&saved.url, &saved.token, args.development)?,
+                &local,
                 args.json,
                 out,
                 &mut std::io::stderr(),

@@ -50,12 +50,22 @@ async fn fake(finished: Run) -> (Fake, String) {
     (fake, url)
 }
 
+/// No clone: commands on a pushed commit never read it.
+fn nowhere() -> Local {
+    Local {
+        forge: "https://forge.example.org".into(),
+        nix: "/nonexistent/nix".into(),
+        dir: "/nonexistent".into(),
+    }
+}
+
 /// Exit code, stdout, stderr.
 async fn output(url: &str, command: Command, json: bool) -> (ExitCode, String, String) {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = match run(
         command,
         connect(url, TOKEN, true).unwrap(),
+        &nowhere(),
         json,
         &mut out,
         &mut err,
@@ -77,9 +87,13 @@ async fn output(url: &str, command: Command, json: bool) -> (ExitCode, String, S
 
 fn trigger(detach: bool) -> Command {
     Command::Run {
-        repo: "alice/demo".into(),
-        sha: SHA.into(),
+        repo: Some("alice/demo".into()),
+        sha: Some(SHA.into()),
         detach,
+        worktree: false,
+        worktree_repo: None,
+        checks: Vec::new(),
+        system: None,
     }
 }
 
@@ -289,6 +303,7 @@ async fn logs_into_a_closed_stdout_exits_quietly() {
         let result = run(
             Command::Logs { run: ID.into() },
             connect(&url, TOKEN, true).unwrap(),
+            &nowhere(),
             false,
             &mut crate::Stdout,
             &mut std::io::sink(),

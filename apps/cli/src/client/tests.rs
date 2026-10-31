@@ -2,13 +2,15 @@
 #![allow(clippy::result_large_err)]
 use super::*;
 use kajiba_proto::v1::{
-    GetBlobRequest, GetBlobResponse, GetCommitDiffRequest, GetCommitDiffResponse, GetRepoRequest,
-    GetRepoResponse, GetRunRequest, GetRunResponse, GetTreeRequest, GetTreeResponse,
-    GetViewerRequest, GetViewerResponse, ListCommitsRequest, ListCommitsResponse, ListReposRequest,
-    ListReposResponse, ListRunsRequest, ListRunsResponse, LogBytes, LogSection, LogoutRequest,
-    LogoutResponse, Repo, Run, TriggerRunRequest, TriggerRunResponse, WatchRunRequest,
-    WatchRunResponse,
+    CreateWorktreeRunRequest, CreateWorktreeRunResponse, GetBlobRequest, GetBlobResponse,
+    GetCommitDiffRequest, GetCommitDiffResponse, GetRepoRequest, GetRepoResponse, GetRunRequest,
+    GetRunResponse, GetTreeRequest, GetTreeResponse, GetViewerRequest, GetViewerResponse,
+    GetWorktreeBaseRequest, GetWorktreeBaseResponse, ListCommitsRequest, ListCommitsResponse,
+    ListReposRequest, ListReposResponse, ListRunsRequest, ListRunsResponse, LogBytes, LogSection,
+    LogoutRequest, LogoutResponse, Repo, Run, TriggerRunRequest, TriggerRunResponse,
+    WatchRunRequest, WatchRunResponse, WorktreeRunSpec,
     auth_service_server::{AuthService, AuthServiceServer},
+    create_worktree_run_request::Part,
     get_repo_request,
     repo_service_client::RepoServiceClient,
     repo_service_server::{RepoService, RepoServiceServer},
@@ -78,6 +80,13 @@ pub struct State {
     pub drop_at: Option<u64>,
     /// Every WatchRun request: offset and follow.
     pub watches: Vec<(u64, bool)>,
+    /// GetWorktreeBase answers these ids and records each spec.
+    pub base: Vec<String>,
+    pub specs: Vec<WorktreeRunSpec>,
+    /// Every CreateWorktreeRun upload: its spec, chunk sizes and bundle; the first
+    /// `upload_refusals` answer the next uploads, then `run` does.
+    pub uploads: Vec<(Option<WorktreeRunSpec>, Vec<usize>, Vec<u8>)>,
+    pub upload_refusals: Vec<Status>,
 }
 
 #[derive(Clone, Default)]
@@ -272,15 +281,46 @@ impl RunService for Fake {
     }
     async fn get_worktree_base(
         &self,
-        _: tonic::Request<kajiba_proto::v1::GetWorktreeBaseRequest>,
-    ) -> Result<Response<kajiba_proto::v1::GetWorktreeBaseResponse>, Status> {
-        unimplemented()
+        request: tonic::Request<GetWorktreeBaseRequest>,
+    ) -> Result<Response<GetWorktreeBaseResponse>, Status> {
+        if let Some(spec) = request.get_ref().spec.clone() {
+            self.0.lock().unwrap().specs.push(spec);
+        }
+        self.answer("GetWorktreeBase", request, |state, _| {
+            Ok(GetWorktreeBaseResponse {
+                ids: state.base.clone(),
+            })
+        })
     }
     async fn create_worktree_run(
         &self,
-        _: tonic::Request<tonic::Streaming<kajiba_proto::v1::CreateWorktreeRunRequest>>,
-    ) -> Result<Response<kajiba_proto::v1::CreateWorktreeRunResponse>, Status> {
-        unimplemented()
+        request: tonic::Request<tonic::Streaming<CreateWorktreeRunRequest>>,
+    ) -> Result<Response<CreateWorktreeRunResponse>, Status> {
+        let (metadata, extensions, mut parts) = request.into_parts();
+        let (mut spec, mut sizes, mut bundle) = (None, Vec::new(), Vec::new());
+        while let Some(part) = parts.message().await? {
+            match part.part {
+                Some(Part::Spec(first)) => spec = Some(first),
+                Some(Part::Chunk(chunk)) => {
+                    sizes.push(chunk.len());
+                    bundle.extend(chunk);
+                }
+                None => {}
+            }
+        }
+        {
+            let mut state = self.0.lock().unwrap();
+            state.uploads.push((spec, sizes, bundle));
+            if !state.upload_refusals.is_empty() {
+                return Err(state.upload_refusals.remove(0));
+            }
+        }
+        let request = tonic::Request::from_parts(metadata, extensions, ());
+        self.answer("CreateWorktreeRun", request, |state, ()| {
+            Ok(CreateWorktreeRunResponse {
+                run: state.run.clone(),
+            })
+        })
     }
 
     type WatchRunStream = std::pin::Pin<

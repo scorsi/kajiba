@@ -1,6 +1,7 @@
 //! `kajiba ci run|status|watch|logs` (0007, 0010, ADR 0117): trigger, follow and read runs.
 use crate::client::{self, Api, Error};
 use crate::repo::{pretty, protojson};
+use crate::worktree::{self, Local};
 use clap::Subcommand;
 use kajiba_proto::v1::{
     GetRunRequest, Run, RunState, TriggerRunRequest, WatchRunRequest,
@@ -11,15 +12,37 @@ use tonic::Code;
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Run CI on a commit and follow its log.
+    /// Run CI on a commit, or on the working tree with --worktree, and follow its log.
     Run {
         /// `<owner>/<name>` or a public id.
-        repo: String,
+        #[arg(required_unless_present = "worktree")]
+        repo: Option<String>,
         /// The full commit id, reachable from a ref of the repository.
-        sha: String,
+        #[arg(required_unless_present = "worktree")]
+        sha: Option<String>,
         /// Print the run id and return at once.
         #[arg(short, long)]
         detach: bool,
+        /// Run on the tracked files of this clone's working tree and index, sent to the
+        /// forge without a push (0097).
+        #[arg(long, conflicts_with_all = ["repo", "sha"])]
+        worktree: bool,
+        /// With --worktree: the repository, instead of the one this clone's remote
+        /// addresses on the forge.
+        #[arg(
+            long = "repo",
+            id = "worktree_repo",
+            value_name = "OWNER/NAME",
+            requires = "worktree"
+        )]
+        worktree_repo: Option<String>,
+        /// With --worktree: build only `checks.<system>.<NAME>` (repeatable) instead of
+        /// the whole `nix flake check`.
+        #[arg(long = "check", value_name = "NAME", requires = "worktree")]
+        checks: Vec<String>,
+        /// With --worktree: the Nix system to run on [default: this machine's].
+        #[arg(long, requires = "worktree")]
+        system: Option<String>,
     },
     /// Print a run's state without waiting: exit 0 succeeded, 1 failed or cancelled,
     /// 75 pending or running.
@@ -41,16 +64,40 @@ const RETRIES: u32 = 30;
 pub async fn run(
     command: Command,
     api: Api,
+    local: &Local,
     json: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<ExitCode, Error> {
     let mut runs = RunServiceClient::new(api);
     match command {
-        Command::Run { repo, sha, detach } => {
-            let run = client::answer(runs.trigger_run(TriggerRunRequest { repo, sha }).await)?
-                .run
-                .ok_or_else(|| Error("the forge answered no run".into()))?;
+        Command::Run {
+            repo,
+            sha,
+            detach,
+            worktree,
+            worktree_repo,
+            checks,
+            system,
+        } => {
+            if !worktree && (worktree_repo.is_some() || !checks.is_empty() || system.is_some()) {
+                return Err(Error("--repo, --check and --system need --worktree".into()));
+            }
+            let run = match (repo, sha) {
+                (Some(repo), Some(sha)) if !worktree => {
+                    client::answer(runs.trigger_run(TriggerRunRequest { repo, sha }).await)?
+                        .run
+                        .ok_or_else(|| Error("the forge answered no run".into()))?
+                }
+                _ => {
+                    let choice = worktree::Choice {
+                        repo: worktree_repo,
+                        checks,
+                        system,
+                    };
+                    worktree::create(&mut runs, local, choice).await?
+                }
+            };
             if detach {
                 let text = format!("{}\n", run.public_id);
                 print(out, &describe(&run, json, text)?)?;
