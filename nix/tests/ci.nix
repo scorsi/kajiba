@@ -372,7 +372,7 @@ pkgs.testers.runNixOSTest {
         code, out = forge.execute(f"{writer_cli} ci watch {r2} 2>/tmp/r2.err")
         err = forge.succeed("cat /tmp/r2.err")
         assert code == 1 and "fail-line-3000" in out, (code, err)
-        assert f"kajiba: run {r2} failed: exit status 1" in err and "exit code 3" in err, err
+        assert f"kajiba: run {r2} failed: exit status 1" in err and "fail-line-3000" in err, err
         summary = err.split(f"run {r2} failed", 1)[1].splitlines()[1:]
         assert len(summary) == 20, summary
         assert finished(r2) == "failed"
