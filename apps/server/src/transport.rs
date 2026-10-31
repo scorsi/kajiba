@@ -32,7 +32,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, OnceLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::{Mutex, Semaphore, watch};
 use tonic::{Request, Response, Status, service::Routes};
@@ -426,7 +426,7 @@ async fn serve_tcp(
         stopped,
         move |stream| {
             let app = app.clone();
-            async move { Some((stream, app)) }
+            async move { Some((stream, app, None)) }
         },
     )
     .await
@@ -455,7 +455,8 @@ async fn serve_runners(
             let (app, source) = (app.clone(), source.clone());
             async move {
                 let (tls, peer) = accept_runner(stream, &source).await?;
-                Some((tls, app.layer(axum::Extension(peer))))
+                let expiry = peer.not_after;
+                Some((tls, app.layer(axum::Extension(peer)), Some(expiry)))
             }
         },
     )
@@ -494,7 +495,7 @@ async fn serve_with<S, F>(
 ) -> io::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-    F: std::future::Future<Output = Option<(S, Router)>> + Send + 'static,
+    F: std::future::Future<Output = Option<(S, Router, Option<SystemTime>)>> + Send + 'static,
 {
     // Each connection holds a permit; holding them all again means every connection ended.
     let permits = Arc::new(Semaphore::new(connections));
@@ -517,26 +518,48 @@ where
         };
         let connection = builder.clone();
         let accepted = accept(stream);
-        let mut stopped = stopped.clone();
+        let stopped = stopped.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let Some((stream, app)) = accepted.await else {
+            let Some((stream, app, expiry)) = accepted.await else {
                 return;
             };
-            let service = TowerToHyperService::new(app);
-            let connection =
-                connection.serve_connection_with_upgrades(TokioIo::new(stream), service);
-            tokio::pin!(connection);
-            tokio::select! {
-                _ = connection.as_mut() => return,
-                () = stopping(&mut stopped) => connection.as_mut().graceful_shutdown(),
-            }
-            let _ = connection.await;
+            serve_connection(stream, app, connection, stopped, expiry).await;
         });
     }
     drop(listener);
     let _ = permits.acquire_many(connections as u32).await;
     Ok(())
+}
+
+/// Drop the entire connection at the handshake's expiry so persistent bundle channels
+/// reconnect with renewed credentials too (0124, 0125).
+async fn serve_connection<S>(
+    stream: S,
+    app: Router,
+    builder: Builder<TokioExecutor>,
+    mut stopped: watch::Receiver<bool>,
+    expiry: Option<SystemTime>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let service = TowerToHyperService::new(app);
+    let connection = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
+    tokio::pin!(connection);
+    let serve = async {
+        tokio::select! {
+            _ = connection.as_mut() => return,
+            () = stopping(&mut stopped) => connection.as_mut().graceful_shutdown(),
+        }
+        let _ = connection.await;
+    };
+    match expiry {
+        Some(expiry) => {
+            let remaining = expiry.duration_since(SystemTime::now()).unwrap_or_default();
+            let _ = tokio::time::timeout(remaining, serve).await;
+        }
+        None => serve.await,
+    }
 }
 
 pub async fn serve(

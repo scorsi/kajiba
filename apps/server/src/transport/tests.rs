@@ -1341,3 +1341,172 @@ async fn runner_listener_requires_h2_alpn() {
         }
     }
 }
+
+#[tokio::test]
+async fn a_persistent_bundle_channel_reconnects_after_svid_renewal() {
+    use kajiba_proto::runner::v1::{
+        FetchRunBundleRequest, FetchRunBundleResponse, runner_service_client::RunnerServiceClient,
+    };
+    use std::{future::Future, pin::Pin, task::Poll};
+    use tokio::sync::mpsc;
+    use tokio_rustls::{TlsConnector, rustls::pki_types::ServerName};
+    use tonic::transport::Endpoint;
+
+    #[derive(Clone)]
+    struct Connector {
+        runner: Arc<svid::Source>,
+        forge: Arc<svid::Source>,
+        peers: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+        ended: mpsc::Sender<()>,
+    }
+
+    impl Service<http::Uri> for Connector {
+        type Response = TokioIo<tokio_rustls::client::TlsStream<tokio::io::DuplexStream>>;
+        type Error = io::Error;
+        type Future = Pin<Box<dyn Future<Output = io::Result<Self::Response>> + Send>>;
+
+        fn poll_ready(&mut self, _: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: http::Uri) -> Self::Future {
+            let this = self.clone();
+            Box::pin(async move {
+                let (client, server) = tokio::io::duplex(16 * 1024);
+                let connector = TlsConnector::from(Arc::new(
+                    this.runner
+                        .client_config("spiffe://example.org/forge/kajiba-server"),
+                ));
+                tokio::spawn(async move {
+                    let (tls, mut peer) = accept_runner(server, &this.forge).await.unwrap();
+                    let first = {
+                        let mut peers = this.peers.lock().unwrap();
+                        peers.push(tls.get_ref().1.peer_certificates().unwrap()[0].to_vec());
+                        peers.len() == 1
+                    };
+                    // Shorten the 100-year fixture's first handshake only.
+                    if first {
+                        peer.not_after = SystemTime::now() + Duration::from_secs(1);
+                    }
+                    let expiry = peer.not_after;
+                    let app = Router::new()
+                        .route(
+                            "/kajiba.runner.v1.RunnerService/FetchRunBundle",
+                            axum::routing::post(
+                                |axum::Extension(peer): axum::Extension<svid::Peer>| async move {
+                                    assert!(SystemTime::now() < peer.not_after);
+                                    let payload = FetchRunBundleResponse {
+                                        data: b"bundle".to_vec(),
+                                        bundle: 0,
+                                    }
+                                    .encode_to_vec();
+                                    let mut frame = vec![0];
+                                    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+                                    frame.extend(payload);
+                                    (
+                                        [
+                                            ("content-type", "application/grpc"),
+                                            ("grpc-status", "0"),
+                                        ],
+                                        frame,
+                                    )
+                                },
+                            ),
+                        )
+                        .layer(axum::Extension(peer));
+                    let (_stop, stopped) = watch::channel(false);
+                    serve_connection(
+                        tls,
+                        app,
+                        Builder::new(TokioExecutor::new()).http2_only(),
+                        stopped,
+                        Some(expiry),
+                    )
+                    .await;
+                    let _ = this.ended.send(()).await;
+                });
+                let tls = connector
+                    .connect(ServerName::try_from("runners.example.org").unwrap(), client)
+                    .await?;
+                Ok(TokioIo::new(tls))
+            })
+        }
+    }
+
+    let state = State::new();
+    let dir = state.health.state_dir.join("tls");
+    fs::create_dir(&dir).unwrap();
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/kajiba-core/tests/fixtures/svid");
+    let put = |from: &str, to: &str| {
+        fs::copy(fixtures.join(from), dir.join("staged")).unwrap();
+        fs::rename(dir.join("staged"), dir.join(to)).unwrap();
+    };
+    put("runner.pem", "runner.pem");
+    put("runner.key", "runner.key");
+    let source = |root: &std::path::Path, leaf: &str| {
+        svid::Source::load(svid::Files {
+            trust_domain: "example.org".into(),
+            svid_file: root.join(format!("{leaf}.pem")),
+            key_file: root.join(format!("{leaf}.key")),
+            bundle_file: fixtures.join("ca.pem"),
+        })
+        .unwrap()
+    };
+    let peers = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (ended, mut endings) = mpsc::channel(4);
+    let connector = Connector {
+        runner: source(&dir, "runner"),
+        forge: source(&fixtures, "forge"),
+        peers: peers.clone(),
+        ended,
+    };
+    let channel =
+        Endpoint::from_static("http://runners.example.org").connect_with_connector_lazy(connector);
+    let mut client = RunnerServiceClient::new(channel);
+    let request = || FetchRunBundleRequest {
+        attempt_id: "attempt".into(),
+        have: vec![],
+    };
+    let mut bundle = client
+        .fetch_run_bundle(request())
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(bundle.message().await.unwrap().unwrap().data, b"bundle");
+    assert!(bundle.message().await.unwrap().is_none());
+
+    put("renewed.pem", "runner.pem");
+    put("renewed.key", "runner.key");
+    tokio::time::timeout(Duration::from_secs(5), endings.recv())
+        .await
+        .expect("the expired bundle connection must close")
+        .unwrap();
+    // tonic may report the closed connection once before reconnecting the same channel.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(response) = client.fetch_run_bundle(request()).await {
+                let mut bundle = response.into_inner();
+                assert_eq!(bundle.message().await.unwrap().unwrap().data, b"bundle");
+                assert!(bundle.message().await.unwrap().is_none());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let peers = peers.lock().unwrap();
+    let leaf = |name: &str| {
+        source(&fixtures, name)
+            .client_config("spiffe://example.org/forge/kajiba-server")
+            .client_auth_cert_resolver
+            .resolve(&[], &[])
+            .unwrap()
+            .cert[0]
+            .to_vec()
+    };
+    assert_eq!(peers[0], leaf("runner"));
+    assert_eq!(peers[1], leaf("renewed"));
+    assert_eq!(peers.len(), 2);
+}
