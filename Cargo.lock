@@ -2180,6 +2180,8 @@ dependencies = [
  "hyper-util",
  "libc",
  "prost",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "ssh-key",
@@ -2189,6 +2191,7 @@ dependencies = [
  "tonic-types",
  "tracing",
  "tracing-subscriber",
+ "x509-parser",
 ]
 
 [[package]]

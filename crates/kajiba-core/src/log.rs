@@ -251,7 +251,7 @@ fn ts_now() -> String {
 }
 
 /// civil_from_days (Howard Hinnant), from nisshi/docs/log-schema.md and hikyaku/src/ts.rs.
-fn ts_from(secs: i64, nanos: u32) -> String {
+pub(crate) fn ts_from(secs: i64, nanos: u32) -> String {
     let (days, sod) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     let z = days + 719_468;
     let era = z.div_euclid(146_097);

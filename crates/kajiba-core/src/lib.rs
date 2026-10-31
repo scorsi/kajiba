@@ -6,6 +6,7 @@ pub mod local;
 pub mod log;
 pub mod names;
 pub mod state;
+pub mod svid;
 pub mod transport;
 pub mod version;
 

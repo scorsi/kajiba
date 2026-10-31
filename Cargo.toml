@@ -21,6 +21,10 @@ http-body = "1"
 libc = "0.2"
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "server-auto", "service"] }
 prost = "0.13"
+# Already transitive (tonic): TLS of the runner channel with the ring provider (0123).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Already transitive (tonic): PEM decoding of SVID files (0123).
+rustls-pki-types = { version = "1", features = ["std"] }
 # Reads custom method options from the encoded descriptor set (0076).
 prost-reflect = { version = "0.15", default-features = false }
 serde_json = "1"
@@ -34,6 +38,8 @@ toml = "0.8"
 webauthn-authenticator-rs = { version = "0.5", default-features = false, features = ["softpasskey"] }
 # Passkey relying party (0014, 0076); `conditional-ui` provides discoverable login.
 webauthn-rs = { version = "0.5", default-features = false, features = ["conditional-ui"] }
+# Already transitive (webauthn-rs): SPIFFE ID, CA flag and expiry of SVIDs (0123).
+x509-parser = { version = "0.16", default-features = false }
 # Already transitive (gix): inflates gzipped git upload-pack requests.
 zlib-rs = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "process", "io-util"] }
