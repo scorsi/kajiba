@@ -1,5 +1,6 @@
 //! Fixtures in tests/fixtures/svid: a test CA (`ca.pem`) and another one (`other-ca.pem`), each
 //! leaf with its key, ECDSA P-256, valid for 100 years, made once with `openssl req`/`x509`.
+//! `no-eku-{runner,forge}.pem` omit EKU, reuse the role's key and trust `no-eku-ca.pem`.
 
 use super::*;
 use rustls::{ClientConnection, Connection, ServerConnection};
@@ -210,6 +211,27 @@ fn the_forge_certificate_must_carry_server_auth_and_the_expected_id() {
     ] {
         assert!(verify(bad).is_err(), "{bad}");
     }
+}
+
+#[test]
+fn runner_without_extended_key_usage_is_refused() {
+    let forge = Source::load(files(&fixture(""), "forge", "no-eku-ca.pem")).unwrap();
+    assert!(
+        Verifier(forge, None)
+            .verify_client_cert(&leaf("no-eku-runner"), &[], UnixTime::now())
+            .is_err()
+    );
+}
+
+#[test]
+fn forge_without_extended_key_usage_is_refused() {
+    let runner = Source::load(files(&fixture(""), "runner", "no-eku-ca.pem")).unwrap();
+    let name = ServerName::try_from("runners.example.org").unwrap();
+    assert!(
+        Verifier(runner, Some(FORGE.into()))
+            .verify_server_cert(&leaf("no-eku-forge"), &[], &name, &[], UnixTime::now())
+            .is_err()
+    );
 }
 
 #[test]

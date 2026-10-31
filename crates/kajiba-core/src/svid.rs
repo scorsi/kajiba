@@ -340,6 +340,24 @@ impl ResolvesClientCert for Resolver {
 struct Verifier(Arc<Source>, Option<String>);
 
 impl Verifier {
+    fn peer(&self, leaf: &CertificateDer<'_>) -> Result<Peer, Error> {
+        let (_, cert) = x509_parser::parse_x509_certificate(leaf)
+            .map_err(|e| err(format!("certificate does not parse: {e}")))?;
+        let eku = cert
+            .extended_key_usage()
+            .map_err(|e| err(format!("extendedKeyUsage: {e}")))?
+            .ok_or_else(|| err("certificate has no extendedKeyUsage"))?;
+        let allowed = if self.1.is_some() {
+            eku.value.server_auth
+        } else {
+            eku.value.client_auth
+        };
+        if !allowed {
+            return Err(err("certificate lacks the peer role's extendedKeyUsage"));
+        }
+        peer(leaf, self.0.trust_domain())
+    }
+
     fn signature(
         &self,
         message: &[u8],
@@ -370,7 +388,7 @@ impl ClientCertVerifier for Verifier {
         let verified = material
             .clients
             .verify_client_cert(end_entity, intermediates, now)?;
-        peer(end_entity, self.0.trust_domain()).map_err(refused)?;
+        self.peer(end_entity).map_err(refused)?;
         Ok(verified)
     }
 
@@ -419,7 +437,7 @@ impl ServerCertVerifier for Verifier {
             now,
             self.0.provider.signature_verification_algorithms.all,
         )?;
-        let id = peer(end_entity, self.0.trust_domain()).map_err(refused)?.id;
+        let id = self.peer(end_entity).map_err(refused)?.id;
         let expected = self.1.as_deref().unwrap_or_default();
         if id != expected {
             return Err(refused(err(format!("server is {id}, want {expected}"))));
