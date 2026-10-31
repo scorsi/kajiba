@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::{
     Request, Status,
@@ -24,6 +24,8 @@ use tonic::{
 
 /// ADR 0105: a heartbeat every 10 s; reconnection from 1 s doubling to 30 s.
 pub const HEARTBEAT: Duration = Duration::from_secs(10);
+// Bound retained log data to 1 MiB per attempt, plus its outbound copy.
+const LOG_WINDOW: usize = 16;
 const FIRST_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -103,7 +105,7 @@ impl Inner {
 /// The attempts this runner holds; their logs are kept until acknowledged and their
 /// result until recorded, across reconnections (0008).
 #[derive(Clone, Default)]
-pub struct Attempts(Arc<Mutex<Inner>>);
+pub struct Attempts(Arc<Mutex<Inner>>, Arc<Notify>);
 
 impl Attempts {
     /// Hold an assigned attempt and accept it.
@@ -115,21 +117,34 @@ impl Attempts {
         }));
     }
 
-    /// Append log bytes (at most 64 KiB) under the attempt's next sequence.
-    pub fn log(&self, attempt: &str, step_index: u32, data: Vec<u8>) {
-        let mut inner = self.0.lock().unwrap();
-        let Some(held) = inner.attempts.get_mut(attempt) else {
-            return;
-        };
-        held.next += 1;
-        let chunk = LogChunk {
-            attempt_id: attempt.into(),
-            sequence: held.next,
-            step_index,
-            data,
-        };
-        held.unacknowledged.push_back(chunk.clone());
-        inner.send(Message::LogChunk(chunk));
+    /// Append log bytes (at most 64 KiB), waiting for acknowledgments when full.
+    pub async fn log(&self, attempt: &str, step_index: u32, data: Vec<u8>) {
+        assert!(data.len() <= kajiba_exec::CHUNK);
+        loop {
+            let changed = self.1.notified();
+            tokio::pin!(changed);
+            // Register before checking the window so an acknowledgment cannot be missed.
+            changed.as_mut().enable();
+            {
+                let mut inner = self.0.lock().unwrap();
+                let Some(held) = inner.attempts.get_mut(attempt) else {
+                    return;
+                };
+                if held.unacknowledged.len() < LOG_WINDOW {
+                    held.next += 1;
+                    let chunk = LogChunk {
+                        attempt_id: attempt.into(),
+                        sequence: held.next,
+                        step_index,
+                        data,
+                    };
+                    held.unacknowledged.push_back(chunk.clone());
+                    inner.send(Message::LogChunk(chunk));
+                    return;
+                }
+            }
+            changed.await;
+        }
     }
 
     /// Send a message that need not survive a reconnection (step status).
@@ -174,6 +189,7 @@ impl Attempts {
             Server::Assignment(assignment) => return Some(Job::Assigned(assignment)),
             Server::CancelAttempt(cancel) => {
                 inner.attempts.remove(&cancel.attempt_id);
+                self.1.notify_waiters();
                 return Some(Job::Cancelled(cancel.attempt_id));
             }
             Server::ContinueAttempt(resumed) => {
@@ -190,6 +206,7 @@ impl Attempts {
                 {
                     held.unacknowledged.pop_front();
                 }
+                self.1.notify_waiters();
                 if std::mem::take(&mut held.resend) {
                     held.reconciling = false;
                     let mut resent: Vec<Message> = held
@@ -206,6 +223,7 @@ impl Attempts {
             }
             Server::ResultAck(ack) => {
                 inner.attempts.remove(&ack.attempt_id);
+                self.1.notify_waiters();
             }
         }
         None

@@ -133,12 +133,12 @@ fn backoff_doubles_from_one_second_up_to_thirty() {
     assert_eq!(delays, [1, 2, 4, 8, 16, 30, 30]);
 }
 
-#[test]
-fn logs_and_results_are_kept_until_acknowledged_and_resent_after_a_continue() {
+#[tokio::test]
+async fn logs_and_results_are_kept_until_acknowledged_and_resent_after_a_continue() {
     let (attempts, metrics) = (Attempts::default(), Metrics::default());
     attempts.accept("A1");
     for data in ["one", "two", "three"] {
-        attempts.log("A1", 0, data.into());
+        attempts.log("A1", 0, data.into()).await;
     }
     assert_eq!(attempts.reconcile(), ["A1"]);
     let (outbound, mut sent) = mpsc::unbounded_channel();
@@ -195,13 +195,13 @@ async fn offer(offered: &mut mpsc::Receiver<Offered>) -> Offered {
         .unwrap()
 }
 
-#[test]
-fn completion_during_reconnection_waits_for_log_replay() {
+#[tokio::test]
+async fn completion_during_reconnection_waits_for_log_replay() {
     for finish_before_continue in [true, false] {
         let (attempts, metrics) = (Attempts::default(), Metrics::default());
         attempts.accept("A1");
-        attempts.log("A1", 0, b"one".to_vec());
-        attempts.log("A1", 0, b"two".to_vec());
+        attempts.log("A1", 0, b"one".to_vec()).await;
+        attempts.log("A1", 0, b"two".to_vec()).await;
         assert_eq!(attempts.reconcile(), ["A1"]);
         let (outbound, mut sent) = mpsc::unbounded_channel();
         attempts.attach(Some(outbound));
@@ -230,7 +230,7 @@ fn completion_during_reconnection_waits_for_log_replay() {
             ..Default::default()
         };
         if finish_before_continue {
-            attempts.log("A1", 0, b"three".to_vec());
+            attempts.log("A1", 0, b"three".to_vec()).await;
             attempts.finish(result.clone(), &metrics);
         }
         assert!(sent.try_recv().is_err());
@@ -240,7 +240,7 @@ fn completion_during_reconnection_waits_for_log_replay() {
             },
         ));
         if !finish_before_continue {
-            attempts.log("A1", 0, b"three".to_vec());
+            attempts.log("A1", 0, b"three".to_vec()).await;
             attempts.finish(result.clone(), &metrics);
         }
         assert!(sent.try_recv().is_err());
@@ -268,7 +268,7 @@ async fn reconnection_resumes_in_flight_attempts_with_backoff() {
     let attempts = Attempts::default();
     attempts.accept("A1");
     for data in ["one", "two", "three"] {
-        attempts.log("A1", 0, data.into());
+        attempts.log("A1", 0, data.into()).await;
     }
     let (jobs, mut handed) = mpsc::channel(4);
     let (paused, mut pauses) = mpsc::unbounded_channel();
@@ -359,4 +359,79 @@ async fn reconnection_resumes_in_flight_attempts_with_backoff() {
     runner.abort();
     let pauses: Vec<u64> = std::iter::from_fn(|| pauses.try_recv().ok()).collect();
     assert_eq!(pauses, [1, 2, 4, 1]);
+}
+
+#[tokio::test]
+async fn full_log_window_backpressures_until_acknowledged_or_cancelled() {
+    let attempts = Attempts::default();
+    attempts.accept("A1");
+    // A disconnected build cannot retain more than the window.
+    for _ in 0..LOG_WINDOW {
+        attempts.log("A1", 0, vec![0; kajiba_exec::CHUNK]).await;
+    }
+    let blocked = attempts.log("A1", 0, b"next".to_vec());
+    tokio::pin!(blocked);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut blocked)
+            .await
+            .is_err()
+    );
+    let (outbound, mut sent) = mpsc::unbounded_channel();
+    attempts.attach(Some(outbound));
+    // Control traffic remains independent of a full log window.
+    attempts.send(Message::Heartbeat(Heartbeat {}));
+    assert_eq!(
+        sent.try_recv().unwrap().message,
+        Some(Message::Heartbeat(Heartbeat {}))
+    );
+    // Another attempt can still make progress while A1 is backpressured.
+    attempts.accept("A2");
+    sent.try_recv().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        attempts.log("A2", 0, b"other".to_vec()),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        sent.try_recv().unwrap().message,
+        Some(Message::LogChunk(_))
+    ));
+    attempts.receive(connect_response::Message::CancelAttempt(CancelAttempt {
+        attempt_id: "A2".into(),
+    }));
+    attempts.receive(connect_response::Message::LogAck(LogAck {
+        attempt_id: "A1".into(),
+        sequence: 1,
+    }));
+    tokio::time::timeout(Duration::from_secs(1), &mut blocked)
+        .await
+        .unwrap();
+    assert_eq!(
+        sent.try_recv().unwrap().message,
+        Some(chunk(LOG_WINDOW as u64 + 1, "next"))
+    );
+    assert_eq!(
+        attempts.0.lock().unwrap().attempts["A1"]
+            .unacknowledged
+            .len(),
+        LOG_WINDOW
+    );
+
+    // Cancellation must release the forwarding task even without an acknowledgment.
+    let blocked = attempts.log("A1", 0, b"cancelled".to_vec());
+    tokio::pin!(blocked);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut blocked)
+            .await
+            .is_err()
+    );
+    attempts.receive(connect_response::Message::CancelAttempt(CancelAttempt {
+        attempt_id: "A1".into(),
+    }));
+    tokio::time::timeout(Duration::from_secs(1), &mut blocked)
+        .await
+        .unwrap();
+    assert!(sent.try_recv().is_err());
+    assert!(attempts.ids().is_empty());
 }

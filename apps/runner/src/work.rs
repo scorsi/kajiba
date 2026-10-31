@@ -156,7 +156,7 @@ async fn execute<E: Executor>(
         let (log, mut output) = mpsc::channel(4);
         let forward = async {
             while let Some(data) = output.recv().await {
-                worker.attempts.log(id, index as u32, data);
+                worker.attempts.log(id, index as u32, data).await;
             }
         };
         let cancel = async {
