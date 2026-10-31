@@ -7,7 +7,7 @@ use kajiba_proto::runner::v1::{
 use std::pin::Pin;
 use tokio::sync::oneshot;
 use tokio_stream::{Stream, wrappers::ReceiverStream};
-use tonic::{Response, Streaming};
+use tonic::{Response, Streaming, transport::Endpoint};
 
 type Responses = mpsc::Receiver<Result<ConnectResponse, Status>>;
 
@@ -360,7 +360,10 @@ async fn reconnection_resumes_in_flight_attempts_with_backoff() {
     let (jobs, mut handed) = mpsc::channel(4);
     let (paused, mut pauses) = mpsc::unbounded_channel();
     let runner = tokio::spawn(run(
-        endpoint,
+        move || {
+            let endpoint = endpoint.clone();
+            async move { endpoint.connect().await }
+        },
         identity(),
         attempts.clone(),
         jobs,

@@ -2,13 +2,13 @@ mod cache;
 mod host;
 mod metrics;
 mod session;
+mod tls;
 mod work;
 
 use clap::{Parser, Subcommand};
 use kajiba_core::{config::RunnerConfig, log};
 use kajiba_proto::runner::v1::Capabilities;
 use std::{path::PathBuf, process::ExitCode, sync::Arc};
-use tonic::transport::{ClientTlsConfig, Endpoint};
 
 /// kajiba-runner — connects to a kajiba-server and executes jobs.
 #[derive(Debug, Parser)]
@@ -146,11 +146,7 @@ async fn serve(config: RunnerConfig) -> Result<(), String> {
     tracing::info!(event = "start", version = env!("CARGO_PKG_VERSION"));
     let _state_lock = host::prepare_state(&config.state_dir)?;
     host::check(&config.tls.key_file).await?;
-    // shortcut: system roots and no client certificate, until the SVID connector (milestones' Runner mTLS, task 7).
-    let endpoint = Endpoint::from_shared(config.url.clone())
-        .map_err(|err| format!("url: {err}"))?
-        .tls_config(ClientTlsConfig::new().with_native_roots())
-        .map_err(|err| format!("url: TLS: {err}"))?;
+    let (endpoint, tls) = tls::endpoint(&config.url, &config.tls)?;
     let identity = session::Identity {
         name: config.name.clone(),
         hostname: hostname(config.hostname.as_deref())?,
@@ -168,7 +164,7 @@ async fn serve(config: RunnerConfig) -> Result<(), String> {
     let (jobs, assigned) = tokio::sync::mpsc::channel(16);
     let attempts = session::Attempts::default();
     let client = kajiba_proto::runner::v1::runner_service_client::RunnerServiceClient::new(
-        endpoint.connect_lazy(),
+        endpoint.connect_with_connector_lazy(tls.clone()),
     );
     let worker = work::Worker {
         attempts: attempts.clone(),
@@ -179,7 +175,8 @@ async fn serve(config: RunnerConfig) -> Result<(), String> {
     };
     tokio::spawn(work::serve(worker, assigned));
     tracing::info!(event = "ready");
-    let connection = session::run(endpoint, identity, attempts, jobs, tokio::time::sleep);
+    let connect = || endpoint.connect_with_connector(tls.clone());
+    let connection = session::run(connect, identity, attempts, jobs, tokio::time::sleep);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|err| err.to_string())?;
     tokio::select! {

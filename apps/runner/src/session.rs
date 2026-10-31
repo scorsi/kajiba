@@ -17,10 +17,7 @@ use std::{
 };
 use tokio::sync::{Notify, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tonic::{
-    Request, Status,
-    transport::{Channel, Endpoint},
-};
+use tonic::{Request, Status, transport::Channel};
 
 /// ADR 0105: a heartbeat every 10 s; reconnection from 1 s doubling to 30 s.
 pub const HEARTBEAT: Duration = Duration::from_secs(10);
@@ -229,13 +226,13 @@ impl Attempts {
 
 /// One connection: hello, then heartbeats and server messages until the stream ends.
 /// The flag says whether the server admitted the runner.
-async fn session(
-    endpoint: &Endpoint,
+async fn session<F: Future<Output = Result<Channel, tonic::transport::Error>>>(
+    connect: &impl Fn() -> F,
     identity: &Identity,
     attempts: &Attempts,
     jobs: &mpsc::Sender<Job>,
 ) -> (bool, Status) {
-    let channel: Channel = match endpoint.connect().await {
+    let channel: Channel = match connect().await {
         Ok(channel) => channel,
         Err(err) => return (false, Status::unavailable(format!("connect: {err}"))),
     };
@@ -280,9 +277,13 @@ async fn session(
 }
 
 /// Stay connected: reconnect after `pause` with the backoff of 0105, from the first delay
-/// again once a connection was admitted.
-pub async fn run<F: Future<Output = ()>>(
-    endpoint: Endpoint,
+/// again once a connection was admitted. `connect` opens a new connection, so a new handshake
+/// presents the current SVID (0125).
+pub async fn run<
+    C: Future<Output = Result<Channel, tonic::transport::Error>>,
+    F: Future<Output = ()>,
+>(
+    connect: impl Fn() -> C,
     identity: Identity,
     attempts: Attempts,
     jobs: mpsc::Sender<Job>,
@@ -290,7 +291,7 @@ pub async fn run<F: Future<Output = ()>>(
 ) {
     let mut backoff = None;
     loop {
-        let (admitted, status) = session(&endpoint, &identity, &attempts, &jobs).await;
+        let (admitted, status) = session(&connect, &identity, &attempts, &jobs).await;
         if admitted {
             backoff = None;
         }

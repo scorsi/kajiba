@@ -2244,6 +2244,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "hyper-util",
  "kajiba-core",
  "kajiba-exec",
  "kajiba-gitstore",
@@ -2251,6 +2252,7 @@ dependencies = [
  "libc",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tonic",
  "tracing",
