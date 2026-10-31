@@ -19,8 +19,15 @@ signing_keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1AF8PoQ4lakrcKp00bfrycmCz
 sha256 = "9f2c1e0a4b7d3f8e6a5c2b1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f"
 scopes = ["repo:read", "ci:trigger"]
 
+[runner_listener]
+listen = "0.0.0.0:8443"
+trust_domain = "example.org"
+svid_file = "/var/lib/svid/kajiba-server/svid.pem"
+key_file = "/var/lib/svid/kajiba-server/key.pem"
+bundle_file = "/var/lib/svid/kajiba-server/bundle.pem"
+
 [runners.build-1]
-token_file = "/run/secrets/kajiba-runner-build-1"
+spiffe_id = "spiffe://example.org/build-1/kajiba-runner"
 
 [runners.build-1.capabilities]
 arch = "aarch64"

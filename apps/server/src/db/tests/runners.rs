@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 fn declared(runners: &str) -> BTreeMap<String, RunnerDeclaration> {
     ServerConfig::parse(&format!(
-        "[http]\npublic_url='https://example.org'\n{runners}"
+        "[http]\npublic_url='https://example.org'\n[runner_listener]\nlisten='127.0.0.1:8443'\ntrust_domain='example.org'\nsvid_file='/s'\nkey_file='/k'\nbundle_file='/b'\n{runners}"
     ))
     .unwrap()
     .runners
@@ -14,7 +14,7 @@ fn declared(runners: &str) -> BTreeMap<String, RunnerDeclaration> {
 
 fn runner(name: &str, capabilities: &str) -> String {
     format!(
-        "[runners.{name}]\ntoken_file='/run/secrets/{name}'\ncapabilities={{ {capabilities} }}\n"
+        "[runners.{name}]\nspiffe_id='spiffe://example.org/{name}/kajiba-runner'\ncapabilities={{ {capabilities} }}\n"
     )
 }
 

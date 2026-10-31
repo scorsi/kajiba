@@ -22,7 +22,7 @@ fn golden_exposition() {
     registry.run_finished("succeeded");
     // A run still going is not a result.
     registry.run_finished("running");
-    registry.runner_refused("secret");
+    registry.runner_refused("identity");
     registry.runner_refused("version");
     registry.runner_refused("version");
     registry.runner_refused("CREDENTIAL_INVALID");
@@ -80,13 +80,8 @@ fn labels_are_closed_and_version_is_escaped() {
     registry.observe(Kind::Other, "secret", Duration::ZERO);
     let output = registry.exposition("a\\b\"c\nd", [0; 4], [0; 4]);
     assert!(output.contains("version=\"a\\\\b\\\"c\\nd\""));
-    // `secret` is only a runner refusal reason, never an echoed label value.
-    assert!(
-        output
-            .lines()
-            .filter(|line| line.contains("secret"))
-            .eq(["kajiba_runner_refusals_total{reason=\"secret\"} 0"])
-    );
+    // `secret` is never an echoed label value.
+    assert!(!output.contains("secret"));
     for family in ["kajiba_handler_lag_events", "kajiba_handler_failures_total"] {
         let samples: Vec<_> = output
             .lines()
@@ -109,7 +104,7 @@ fn labels_are_closed_and_version_is_escaped() {
             "kajiba_pushes_total{result=\"refused\"} 0",
         ]
     );
-    assert_eq!(samples, 211);
+    assert_eq!(samples, 210);
     assert!(samples <= 500);
 }
 

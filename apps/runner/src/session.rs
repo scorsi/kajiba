@@ -40,18 +40,6 @@ pub struct Identity {
     pub name: String,
     pub hostname: String,
     pub capabilities: Capabilities,
-    /// The token file's content without surrounding whitespace, as the server compares it.
-    pub secret: String,
-}
-
-impl Identity {
-    pub fn authorize<T>(&self, request: &mut Request<T>) -> Result<(), Status> {
-        let value = format!("Bearer {}", self.secret).parse().map_err(|_| {
-            Status::invalid_argument("the token holds characters a header cannot carry")
-        })?;
-        request.metadata_mut().insert("authorization", value);
-        Ok(())
-    }
 }
 
 /// What the connection hands to the job side.
@@ -261,10 +249,7 @@ async fn session(
             in_flight_attempt_ids: attempts.reconcile(),
         })),
     });
-    let mut request = Request::new(UnboundedReceiverStream::new(receiver));
-    if let Err(status) = identity.authorize(&mut request) {
-        return (false, status);
-    }
+    let request = Request::new(UnboundedReceiverStream::new(receiver));
     let mut inbound = match RunnerServiceClient::new(channel).connect(request).await {
         Ok(response) => response.into_inner(),
         Err(status) => return (false, status),

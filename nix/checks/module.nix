@@ -43,7 +43,13 @@ let
             package = if native then kajibaRunnerPackage else inputs.self.packages.${linux}.kajiba-runner;
             name = "build-1";
             url = "https://forge.example.org";
-            tokenFile = "/run/secrets/kajiba-runner-build-1";
+            tls = {
+              trustDomain = "example.org";
+              serverId = "spiffe://example.org/forge/kajiba-server";
+              svidFile = "/var/lib/svid/kajiba-runner/svid.pem";
+              keyFile = "/var/lib/svid/kajiba-runner/key.pem";
+              bundleFile = "/var/lib/svid/kajiba-runner/bundle.pem";
+            };
           };
           services.kajiba-server = {
             enable = true;
@@ -61,7 +67,6 @@ let
       tags = [ "kvm" ];
       maxJobs = 2;
       stateDir = "/srv/kajiba-runner";
-      development = true;
       log.level = "debug";
       metrics.listen = "127.0.0.1:9432";
     };
@@ -101,8 +106,15 @@ let
           expires = "2030-01-01T00:00:00Z";
         };
       };
+      runnerListener = {
+        listen = "0.0.0.0:8443";
+        trustDomain = "example.org";
+        svidFile = "/var/lib/svid/kajiba-server/svid.pem";
+        keyFile = "/var/lib/svid/kajiba-server/key.pem";
+        bundleFile = "/var/lib/svid/kajiba-server/bundle.pem";
+      };
       runners.build-1 = {
-        tokenFile = "/run/secrets/kajiba-runner-build-1";
+        spiffeId = "spiffe://example.org/build-1/kajiba-runner";
         capabilities = {
           arch = "aarch64";
           os = "linux";
@@ -155,13 +167,18 @@ let
   expectedRunner = (pkgs.formats.toml { }).generate "expected-kajiba-runner.toml" {
     name = "build-1";
     url = "https://forge.example.org";
-    token_file = "/run/secrets/kajiba-runner-build-1";
+    tls = {
+      trust_domain = "example.org";
+      server_id = "spiffe://example.org/forge/kajiba-server";
+      svid_file = "/var/lib/svid/kajiba-runner/svid.pem";
+      key_file = "/var/lib/svid/kajiba-runner/key.pem";
+      bundle_file = "/var/lib/svid/kajiba-runner/bundle.pem";
+    };
     hostname = "vm-host.example.org";
     backends = [ "nix" ];
     tags = [ "kvm" ];
     max_jobs = 2;
     state_dir = "/srv/kajiba-runner";
-    development = true;
     log.level = "debug";
     metrics.listen = "127.0.0.1:9432";
   };
@@ -184,7 +201,13 @@ let
           package = kajibaRunnerPackage;
           name = "build-1";
           url = "https://forge.example.org";
-          tokenFile = "/run/secrets/kajiba-runner-build-1";
+          tls = {
+            trustDomain = "example.org";
+            serverId = "spiffe://example.org/forge/kajiba-server";
+            svidFile = "/var/lib/svid/kajiba-runner/svid.pem";
+            keyFile = "/var/lib/svid/kajiba-runner/key.pem";
+            bundleFile = "/var/lib/svid/kajiba-runner/bundle.pem";
+          };
         };
       }
     ];
@@ -238,8 +261,15 @@ let
         expires = "2030-01-01T00:00:00Z";
       };
     };
+    runner_listener = {
+      listen = "0.0.0.0:8443";
+      trust_domain = "example.org";
+      svid_file = "/var/lib/svid/kajiba-server/svid.pem";
+      key_file = "/var/lib/svid/kajiba-server/key.pem";
+      bundle_file = "/var/lib/svid/kajiba-server/bundle.pem";
+    };
     runners.build-1 = {
-      token_file = "/run/secrets/kajiba-runner-build-1";
+      spiffe_id = "spiffe://example.org/build-1/kajiba-runner";
       capabilities = {
         arch = "aarch64";
         os = "linux";
@@ -300,7 +330,7 @@ in
       (
         mode:
         assertionsPass {
-          systemd.tmpfiles.settings."10-kajiba-secret"."/run/secrets/kajiba-runner-build-1".f = {
+          systemd.tmpfiles.settings."10-kajiba-secret"."/var/lib/svid/kajiba-server/key.pem".f = {
             inherit mode;
             group = "kajiba-server";
           };
@@ -314,7 +344,7 @@ in
       (
         secret:
         !(assertionsPass {
-          systemd.tmpfiles.settings."10-kajiba-secret"."/run/secrets/kajiba-runner-build-1".f = secret;
+          systemd.tmpfiles.settings."10-kajiba-secret"."/var/lib/svid/kajiba-server/key.pem".f = secret;
         })
       )
       [
@@ -334,7 +364,7 @@ in
     assert
       !(assertionsPass {
         users.groups.kajiba-git.gid = 999;
-        systemd.tmpfiles.settings."10-kajiba-secret"."/run/secrets/kajiba-runner-build-1".f = {
+        systemd.tmpfiles.settings."10-kajiba-secret"."/var/lib/svid/kajiba-server/key.pem".f = {
           mode = "0640";
           group = "999";
         };
@@ -354,7 +384,7 @@ in
         !(assertionsPass {
           users.groups.shared-secret.gid = 4242;
           systemd.services.kajiba-git.serviceConfig.SupplementaryGroups = [ group ];
-          systemd.tmpfiles.settings."10-kajiba-secret"."/run/secrets/kajiba-runner-build-1".f = {
+          systemd.tmpfiles.settings."10-kajiba-secret"."/var/lib/svid/kajiba-server/key.pem".f = {
             mode = "0640";
             group = "shared-secret";
           };
@@ -371,7 +401,7 @@ in
       }).config.services.kajiba-server.git.groupIds == [ 4242 ];
     assert
       !(assertionsPass {
-        services.kajiba-server.runners.build-1.tokenFile = lib.mkForce "/etc/kajiba-secret";
+        services.kajiba-server.runnerListener.keyFile = lib.mkForce "/etc/kajiba-secret";
         environment.etc.kajiba-secret = {
           text = "test credential";
           mode = "0640";
@@ -653,7 +683,7 @@ in
         builtins.deepSeq
           (runnerFileOf (
             evaluate true {
-              services.kajiba-runner.tokenFile = lib.mkForce "${builtins.storeDir}/x";
+              services.kajiba-runner.tls.keyFile = lib.mkForce "${builtins.storeDir}/x";
             }
           )).drvPath
           true
@@ -867,7 +897,7 @@ in
     assert evaluationFails { services.kajiba-server.runners.build-1.token = "inline-secret"; };
     # Capabilities are required (0107): no default system.
     assert evaluationFails {
-      services.kajiba-server.runners.build-2.tokenFile = "/run/secrets/kajiba-runner-build-2";
+      services.kajiba-server.runners.build-2.spiffeId = "spiffe://example.org/build-2/kajiba-runner";
     };
     assert evaluationFails { services.kajiba-server.repos.demo.unexpected = true; };
     assert evaluationFails {
@@ -884,23 +914,20 @@ in
     };
     # A store path, literal or interpolated (with string context), is world-readable.
     assert lib.all
-      (
-        tokenFile:
-        evaluationFails { services.kajiba-server.runners.build-1.tokenFile = lib.mkForce tokenFile; }
-      )
+      (keyFile: evaluationFails { services.kajiba-server.runnerListener.keyFile = lib.mkForce keyFile; })
       [
         "${builtins.storeDir}/00000000000000000000000000000000-secret"
         "${pkgs.writeText "kajiba-secret" "DO-NOT-PRINT"}"
       ];
     assert
       !evaluationFails {
-        services.kajiba-server.runners.build-1.tokenFile = lib.mkForce "/run/secrets/nix-store-lookalike";
+        services.kajiba-server.runnerListener.keyFile = lib.mkForce "/run/secrets/nix-store-lookalike";
       };
     pkgs.runCommand "kajiba-module-eval" { } ''
       cmp ${configFile { }} ${expected}
       cmp ${runnerFileOf (evaluate true { })} ${expectedRunner}
-      # The default runner file holds only the three required fields.
-      [ "$(grep -c = ${runnerFileOf (evaluateWith true [ ])})" = 3 ]
+      # The default runner file holds only the required fields: name, url and the five of tls.
+      [ "$(grep -c = ${runnerFileOf (evaluateWith true [ ])})" = 7 ]
       cmp ${runnerFileOf darwin} ${runnerFileOf (evaluateWith true [ ])}
       ${lib.getExe kajibaGitPackage} config check ${
         (evaluate true { }).config.environment.etc."kajiba/git.toml".source
@@ -958,6 +985,13 @@ in
   };
   module-token-hash = refused "users.alice.tokens.ci.sha256" {
     services.kajiba-server.users.alice.tokens.ci.sha256 = lib.mkForce "not-a-hash";
+  };
+  module-runner-listener = refused "runner_listener: required to declare runners.build-1" {
+    services.kajiba-server.runnerListener = lib.mkForce null;
+  };
+  module-runner-id = refused "runners.build-1.spiffe_id" {
+    services.kajiba-server.runners.build-1.spiffeId =
+      lib.mkForce "spiffe://example.com/build-1/kajiba-runner";
   };
   module-runner-os = refused "runners.build-1.capabilities.os" {
     services.kajiba-server.runners.build-1.capabilities.os = lib.mkForce "macos";

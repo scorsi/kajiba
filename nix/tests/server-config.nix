@@ -8,7 +8,7 @@
   testLib,
 }:
 let
-  tokenFile = "/run/secrets/kajiba-runner-build-1";
+  tokenFile = "/run/secrets/kajiba-github-token";
 in
 pkgs.testers.runNixOSTest {
   name = "kajiba-server-config";
@@ -20,17 +20,11 @@ pkgs.testers.runNixOSTest {
       enable = true;
       package = kajibaServerPackage;
       http.publicUrl = "https://forge.example.org";
-      runners.build-1 = {
-        inherit tokenFile;
-        capabilities = {
-          arch = "x86_64";
-          os = "linux";
-        };
-      };
+      mirror.credentials.github = { inherit tokenFile; };
     };
     users.groups.shared-secret.gid = 4242;
     systemd.services.kajiba-git.serviceConfig.SupplementaryGroups = [ "4242" ];
-    # The runner secret exists only at runtime, readable by the service user alone (0019).
+    # The mirror credential exists only at runtime, readable by the service user alone (0019).
     systemd.tmpfiles.settings."10-kajiba-test" = {
       "/run/secrets".d.mode = "0755";
       ${tokenFile}.f = {
@@ -83,7 +77,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the generated file passes config check --files as the service user"):
         generated = machine.succeed(f"cat {config}")
-        assert f'token_file = "{token_file}"' in generated, f"runner token_file not in {config}: {generated!r}"
+        assert f'token_file = "{token_file}"' in generated, f"mirror token_file not in {config}: {generated!r}"
         machine.fail(f"runuser -u kajiba-git -- cat {token_file}")
         status, lines = check(config, files=True)
         assert status == 0 and lines == [], f"config check --files {config}: exit {status}, output {lines}"
@@ -138,7 +132,7 @@ pkgs.testers.runNixOSTest {
         invocation = machine.succeed(f"systemctl show -P InvocationID {unit}").strip()
         out = machine.succeed(f"journalctl _SYSTEMD_INVOCATION_ID={invocation} _SYSTEMD_UNIT={unit} -o cat --no-pager")
         lines = [json.loads(line) for line in out.splitlines()]
-        assert len(lines) == 1 and lines[0]["event"] == "config-invalid" and lines[0]["level"] == "error" and f"runners.build-1.token_file ({token_file})" in lines[0]["err"], f"failed invocation {invocation}: expected one config-invalid naming the file, got {lines}"
+        assert len(lines) == 1 and lines[0]["event"] == "config-invalid" and lines[0]["level"] == "error" and f"mirror.credentials.github.token_file ({token_file})" in lines[0]["err"], f"failed invocation {invocation}: expected one config-invalid naming the file, got {lines}"
         validate_logs(machine, unit)
         validate_logs(machine, "kajiba-git.service")
   '';

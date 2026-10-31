@@ -27,10 +27,15 @@ let
       backends
       tags
       ;
-    token_file = cfg.tokenFile;
+    tls = {
+      trust_domain = cfg.tls.trustDomain;
+      server_id = cfg.tls.serverId;
+      svid_file = cfg.tls.svidFile;
+      key_file = cfg.tls.keyFile;
+      bundle_file = cfg.tls.bundleFile;
+    };
     max_jobs = cfg.maxJobs;
     state_dir = if cfg.stateDir == defaultStateDir then null else cfg.stateDir;
-    development = if cfg.development then true else null;
     log = { inherit (cfg.log) level; };
     metrics = { inherit (cfg.metrics) listen; };
   };
@@ -45,15 +50,35 @@ in
     };
     url = mkOption {
       type = types.str;
-      example = "https://forge.example.org";
-      description = "Forge URL: https, or plain http to a loopback host in development mode (0104).";
+      example = "https://runners.forge.example.org";
+      description = "The forge's runner listener, always https (0124).";
     };
-    tokenFile = mkOption {
-      # A string, never a Nix path, so the secret is never copied to the world-readable store.
-      type = types.addCheck (types.strMatching "/.+") (
-        path: !(lib.hasPrefix "${builtins.storeDir}/" path) && !(builtins.hasContext path)
-      );
-      description = "Absolute path to the shared secret, read at runtime by the runner user (0008).";
+    tls = {
+      trustDomain = mkOption {
+        type = types.str;
+        example = "example.org";
+        description = "Trust domain of the runner's and the forge's SPIFFE IDs (0124).";
+      };
+      serverId = mkOption {
+        type = types.str;
+        example = "spiffe://example.org/forge/kajiba-server";
+        description = "The forge's SPIFFE ID, required of its certificate (0124).";
+      };
+      svidFile = mkOption {
+        type = types.strMatching "/.+";
+        description = "The runner's X.509-SVID, leaf first, reloaded when it changes (0125).";
+      };
+      keyFile = mkOption {
+        # A string, never a Nix path, so the key is never copied to the world-readable store.
+        type = types.addCheck (types.strMatching "/.+") (
+          path: !(lib.hasPrefix "${builtins.storeDir}/" path) && !(builtins.hasContext path)
+        );
+        description = "Absolute path to the SVID private key, read at runtime by the runner user (0124).";
+      };
+      bundleFile = mkOption {
+        type = types.strMatching "/.+";
+        description = "CA certificates the forge is verified against (0124).";
+      };
     };
     hostname =
       optional types.str "the OS hostname"
@@ -66,16 +91,11 @@ in
       default = defaultStateDir;
       description = "Source cache and scratch checkouts (0106).";
     };
-    development = mkOption {
-      type = types.bool;
-      default = false;
-      description = "Development mode: allow plain http to a loopback url (0104, 0110). Never in production.";
-    };
     log.level = optional types.str "info" "tracing filter, overridden by RUST_LOG (0022).";
     metrics.listen = optional types.str "no listener" "Loopback socket address of /metrics (0022).";
   };
 
-  # Structural check only: the token file exists at runtime, not at build time (0019).
+  # Structural check only: the SVID files exist at runtime, not at build time (0019).
   configFile =
     let
       raw = (pkgs.formats.toml { }).generate "kajiba-runner.toml" settings;

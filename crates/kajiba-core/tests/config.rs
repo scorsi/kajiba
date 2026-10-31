@@ -32,12 +32,18 @@ owner = "bob"
 description = ""
 "#;
 const MINIMAL: &str = "[http]\npublic_url = 'https://forge.example.org'\n";
-/// The capabilities a declared runner requires, appended after a runner's `token_file`.
-fn capabilities(table: &str) -> &'static str {
-    if table.starts_with("runners.") {
-        "\ncapabilities = { arch = 'x86_64', os = 'linux' }"
+const LISTENER: &str = "[runner_listener]\nlisten = '127.0.0.1:8443'\ntrust_domain = 'example.org'\nsvid_file = '/run/svid.pem'\nkey_file = '/run/key.pem'\nbundle_file = '/run/bundle.pem'\n";
+const RUNNER_MINIMAL: &str = "name='build-1'\nurl='https://example.org'\n[tls]\ntrust_domain='example.org'\nserver_id='spiffe://example.org/forge/kajiba-server'\nsvid_file='/run/svid.pem'\nkey_file='/run/key.pem'\nbundle_file='/run/bundle.pem'\n";
+/// The server table holding the secret file `path`: a mirror credential or the runner
+/// listener's key (its SVID and bundle name the same file, which only needs to exist).
+fn server_secret(table: &str, path: &Path) -> String {
+    if table == "runner_listener" {
+        LISTENER
+            .replace("/run/svid.pem", &path.display().to_string())
+            .replace("/run/key.pem", &path.display().to_string())
+            .replace("/run/bundle.pem", &path.display().to_string())
     } else {
-        ""
+        format!("[{table}]\ntoken_file='{}'", path.display())
     }
 }
 
@@ -124,9 +130,7 @@ fn defaults_match_adr_tables() {
     let user = &user.users["alice"];
     assert!(!user.is_admin);
     assert!(user.ssh_keys.is_empty() && user.signing_keys.is_empty() && user.tokens.is_empty());
-    let runner =
-        RunnerConfig::parse("name='build-1'\nurl='https://example.org'\ntoken_file='/missing'")
-            .unwrap();
+    let runner = RunnerConfig::parse(RUNNER_MINIMAL).unwrap();
     assert_eq!(runner.backends, [Backend::Nix]);
     assert!(runner.tags.is_empty());
     assert_eq!(runner.max_jobs, 1);
@@ -147,6 +151,7 @@ fn unknown_fields_are_rejected_at_every_table() {
         "auth",
         "users.alice",
         "users.alice.tokens.ci",
+        "runner_listener",
         "runners.build-1",
         "runners.build-1.capabilities",
         "mirror",
@@ -172,13 +177,14 @@ fn unknown_fields_are_rejected_at_every_table() {
     for input in [
         format!("typo=true\n{RUNNER}"),
         format!("{RUNNER}\n[log.extra]\ntypo=true"),
+        RUNNER.replace("[tls]", "[tls]\ntypo=true"),
     ] {
         runner_error(
             &input,
-            if input.starts_with("typo") {
-                "typo"
-            } else {
+            if input.contains("[log.extra]") {
                 "extra"
+            } else {
+                "typo"
             },
         );
     }
@@ -430,7 +436,15 @@ fn required_fields_urls_and_ranges_are_checked() {
     for (input, field) in [("", "http"), ("[http]", "public_url")] {
         server_error(input, field);
     }
-    for field in ["name", "url", "token_file"] {
+    for field in [
+        "name",
+        "url",
+        "trust_domain",
+        "server_id",
+        "svid_file",
+        "key_file",
+        "bundle_file",
+    ] {
         let input = RUNNER
             .lines()
             .filter(|line| !line.starts_with(&format!("{field} =")))
@@ -438,6 +452,14 @@ fn required_fields_urls_and_ranges_are_checked() {
             .join("\n");
         runner_error(&input, field);
     }
+    runner_error(
+        &RUNNER
+            .lines()
+            .take_while(|line| *line != "[tls]")
+            .collect::<Vec<_>>()
+            .join("\n"),
+        "tls",
+    );
     for value in [
         "example.org",
         "/relative",
@@ -453,7 +475,10 @@ fn required_fields_urls_and_ranges_are_checked() {
             &SERVER.replace("https://forge.example.org", value),
             "http.public_url",
         );
-        runner_error(&RUNNER.replace("https://forge.example.org", value), "url");
+        runner_error(
+            &RUNNER.replace("https://runners.forge.example.org", value),
+            "url",
+        );
     }
     for value in [
         "https://forge.example.org/x",
@@ -479,13 +504,146 @@ fn required_fields_urls_and_ranges_are_checked() {
     runner_error(&RUNNER.replace("max_jobs = 1", "max_jobs = -1"), "max_jobs");
     runner_error(&RUNNER.replace("[\"nix\"]", "[\"unknown\"]"), "backends");
     server_error(&format!("{MINIMAL}\n[dump]\nkeep=-1"), "dump.keep");
+}
+
+#[test]
+fn the_runner_listener_and_runner_ids_are_checked() {
+    let server = ServerConfig::parse(SERVER).unwrap();
+    let listener = server.runner_listener.as_ref().unwrap();
+    assert_eq!(listener.listen.to_string(), "0.0.0.0:8443");
+    assert_eq!(listener.trust_domain, "example.org");
+    assert_eq!(
+        server.runners["build-1"].spiffe_id,
+        "spiffe://example.org/build-1/kajiba-runner"
+    );
+    let without = format!(
+        "{}{}",
+        &SERVER[..SERVER.find("[runner_listener]").unwrap()],
+        &SERVER[SERVER.find("[runners.build-1]").unwrap()..]
+    );
+    server_error(
+        &without,
+        "runner_listener: required to declare runners.build-1",
+    );
+    // A listener alone is valid: no runner is declared yet.
+    ServerConfig::parse(&format!("{MINIMAL}{LISTENER}")).unwrap();
+    for field in [
+        "listen",
+        "trust_domain",
+        "svid_file",
+        "key_file",
+        "bundle_file",
+    ] {
+        let input = SERVER
+            .lines()
+            .filter(|line| !line.starts_with(&format!("{field} =")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        server_error(&input, field);
+    }
+    for (from, to, field) in [
+        ("0.0.0.0:8443", "0.0.0.0:0", "runner_listener.listen"),
+        (
+            "trust_domain = \"example.org\"",
+            "trust_domain = \"Example.org\"",
+            "runner_listener.trust_domain",
+        ),
+        (
+            "bundle_file = \"/var/lib/svid/kajiba-server/bundle.pem\"",
+            "bundle_file = ''",
+            "runner_listener.bundle_file",
+        ),
+        (
+            "spiffe://example.org/build-1/kajiba-runner",
+            "spiffe://other.example.org/build-1/kajiba-runner",
+            "runners.build-1.spiffe_id",
+        ),
+        (
+            "spiffe://example.org/build-1/kajiba-runner",
+            "spiffe://example.org/kajiba-runner",
+            "runners.build-1.spiffe_id",
+        ),
+        (
+            "spiffe://example.org/build-1/kajiba-runner",
+            "https://example.org/build-1/kajiba-runner",
+            "runners.build-1.spiffe_id",
+        ),
+    ] {
+        assert!(SERVER.contains(from), "{from}");
+        server_error(&SERVER.replace(from, to), field);
+    }
     server_error(
         &SERVER.replace(
-            "token_file = \"/run/secrets/kajiba-runner-build-1\"",
-            "token_file = ''",
+            "[runners.build-1]\n",
+            "[runners.build-1]\ntoken_file = '/run/secrets/runner'\n",
         ),
-        "runners.build-1.token_file",
+        "token_file",
     );
+    let twice = format!(
+        "{SERVER}\n[runners.build-2]\nspiffe_id = 'spiffe://example.org/build-1/kajiba-runner'\ncapabilities = {{ arch = 'x86_64', os = 'linux' }}"
+    );
+    server_error(
+        &twice,
+        "runners.build-2.spiffe_id: already declared by runners.build-1",
+    );
+}
+
+#[test]
+fn the_runner_uses_https_and_its_tls_table() {
+    let runner = RunnerConfig::parse(RUNNER).unwrap();
+    assert_eq!(runner.tls.trust_domain, "example.org");
+    assert_eq!(
+        runner.tls.server_id,
+        "spiffe://example.org/forge/kajiba-server"
+    );
+    assert_eq!(
+        runner.tls.key_file,
+        Path::new("/var/lib/svid/kajiba-runner/key.pem")
+    );
+    // Development mode is gone (0124): loopback included, the URL is https.
+    for url in [
+        "http://127.0.0.1:8080",
+        "http://localhost",
+        "http://runners.forge.example.org",
+    ] {
+        runner_error(
+            &RUNNER.replace("https://runners.forge.example.org", url),
+            "url: must be https",
+        );
+    }
+    RunnerConfig::parse(&RUNNER.replace("https://runners.forge.example.org", "HTTPS://[::1]:8443"))
+        .unwrap();
+    for removed in ["development = true", "token_file = '/run/secrets/token'"] {
+        runner_error(
+            &format!("{removed}\n{RUNNER}"),
+            removed.split(' ').next().unwrap(),
+        );
+    }
+    for (from, to, field) in [
+        (
+            "trust_domain = \"example.org\"",
+            "trust_domain = \"example.org/x\"",
+            "tls.trust_domain",
+        ),
+        (
+            "spiffe://example.org/forge/kajiba-server",
+            "spiffe://other.example.org/forge/kajiba-server",
+            "tls.server_id",
+        ),
+        (
+            "spiffe://example.org/forge/kajiba-server",
+            "spiffe://example.org/forge/kajiba-server/x",
+            "tls.server_id",
+        ),
+        (
+            "svid_file = \"/var/lib/svid/kajiba-runner/svid.pem\"",
+            "svid_file = ''",
+            "tls.svid_file",
+        ),
+    ] {
+        assert!(RUNNER.contains(from), "{from}");
+        runner_error(&RUNNER.replace(from, to), field);
+    }
 }
 
 #[test]
@@ -580,7 +738,19 @@ fn secret_files_must_not_be_accessible_to_others_and_symlinks_are_followed() {
     symlink(&secret, &link).unwrap();
     let runner = |path: &Path| {
         RunnerConfig::parse(
-            &RUNNER.replace("/run/secrets/kajiba-runner-build-1", path.to_str().unwrap()),
+            &RUNNER
+                .replace(
+                    "/var/lib/svid/kajiba-runner/key.pem",
+                    path.to_str().unwrap(),
+                )
+                .replace(
+                    "/var/lib/svid/kajiba-runner/svid.pem",
+                    path.to_str().unwrap(),
+                )
+                .replace(
+                    "/var/lib/svid/kajiba-runner/bundle.pem",
+                    path.to_str().unwrap(),
+                ),
         )
         .unwrap()
         .check_files()
@@ -594,7 +764,7 @@ fn secret_files_must_not_be_accessible_to_others_and_symlinks_are_followed() {
         std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
         for path in [&secret, &link] {
             let error = runner(path).unwrap_err();
-            assert!(error.contains("token_file"), "{error}");
+            assert!(error.contains("tls.key_file"), "{error}");
             assert!(
                 error.contains("group-writable or accessible by others"),
                 "{error}"
@@ -612,12 +782,11 @@ fn server_secrets_reject_known_git_side_gids_for_every_credential() {
     let secret = dir.private_file("secret");
     std::fs::write(&secret, "DO-NOT-PRINT").unwrap();
     let gid = std::fs::metadata(&secret).unwrap().gid();
-    for table in ["runners.build-1", "mirror.credentials.github"] {
+    for table in ["runner_listener", "mirror.credentials.github"] {
         for git_gid in [gid, gid.wrapping_add(1)] {
             let config = ServerConfig::parse(&format!(
-                "{MINIMAL}\n[git]\ngroup_ids=[{git_gid}]\n[{table}]\ntoken_file='{}'{}",
-                secret.display(),
-                capabilities(table)
+                "{MINIMAL}\n[git]\ngroup_ids=[{git_gid}]\n{}",
+                server_secret(table, &secret)
             ))
             .unwrap();
             for mode in [0o600, 0o640] {
@@ -651,12 +820,11 @@ fn server_secrets_reject_configured_git_users_primary_group() {
     chown(&secret, None, Some(gid)).unwrap();
     let link = dir.0.join("link");
     std::os::unix::fs::symlink(&secret, &link).unwrap();
-    for table in ["runners.build-1", "mirror.credentials.github"] {
+    for table in ["runner_listener", "mirror.credentials.github"] {
         for path in [&secret, &link] {
             let config = ServerConfig::parse(&format!(
-                "{MINIMAL}\n[git]\nuser='{user}'\n[{table}]\ntoken_file='{}'{}",
-                path.display(),
-                capabilities(table)
+                "{MINIMAL}\n[git]\nuser='{user}'\n{}",
+                server_secret(table, path)
             ))
             .unwrap();
             assert!(config.git.group_ids.is_empty());
@@ -680,13 +848,9 @@ fn server_secret_modes_are_checked_for_every_credential() {
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new("server-secret-modes");
     let secret = dir.private_file("secret");
-    for table in ["runners.build-1", "mirror.credentials.github"] {
-        let config = ServerConfig::parse(&format!(
-            "{MINIMAL}\n[{table}]\ntoken_file='{}'{}",
-            secret.display(),
-            capabilities(table)
-        ))
-        .unwrap();
+    for table in ["runner_listener", "mirror.credentials.github"] {
+        let config =
+            ServerConfig::parse(&format!("{MINIMAL}\n{}", server_secret(table, &secret))).unwrap();
         for mode in [0o600, 0o640, 0o620, 0o660, 0o601, 0o604] {
             std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
             let result = config.check_files();
@@ -726,9 +890,10 @@ fn config_reads_are_bounded_and_refuse_special_files_without_blocking() {
             .unwrap_err()
             .contains("expected a regular file")
     );
-    let runner = RunnerConfig::parse(
-        &RUNNER.replace("/run/secrets/kajiba-runner-build-1", fifo.to_str().unwrap()),
-    )
+    let runner = RunnerConfig::parse(&RUNNER.replace(
+        "/var/lib/svid/kajiba-runner/svid.pem",
+        fifo.to_str().unwrap(),
+    ))
     .unwrap();
     assert!(
         runner
@@ -741,20 +906,31 @@ fn config_reads_are_bounded_and_refuse_special_files_without_blocking() {
 #[test]
 fn file_checks_open_every_secret_path_and_report_the_field() {
     // These paths deliberately do not exist: structural validation must never open them.
-    let config =
-        ServerConfig::parse(&SERVER.replace("/run/secrets/", "/kajiba-test-missing/")).unwrap();
+    let config = ServerConfig::parse(
+        &SERVER
+            .replace("/run/secrets/", "/kajiba-test-missing/")
+            .replace("/var/lib/svid/", "/kajiba-test-missing/"),
+    )
+    .unwrap();
     assert!(
         config
             .check_files()
             .unwrap_err()
-            .contains("runners.build-1.token_file")
+            .contains("runner_listener.svid_file")
     );
     let dir = TempDir::new("files");
     let existing = dir.private_file("secret");
-    let input = SERVER.replace(
-        "/run/secrets/kajiba-runner-build-1",
-        existing.to_str().unwrap(),
-    );
+    let svid = |input: &str, side: &str| {
+        ["svid", "key", "bundle"]
+            .iter()
+            .fold(input.to_owned(), |input, file| {
+                input.replace(
+                    &format!("/var/lib/svid/{side}/{file}.pem"),
+                    existing.to_str().unwrap(),
+                )
+            })
+    };
+    let input = svid(SERVER, "kajiba-server");
     let config = ServerConfig::parse(&input).unwrap();
     assert!(
         config
@@ -767,19 +943,26 @@ fn file_checks_open_every_secret_path_and_report_the_field() {
         existing.to_str().unwrap(),
     );
     assert!(ServerConfig::parse(&input).unwrap().check_files().is_ok());
-    let runner = RUNNER.replace(
-        "/run/secrets/kajiba-runner-build-1",
-        existing.to_str().unwrap(),
-    );
+    let runner = svid(RUNNER, "kajiba-runner");
     assert!(RunnerConfig::parse(&runner).unwrap().check_files().is_ok());
-    let runner = runner.replace(existing.to_str().unwrap(), env!("CARGO_MANIFEST_DIR"));
-    assert!(
-        RunnerConfig::parse(&runner)
-            .unwrap()
-            .check_files()
-            .unwrap_err()
-            .contains("token_file")
-    );
+    for (file, field) in [
+        ("svid", "tls.svid_file"),
+        ("key", "tls.key_file"),
+        ("bundle", "tls.bundle_file"),
+    ] {
+        let runner = RUNNER.replace(
+            &format!("/var/lib/svid/kajiba-runner/{file}.pem"),
+            env!("CARGO_MANIFEST_DIR"),
+        );
+        let runner = svid(&runner, "kajiba-runner");
+        assert!(
+            RunnerConfig::parse(&runner)
+                .unwrap()
+                .check_files()
+                .unwrap_err()
+                .contains(field)
+        );
+    }
 }
 
 #[test]
@@ -800,9 +983,9 @@ fn malformed_key_types_and_toml_do_not_echo_material() {
 
 #[test]
 fn declared_runner_capabilities_are_required_and_validated() {
-    let runner = "[runners.build-1]\ntoken_file = '/run/secrets/runner'\n";
+    let runner = "[runners.build-1]\nspiffe_id = 'spiffe://example.org/build-1/kajiba-runner'\n";
     let minimal = ServerConfig::parse(&format!(
-        "{MINIMAL}{runner}capabilities = {{ arch = 'x86_64', os = 'darwin' }}"
+        "{MINIMAL}{LISTENER}{runner}capabilities = {{ arch = 'x86_64', os = 'darwin' }}"
     ))
     .unwrap();
     let declared = &minimal.runners["build-1"].capabilities;
@@ -810,7 +993,7 @@ fn declared_runner_capabilities_are_required_and_validated() {
     assert_eq!(declared.backends, [Backend::Nix]);
     assert!(declared.tags.is_empty());
     assert_eq!(declared.max_jobs, 1);
-    server_error(&format!("{MINIMAL}{runner}"), "capabilities");
+    server_error(&format!("{MINIMAL}{LISTENER}{runner}"), "capabilities");
     let fixture_capabilities = "arch = \"aarch64\"\nos = \"linux\"";
     for (replacement, field) in [
         ("os = \"linux\"", "arch"),
@@ -857,9 +1040,16 @@ fn declared_credentials_and_tokens_require_their_fields() {
             .join("\n");
         server_error(&input, field);
     }
-    for table in ["runners.build-1", "mirror.credentials.github"] {
-        server_error(&format!("{MINIMAL}\n[{table}]"), "token_file");
-    }
+    server_error(
+        &format!("{MINIMAL}\n[mirror.credentials.github]"),
+        "token_file",
+    );
+    server_error(
+        &format!(
+            "{MINIMAL}{LISTENER}\n[runners.build-1]\ncapabilities = {{ arch = 'x86_64', os = 'linux' }}"
+        ),
+        "spiffe_id",
+    );
 }
 
 #[test]
@@ -872,19 +1062,16 @@ fn log_levels_validate_target_directives_for_both_components() {
             ))
             .is_ok()
         );
-        assert!(RunnerConfig::parse(&format!(
-            "name='build-1'\nurl='https://example.org'\ntoken_file='/run/secrets/token'\n{section}"
-        ))
-        .is_ok());
+        assert!(RunnerConfig::parse(&format!("{RUNNER_MINIMAL}{section}")).is_ok());
     }
     for input in [
-        "[http]\npublic_url='https://example.org'\n[log]\nlevel='kajiba=verbose'",
-        "name='build-1'\nurl='https://example.org'\ntoken_file='/run/secrets/token'\n[log]\nlevel='kajiba=verbose'",
+        "[http]\npublic_url='https://example.org'\n[log]\nlevel='kajiba=verbose'".to_owned(),
+        format!("{RUNNER_MINIMAL}[log]\nlevel='kajiba=verbose'"),
     ] {
         let error = if input.starts_with("[http]") {
-            ServerConfig::parse(input).unwrap_err()
+            ServerConfig::parse(&input).unwrap_err()
         } else {
-            RunnerConfig::parse(input).unwrap_err()
+            RunnerConfig::parse(&input).unwrap_err()
         };
         assert!(error.contains("log.level"), "{error}");
     }
@@ -1154,25 +1341,13 @@ fn git_side_paths_are_absolute_and_configurable() {
 }
 
 #[test]
-fn runner_hostname_and_development_mode() {
+fn runner_hostname() {
     let runner = RunnerConfig::parse(RUNNER).unwrap();
-    assert_eq!((runner.hostname, runner.development), (None, false));
+    assert_eq!(runner.hostname, None);
     let runner =
         RunnerConfig::parse(&format!("hostname = \"vm-host.example.org\"\n{RUNNER}")).unwrap();
     assert_eq!(runner.hostname.as_deref(), Some("vm-host.example.org"));
     for hostname in ["''", "\"a\\u0007b\"", &format!("'{}'", "a".repeat(254))] {
         runner_error(&format!("hostname = {hostname}\n{RUNNER}"), "hostname");
     }
-    // The credential rule of ADR 0104: loopback http only in development mode.
-    let loopback = RUNNER.replace("https://forge.example.org", "http://127.0.0.1:8080");
-    runner_error(&loopback, "url: refusing to send a credential");
-    let runner = RunnerConfig::parse(&format!("development = true\n{loopback}")).unwrap();
-    assert!(runner.development);
-    runner_error(
-        &format!(
-            "development = true\n{}",
-            RUNNER.replace("https://", "http://")
-        ),
-        "url: refusing to send a credential",
-    );
 }

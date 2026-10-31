@@ -205,9 +205,8 @@ kajiba_auth_refusals_total{reason="SCOPE_MISSING"} 2
 kajiba_runners_connected 2
 # HELP kajiba_runner_refusals_total Runner connections refused at admission.
 # TYPE kajiba_runner_refusals_total counter
-kajiba_runner_refusals_total{reason="unknown"} 0
+kajiba_runner_refusals_total{reason="identity"} 1
 kajiba_runner_refusals_total{reason="disabled"} 0
-kajiba_runner_refusals_total{reason="secret"} 1
 kajiba_runner_refusals_total{reason="version"} 2
 kajiba_runner_refusals_total{reason="capabilities"} 0
 # HELP kajiba_runs_total Finished runs.

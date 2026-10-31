@@ -14,8 +14,8 @@ use std::{
 
 pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 pub const HANDLERS: [&str; 4] = ["ci", "mirror", "notifier", "webhook"];
-/// `runner-refused` reasons (0108).
-const RUNNER_REASONS: [&str; 5] = ["unknown", "disabled", "secret", "version", "capabilities"];
+/// `runner-refused` reasons (0108, 0124).
+const RUNNER_REASONS: [&str; 4] = ["identity", "disabled", "version", "capabilities"];
 /// Terminal run states counted by `kajiba_runs_total` (0022).
 const RUN_RESULTS: [&str; 3] = ["succeeded", "failed", "cancelled"];
 const KINDS: [&str; 6] = ["grpc", "grpc_web", "git_http", "raw", "ui", "other"];

@@ -1,4 +1,5 @@
-//! `kajiba.runner.v1` admission (0008, 0026, 0105, 0108): served on the public port,
+//! `kajiba.runner.v1` admission (0008, 0026, 0105, 0108, 0124): a runner is the declared one
+//! whose `spiffe_id` is its verified certificate's [`Peer`] ID, a request extension;
 //! outside the `kajiba.v1` auth layer and the request timeout.
 
 use super::{
@@ -17,6 +18,7 @@ use crate::{
     metrics::Registry,
 };
 use kajiba_core::config::{Capabilities, RunnerDeclaration};
+use kajiba_core::svid::Peer;
 use kajiba_gitstore::{Abort, GitStore, Gix};
 use kajiba_proto::runner::v1::{
     Assignment, CancelAttempt, ConnectRequest, ConnectResponse, ContinueAttempt,
@@ -32,7 +34,7 @@ use std::{
 };
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
-use tonic::{Request, Response, Status, Streaming, metadata::MetadataMap};
+use tonic::{Request, Response, Status, Streaming};
 
 /// Declared runners and the bus their events wake, set once startup has reconciled them.
 pub struct Declared {
@@ -65,7 +67,6 @@ type Outbound = mpsc::Sender<Result<ConnectResponse, Status>>;
 
 struct Live {
     generation: u64,
-    secret: Vec<u8>,
     replaced: oneshot::Sender<()>,
     outbound: Outbound,
     offer: Offer,
@@ -137,9 +138,8 @@ pub async fn admission(
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reason {
-    Unknown,
+    Identity,
     Disabled,
-    Secret,
     Version,
     Capabilities,
 }
@@ -147,26 +147,32 @@ pub enum Reason {
 impl Reason {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Unknown => "unknown",
+            Self::Identity => "identity",
             Self::Disabled => "disabled",
-            Self::Secret => "secret",
             Self::Version => "version",
             Self::Capabilities => "capabilities",
         }
     }
 }
 
-fn bearer(metadata: &MetadataMap) -> Option<&[u8]> {
-    metadata
-        .get("authorization")?
-        .as_bytes()
-        .strip_prefix(b"Bearer ")
+/// The declared runner whose `spiffe_id` is the verified peer's ID (0124).
+fn declared_by<'a>(
+    runners: &'a BTreeMap<String, RunnerDeclaration>,
+    peer: Option<&Peer>,
+) -> Option<(&'a str, &'a RunnerDeclaration)> {
+    let peer = peer?;
+    runners
+        .iter()
+        .find(|(_, declaration)| declaration.spiffe_id == peer.id)
+        .map(|(name, declaration)| (name.as_str(), declaration))
 }
 
-/// Compare digests so the time taken does not depend on where the secrets differ.
-fn same_secret(a: &[u8], b: &[u8]) -> bool {
-    let (a, b) = (kajiba_core::sha256(a), kajiba_core::sha256(b));
-    a.iter().zip(b).fold(0, |diff, (x, y)| diff | (x ^ y)) == 0
+fn unauthenticated() -> Status {
+    refused(
+        tonic::Code::Unauthenticated,
+        "CREDENTIAL_INVALID",
+        "the certificate is not a declared runner's".into(),
+    )
 }
 
 /// Configuration enums compare by their TOML name.
@@ -238,22 +244,24 @@ impl Runners {
         tracing::warn!(event = "runner-refused", runner, reason = reason.as_str());
     }
 
+    /// An ID of no declared runner, or of another runner than the hello's (0124): logged
+    /// with the ID, not journaled.
+    fn refuse_identity(&self, runner: &str, peer: Option<&Peer>) {
+        let reason = Reason::Identity.as_str();
+        self.registry.runner_refused(reason);
+        let spiffe_id = peer.map_or("", |peer| peer.id.as_str());
+        tracing::warn!(event = "runner-refused", runner, reason, spiffe_id);
+    }
+
     /// Check the hello against the declaration; on success the row is connected and the
     /// stream registered, replacing an older one under the same name.
     async fn admit(
         &self,
-        secret: Option<Vec<u8>>,
+        peer: Option<&Peer>,
         hello: &Hello,
         request_id: &str,
         outbound: Outbound,
     ) -> Result<(i64, u64, oneshot::Receiver<()>), Status> {
-        let unauthenticated = || {
-            refused(
-                tonic::Code::Unauthenticated,
-                "CREDENTIAL_INVALID",
-                "unknown runner or wrong secret".into(),
-            )
-        };
         let declared =
             self.health.runners.get().ok_or_else(|| {
                 refused(tonic::Code::Unavailable, "MAINTENANCE", "starting".into())
@@ -263,8 +271,7 @@ impl Runners {
             .writer
             .get()
             .ok_or_else(|| internal("no writer"))?;
-        // A rejected name may be a misplaced secret: logged only once known (0022).
-        let Some(declaration) = declared.runners.get(&hello.name) else {
+        let Some((name, declaration)) = declared_by(&declared.runners, peer) else {
             let mut writer = writer.lock().await;
             let disabled: Option<i64> = sqlx::query_scalar(
                 "SELECT 1 FROM runner WHERE name = ? AND disabled_at IS NOT NULL",
@@ -274,24 +281,15 @@ impl Runners {
             .await
             .map_err(internal)?;
             drop(writer);
+            // An unverified hello name is logged only once known (0022).
             match disabled {
                 Some(_) => self.refuse(&hello.name, Reason::Disabled),
-                None => self.refuse("", Reason::Unknown),
+                None => self.refuse_identity("", peer),
             }
             return Err(unauthenticated());
         };
-        let name = hello.name.as_str();
-        let expected = tokio::fs::read(&declaration.token_file)
-            .await
-            .map_err(|err| {
-                internal(format!(
-                    "runners.{name}.token_file ({}): {err}",
-                    declaration.token_file.display()
-                ))
-            })?;
-        // A secret file usually ends with a newline; metadata cannot carry one.
-        if !secret.is_some_and(|secret| same_secret(&secret, expected.trim_ascii())) {
-            self.refuse(name, Reason::Secret);
+        if name != hello.name {
+            self.refuse_identity(name, peer);
             return Err(unauthenticated());
         }
         if hello.hostname.len() > MAX_HOSTNAME || hello.hostname.chars().any(char::is_control) {
@@ -336,7 +334,7 @@ impl Runners {
         };
         if let Some((reason, status)) = refusal {
             self.refuse(name, reason);
-            // The secret was proven: the refusal is journaled (0108).
+            // The identity was proven: the refusal is journaled (0108).
             journal(
                 &mut writer,
                 &declared.bus,
@@ -370,7 +368,6 @@ impl Runners {
                 name.to_owned(),
                 Live {
                     generation,
-                    secret: expected.trim_ascii().to_vec(),
                     replaced,
                     outbound,
                     offer,
@@ -482,28 +479,6 @@ impl Runners {
             return;
         };
         let bus = &declared.bus;
-        // Rotation revokes existing streams too, including stalled ones (0008, 0105).
-        let credentials: Vec<_> = self
-            .live
-            .lock()
-            .unwrap()
-            .1
-            .iter()
-            .map(|(name, live)| {
-                (
-                    name.clone(),
-                    live.generation,
-                    live.offer.runner_id,
-                    live.secret.clone(),
-                )
-            })
-            .collect();
-        for (name, generation, id, secret) in credentials {
-            let current = tokio::fs::read(&declared.runners[&name].token_file).await;
-            if !current.is_ok_and(|current| same_secret(&secret, current.trim_ascii())) {
-                self.disconnected(id, &name, generation, "").await;
-            }
-        }
         let mut writer = writer.lock().await;
         let result = async {
             let mut tx = writer.begin().await?;
@@ -802,7 +777,7 @@ impl RunnerService for Runners {
         &self,
         request: Request<Streaming<ConnectRequest>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
-        let secret = bearer(request.metadata()).map(<[u8]>::to_vec);
+        let peer = request.extensions().get::<Peer>().cloned();
         let request_id = request
             .extensions()
             .get::<super::correlation::RequestId>()
@@ -817,7 +792,7 @@ impl RunnerService for Runners {
         };
         let (outbound, receiver) = mpsc::channel(16);
         let (id, generation, mut replaced) = self
-            .admit(secret, &hello, &request_id, outbound.clone())
+            .admit(peer.as_ref(), &hello, &request_id, outbound.clone())
             .await?;
         let runners = self.clone();
         tokio::spawn(async move {
@@ -857,12 +832,13 @@ impl RunnerService for Runners {
         &self,
         request: Request<FetchRunBundleRequest>,
     ) -> Result<Response<Self::FetchRunBundleStream>, Status> {
-        let secret = bearer(request.metadata()).map(<[u8]>::to_vec);
+        let peer = request.extensions().get::<Peer>().cloned();
         let FetchRunBundleRequest {
             attempt_id,
             mut have,
         } = request.into_inner();
-        let ((runner, name), (repo, sha, run, trigger)) = self.leased(secret, &attempt_id).await?;
+        let ((runner, name), (repo, sha, run, trigger)) =
+            self.leased(peer.as_ref(), &attempt_id).await?;
         let max_jobs = self
             .health
             .runners
@@ -1066,19 +1042,12 @@ impl std::io::Write for Chunks {
 impl Runners {
     /// The runner (id, name), then the repository public id, commit, run public id and
     /// trigger of an attempt that is its job's current one, still leased and held by the
-    /// runner whose secret is presented (0106).
+    /// runner whose certificate is presented (0106, 0124).
     async fn leased(
         &self,
-        secret: Option<Vec<u8>>,
+        peer: Option<&Peer>,
         attempt: &str,
     ) -> Result<((i64, String), (String, String, String, String)), Status> {
-        let unauthenticated = || {
-            refused(
-                tonic::Code::Unauthenticated,
-                "CREDENTIAL_INVALID",
-                "unknown runner or wrong secret".into(),
-            )
-        };
         let (Some(declared), Some(database)) =
             (self.health.runners.get(), self.health.database.get())
         else {
@@ -1096,19 +1065,11 @@ impl Runners {
         .fetch_optional(&mut *connection)
         .await
         .map_err(internal)?;
-        let Some((id, name)) = holder.filter(|(_, name)| declared.runners.contains_key(name))
-        else {
-            self.refuse("", Reason::Unknown);
+        let caller = declared_by(&declared.runners, peer).map(|(name, _)| name);
+        let Some((id, name)) = holder.filter(|(_, name)| caller == Some(name.as_str())) else {
+            self.refuse_identity(caller.unwrap_or(""), peer);
             return Err(unauthenticated());
         };
-        let declaration = &declared.runners[&name];
-        let expected = tokio::fs::read(&declaration.token_file)
-            .await
-            .map_err(|err| internal(format!("runners.{name}.token_file: {err}")))?;
-        if !secret.is_some_and(|secret| same_secret(&secret, expected.trim_ascii())) {
-            self.refuse(&name, Reason::Secret);
-            return Err(unauthenticated());
-        }
         let current = current_lease(&mut connection, id, attempt)
             .await
             .map_err(internal)?

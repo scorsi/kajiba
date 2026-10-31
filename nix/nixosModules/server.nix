@@ -37,9 +37,9 @@ let
       description = "Named credentials; the secret itself is only a file path.";
     };
 
-  secretPaths = map (credential: credential.tokenFile) (
-    lib.attrValues cfg.runners ++ lib.attrValues cfg.mirror.credentials
-  );
+  secretPaths =
+    map (credential: credential.tokenFile) (lib.attrValues cfg.mirror.credentials)
+    ++ lib.optional (cfg.runnerListener != null) cfg.runnerListener.keyFile;
   gitUser = config.users.users.kajiba-git;
   gitGroups = lib.unique (
     [
@@ -138,8 +138,19 @@ let
       signing_keys = map lib.trim user.signingKeys;
       inherit (user) tokens;
     }) cfg.users;
+    runner_listener =
+      if cfg.runnerListener == null then
+        null
+      else
+        {
+          inherit (cfg.runnerListener) listen;
+          trust_domain = cfg.runnerListener.trustDomain;
+          svid_file = cfg.runnerListener.svidFile;
+          key_file = cfg.runnerListener.keyFile;
+          bundle_file = cfg.runnerListener.bundleFile;
+        };
     runners = lib.mapAttrs (_: runner: {
-      token_file = runner.tokenFile;
+      spiffe_id = runner.spiffeId;
       capabilities = {
         inherit (runner.capabilities)
           arch
@@ -410,11 +421,44 @@ in
       default = { };
       description = "Declared users, by name (0014).";
     };
+    runnerListener = mkOption {
+      type = types.nullOr (
+        types.submodule {
+          options = {
+            listen = mkOption {
+              type = types.str;
+              example = "0.0.0.0:8443";
+              description = "Socket address of the TLS listener serving only kajiba.runner.v1 (0124).";
+            };
+            trustDomain = mkOption {
+              type = types.str;
+              example = "example.org";
+              description = "Trust domain of the forge's and the runners' SPIFFE IDs (0124).";
+            };
+            svidFile = mkOption {
+              type = types.strMatching "/.+";
+              description = "The forge's X.509-SVID, leaf first, reloaded when it changes (0125).";
+            };
+            keyFile = secretFile "the forge's SVID private key (0124)";
+            bundleFile = mkOption {
+              type = types.strMatching "/.+";
+              description = "CA certificates runners are verified against (0124).";
+            };
+          };
+        }
+      );
+      default = null;
+      description = "The runner listener; required once a runner is declared (0124).";
+    };
     runners = mkOption {
       type = types.attrsOf (
         types.submodule {
           options = {
-            tokenFile = secretFile "the runner's shared secret (0008)";
+            spiffeId = mkOption {
+              type = types.str;
+              example = "spiffe://example.org/build-1/kajiba-runner";
+              description = "The runner's SPIFFE ID, in the listener's trust domain (0124).";
+            };
             capabilities = {
               arch = mkOption {
                 type = types.str;

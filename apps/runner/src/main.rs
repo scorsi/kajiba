@@ -34,7 +34,7 @@ enum Command {
 enum ConfigCommand {
     /// Validate configuration without contacting the forge.
     Check {
-        /// Also open the token file.
+        /// Also open the SVID, key and bundle files.
         #[arg(long)]
         files: bool,
         path: PathBuf,
@@ -145,29 +145,16 @@ async fn main() -> ExitCode {
 async fn serve(config: RunnerConfig) -> Result<(), String> {
     tracing::info!(event = "start", version = env!("CARGO_PKG_VERSION"));
     let _state_lock = host::prepare_state(&config.state_dir)?;
-    host::check(&config.token_file).await?;
-    let secret = std::fs::read(&config.token_file)
-        .map_err(|err| format!("token_file ({}): {err}", config.token_file.display()))?;
-    let secret = String::from_utf8(secret.trim_ascii().to_vec())
-        .map_err(|_| "token_file: not UTF-8".to_owned())?;
-    let mut endpoint =
-        Endpoint::from_shared(config.url.clone()).map_err(|err| format!("url: {err}"))?;
-    if kajiba_core::transport::credential_tls(&config.url, config.development)? {
-        endpoint = endpoint
-            .tls_config(ClientTlsConfig::new().with_native_roots())
-            .map_err(|err| format!("url: TLS: {err}"))?;
-    } else {
-        tracing::warn!(
-            event = "development-mode",
-            msg = "sending the runner secret over plain http",
-            url = config.url
-        );
-    }
+    host::check(&config.tls.key_file).await?;
+    // shortcut: system roots and no client certificate, until the SVID connector (milestones' Runner mTLS, task 7).
+    let endpoint = Endpoint::from_shared(config.url.clone())
+        .map_err(|err| format!("url: {err}"))?
+        .tls_config(ClientTlsConfig::new().with_native_roots())
+        .map_err(|err| format!("url: TLS: {err}"))?;
     let identity = session::Identity {
         name: config.name.clone(),
         hostname: hostname(config.hostname.as_deref())?,
         capabilities: capabilities(&config),
-        secret,
     };
     let metrics = Arc::new(metrics::Metrics::default());
     if let Some(listen) = config.metrics.listen {
@@ -185,11 +172,7 @@ async fn serve(config: RunnerConfig) -> Result<(), String> {
     );
     let worker = work::Worker {
         attempts: attempts.clone(),
-        cache: Arc::new(cache::Cache::new(
-            &config.state_dir,
-            client,
-            identity.clone(),
-        )),
+        cache: Arc::new(cache::Cache::new(&config.state_dir, client)),
         executor: kajiba_exec::Nix::default(),
         metrics,
         max_jobs: config.max_jobs as usize,
@@ -247,11 +230,11 @@ mod tests {
     fn config_check_loads_the_adr_example() {
         let config = load_config(EXAMPLE.as_ref(), false).unwrap();
         assert_eq!(config.name, "build-1");
-        // `--files` opens the token file, absent here.
+        // `--files` opens the SVID files, absent here.
         assert!(
             load_config(EXAMPLE.as_ref(), true)
                 .unwrap_err()
-                .starts_with("token_file")
+                .starts_with("tls.svid_file")
         );
     }
 

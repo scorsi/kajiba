@@ -36,6 +36,8 @@ pub struct ServerConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub users: BTreeMap<String, UserConfig>,
+    /// Required once a runner is declared (0124).
+    pub runner_listener: Option<RunnerListenerConfig>,
     #[serde(default)]
     pub runners: BTreeMap<String, RunnerDeclaration>,
     #[serde(default)]
@@ -200,11 +202,22 @@ pub struct CredentialConfig {
     pub token_file: PathBuf,
 }
 
-/// A declared runner (0026): its secret and the capabilities it may announce.
+/// The TLS listener serving only `kajiba.runner.v1` (0124) and the forge's SVID files (0125).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerListenerConfig {
+    pub listen: SocketAddr,
+    pub trust_domain: String,
+    pub svid_file: PathBuf,
+    pub key_file: PathBuf,
+    pub bundle_file: PathBuf,
+}
+
+/// A declared runner (0026, 0124): its SPIFFE ID and the capabilities it may announce.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerDeclaration {
-    pub token_file: PathBuf,
+    pub spiffe_id: String,
     pub capabilities: Capabilities,
 }
 
@@ -363,8 +376,9 @@ impl Default for DumpConfig {
 #[serde(deny_unknown_fields)]
 pub struct RunnerConfig {
     pub name: String,
+    /// Always `https` (0124).
     pub url: String,
-    pub token_file: PathBuf,
+    pub tls: RunnerTlsConfig,
     #[serde(default = "backends")]
     pub backends: Vec<Backend>,
     #[serde(default)]
@@ -375,13 +389,21 @@ pub struct RunnerConfig {
     pub state_dir: PathBuf,
     /// Shown by the server, never used for authorization; the OS hostname when absent.
     pub hostname: Option<String>,
-    /// Plain `http` to a loopback `url` (ADR 0104); off by default.
-    #[serde(default)]
-    pub development: bool,
     #[serde(default)]
     pub log: LogConfig,
     #[serde(default)]
     pub metrics: MetricsConfig,
+}
+
+/// The runner's SVID files and the forge's expected ID (0124, 0125).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerTlsConfig {
+    pub trust_domain: String,
+    pub server_id: String,
+    pub svid_file: PathBuf,
+    pub key_file: PathBuf,
+    pub bundle_file: PathBuf,
 }
 
 /// Longest hostname a runner reports (the server refuses longer ones).
@@ -933,8 +955,32 @@ impl ServerConfig {
                 }
             }
         }
+        if let Some(listener) = &config.runner_listener {
+            if listener.listen.port() == 0 {
+                return Err("runner_listener.listen: port must be nonzero".into());
+            }
+            crate::svid::check_trust_domain(&listener.trust_domain)
+                .map_err(|err| format!("runner_listener.trust_domain: {err}"))?;
+            for (path, field) in [
+                (&listener.svid_file, "svid_file"),
+                (&listener.key_file, "key_file"),
+                (&listener.bundle_file, "bundle_file"),
+            ] {
+                validate_path(path, &format!("runner_listener.{field}"))?;
+            }
+        }
+        let mut ids = BTreeMap::new();
         for (name, runner) in &config.runners {
-            validate_path(&runner.token_file, &format!("runners.{name}.token_file"))?;
+            let field = format!("runners.{name}.spiffe_id");
+            let listener = config
+                .runner_listener
+                .as_ref()
+                .ok_or_else(|| format!("runner_listener: required to declare runners.{name}"))?;
+            crate::svid::check_id(&runner.spiffe_id, &listener.trust_domain)
+                .map_err(|err| format!("{field}: {err}"))?;
+            if let Some(first) = ids.insert(&runner.spiffe_id, name) {
+                return Err(format!("{field}: already declared by runners.{first}"));
+            }
             let field = format!("runners.{name}.capabilities");
             if runner.capabilities.max_jobs == 0 {
                 return Err(format!("{field}.max_jobs: must be greater than zero"));
@@ -962,12 +1008,14 @@ impl ServerConfig {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(format!("git.user: cannot resolve primary group: {err}")),
         }
-        for (name, credential) in &self.runners {
+        if let Some(listener) = &self.runner_listener {
+            open_regular(&listener.svid_file, "runner_listener.svid_file")?;
             open_server_secret(
-                &credential.token_file,
-                &format!("runners.{name}.token_file"),
+                &listener.key_file,
+                "runner_listener.key_file",
                 &git_group_ids,
             )?;
+            open_regular(&listener.bundle_file, "runner_listener.bundle_file")?;
         }
         for (name, credential) in &self.mirror.credentials {
             open_server_secret(
@@ -1005,8 +1053,17 @@ impl RunnerConfig {
         crate::log::filter(&config.log.level, None)?;
         config.name = validate_name(&config.name).map_err(|err| format!("name: {err}"))?;
         url_host(&config.url, "url")?;
-        crate::transport::credential_tls(&config.url, config.development)
-            .map_err(|err| format!("url: {err}"))?;
+        if !config
+            .url
+            .get(..6)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https:"))
+        {
+            return Err("url: must be https (0124)".into());
+        }
+        crate::svid::check_trust_domain(&config.tls.trust_domain)
+            .map_err(|err| format!("tls.trust_domain: {err}"))?;
+        crate::svid::check_id(&config.tls.server_id, &config.tls.trust_domain)
+            .map_err(|err| format!("tls.server_id: {err}"))?;
         if config.hostname.as_ref().is_some_and(|hostname| {
             hostname.is_empty()
                 || hostname.len() > MAX_HOSTNAME
@@ -1017,7 +1074,13 @@ impl RunnerConfig {
             ));
         }
         validate_metrics(&config.metrics)?;
-        validate_path(&config.token_file, "token_file")?;
+        for (path, field) in [
+            (&config.tls.svid_file, "tls.svid_file"),
+            (&config.tls.key_file, "tls.key_file"),
+            (&config.tls.bundle_file, "tls.bundle_file"),
+        ] {
+            validate_path(path, field)?;
+        }
         validate_path(&config.state_dir, "state_dir")?;
         if config.max_jobs == 0 {
             return Err("max_jobs: must be greater than zero".into());
@@ -1026,7 +1089,9 @@ impl RunnerConfig {
     }
 
     pub fn check_files(&self) -> Result<(), String> {
-        open_file(&self.token_file, "token_file").map(drop)
+        open_regular(&self.tls.svid_file, "tls.svid_file")?;
+        open_file(&self.tls.key_file, "tls.key_file")?;
+        open_regular(&self.tls.bundle_file, "tls.bundle_file").map(drop)
     }
 }
 

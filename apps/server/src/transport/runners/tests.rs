@@ -7,8 +7,15 @@ use kajiba_proto::runner::v1::{
 use tokio::sync::watch;
 use tonic::transport::Channel;
 
-const SECRET: &str = "runner-secret";
-const OTHER_SECRET: &str = "other-runner-secret";
+const BUILD_1: &str = "spiffe://example.org/build-1/kajiba-runner";
+const BUILD_2: &str = "spiffe://example.org/build-2/kajiba-runner";
+/// The ID `gone` held while it was declared.
+const GONE: &str = "spiffe://example.org/gone/kajiba-runner";
+/// An ID the CA issued to a host that is no declared runner.
+const UNDECLARED: &str = "spiffe://example.org/other/kajiba-runner";
+/// The test client names its verified ID in this header, which [`verified`] turns into the
+/// [`Peer`] extension the TLS listener sets (0124).
+const PEER: &str = "x-test-spiffe-id";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const SHA: &str = "1111111111111111111111111111111111111111";
 
@@ -22,34 +29,23 @@ struct Forge {
 
 impl Forge {
     /// `build-1` (aarch64-linux, nix and process, tag kvm, 2 jobs) and `build-2` (same,
-    /// another secret) are declared; `gone` was declared once and is disabled.
+    /// another ID) are declared; `gone` was declared once and is disabled.
     async fn state() -> State {
         let state = State::new();
         state.start().await;
-        let dir = &state.health.state_dir;
-        let token = dir.join("runner-token");
-        std::fs::write(&token, format!("{SECRET}\n")).unwrap();
-        let other = dir.join("other-token");
-        std::fs::write(&other, OTHER_SECRET).unwrap();
-        let runner_with = |name: &str, token: &std::path::Path| {
+        let runner = |name: &str| {
             format!(
-                "[runners.{name}]\ntoken_file = {:?}\n[runners.{name}.capabilities]\narch = 'aarch64'\nos = 'linux'\nbackends = ['nix', 'process']\ntags = ['kvm']\nmax_jobs = 2\n",
-                token.display()
+                "[runners.{name}]\nspiffe_id = 'spiffe://example.org/{name}/kajiba-runner'\n[runners.{name}.capabilities]\narch = 'aarch64'\nos = 'linux'\nbackends = ['nix', 'process']\ntags = ['kvm']\nmax_jobs = 2\n",
             )
         };
-        let runner = |name: &str| runner_with(name, &token);
         let config = |runners: &str| {
             ServerConfig::parse(&format!(
-                "[http]\npublic_url = 'https://example.org'\n{runners}"
+                "[http]\npublic_url = 'https://example.org'\n[runner_listener]\nlisten = '127.0.0.1:8443'\ntrust_domain = 'example.org'\nsvid_file = '/svid.pem'\nkey_file = '/key.pem'\nbundle_file = '/bundle.pem'\n{runners}"
             ))
             .unwrap()
         };
         let before = config(&format!("{}{}", runner("build-1"), runner("gone")));
-        let config = config(&format!(
-            "{}{}",
-            runner("build-1"),
-            runner_with("build-2", &other)
-        ));
+        let config = config(&format!("{}{}", runner("build-1"), runner("build-2")));
         {
             let mut writer = state.health.writer.get().unwrap().lock().await;
             crate::db::runners::reconcile_runners(&mut writer, &before.runners, 1)
@@ -78,7 +74,8 @@ impl Forge {
             registry.clone(),
             "https://example.org",
         )
-        .unwrap();
+        .unwrap()
+        .layer(axum::middleware::from_fn(verified));
         let (stop, stopped) = watch::channel(false);
         let server = tokio::spawn(serve_tcp(listener, app, PUBLIC, stopped));
         let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
@@ -98,7 +95,7 @@ impl Forge {
 
     async fn connect(
         &self,
-        secret: Option<&str>,
+        peer: Option<&str>,
         hello: Hello,
     ) -> Result<(mpsc::Sender<ConnectRequest>, Streaming<ConnectResponse>), Status> {
         let (sender, receiver) = mpsc::channel(4);
@@ -109,10 +106,8 @@ impl Forge {
             .await
             .unwrap();
         let mut request = Request::new(ReceiverStream::new(receiver));
-        if let Some(secret) = secret {
-            request
-                .metadata_mut()
-                .insert("authorization", format!("Bearer {secret}").parse().unwrap());
+        if let Some(peer) = peer {
+            request.metadata_mut().insert(PEER, peer.parse().unwrap());
         }
         let response = self.client.clone().connect(request).await?;
         Ok((sender, response.into_inner()))
@@ -209,6 +204,25 @@ impl Drop for Forge {
     }
 }
 
+fn peer(id: &str) -> Peer {
+    Peer {
+        id: id.into(),
+        not_after: std::time::UNIX_EPOCH + Duration::from_secs(4_102_444_800),
+    }
+}
+
+/// Sets the [`Peer`] extension named by the [`PEER`] header, as the TLS listener does.
+async fn verified(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if let Some(id) = request.headers().get(PEER).and_then(|id| id.to_str().ok()) {
+        let peer = peer(id);
+        request.extensions_mut().insert(peer);
+    }
+    next.run(request).await
+}
+
 type RunnerRow = (String, Option<String>, bool, Option<i64>, Option<i64>);
 
 fn hello(name: &str) -> Hello {
@@ -239,22 +253,12 @@ async fn a_stalled_runner_does_not_block_matching_or_lease_expiry() {
     let (stalled, _unread) = mpsc::channel(1);
     stalled.try_send(Ok(cancel("unknown"))).unwrap();
     let (stalled_id, generation, mut ended) = runners
-        .admit(
-            Some(SECRET.as_bytes().to_vec()),
-            &hello("build-1"),
-            "test",
-            stalled,
-        )
+        .admit(Some(&peer(BUILD_1)), &hello("build-1"), "test", stalled)
         .await
         .unwrap();
     let (healthy, mut received) = mpsc::channel(4);
     runners
-        .admit(
-            Some(OTHER_SECRET.as_bytes().to_vec()),
-            &hello("build-2"),
-            "test",
-            healthy,
-        )
+        .admit(Some(&peer(BUILD_2)), &hello("build-2"), "test", healthy)
         .await
         .unwrap();
     let now = crate::db::runs::now();
@@ -349,22 +353,12 @@ async fn a_frozen_runner_does_not_consume_replays_with_a_healthy_alternative() {
     let runners = Runners::new(state.health.clone(), Arc::default());
     let (frozen, mut frozen_received) = mpsc::channel(4);
     let (frozen_id, _, _frozen_session) = runners
-        .admit(
-            Some(SECRET.as_bytes().to_vec()),
-            &hello("build-1"),
-            "test",
-            frozen,
-        )
+        .admit(Some(&peer(BUILD_1)), &hello("build-1"), "test", frozen)
         .await
         .unwrap();
     let (healthy, mut healthy_received) = mpsc::channel(4);
     let (healthy_id, _, _healthy_session) = runners
-        .admit(
-            Some(OTHER_SECRET.as_bytes().to_vec()),
-            &hello("build-2"),
-            "test",
-            healthy,
-        )
+        .admit(Some(&peer(BUILD_2)), &hello("build-2"), "test", healthy)
         .await
         .unwrap();
     let now = crate::db::runs::now();
@@ -427,85 +421,6 @@ async fn a_frozen_runner_does_not_consume_replays_with_a_healthy_alternative() {
 }
 
 #[tokio::test]
-async fn rotating_a_secret_revokes_only_streams_using_the_previous_secret() {
-    for remove in [false, true] {
-        let state = Forge::state().await;
-        let runners = Runners::new(state.health.clone(), Arc::default());
-        let (outbound, _unread) = mpsc::channel(1);
-        outbound.try_send(Ok(cancel("unknown"))).unwrap();
-        let (_, old_generation, mut ended) = runners
-            .admit(
-                Some(SECRET.as_bytes().to_vec()),
-                &hello("build-1"),
-                "test",
-                outbound,
-            )
-            .await
-            .unwrap();
-        let (outbound, _received) = mpsc::channel(1);
-        let (_, _, mut unaffected) = runners
-            .admit(
-                Some(OTHER_SECRET.as_bytes().to_vec()),
-                &hello("build-2"),
-                "test",
-                outbound,
-            )
-            .await
-            .unwrap();
-        runners.pass(crate::db::runs::now()).await;
-        assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Empty));
-
-        let token = state.health.state_dir.join("runner-token");
-        if remove {
-            std::fs::remove_file(&token).unwrap();
-        } else {
-            std::fs::write(&token, "rotated-secret\n").unwrap();
-        }
-        tokio::time::timeout(Duration::from_secs(1), runners.pass(crate::db::runs::now()))
-            .await
-            .expect("revocation blocked on an unread response queue");
-        assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Closed));
-        assert_eq!(
-            unaffected.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        );
-        assert!(!runners.live.lock().unwrap().1.contains_key("build-1"));
-        let mut writer = state.health.writer.get().unwrap().lock().await;
-        assert!(
-            !sqlx::query_scalar::<_, bool>("SELECT connected FROM runner WHERE name = 'build-1'")
-                .fetch_one(&mut *writer)
-                .await
-                .unwrap()
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM event WHERE kind = 'runner-disconnected'"
-            )
-            .fetch_one(&mut *writer)
-            .await
-            .unwrap(),
-            1
-        );
-        drop(writer);
-        if !remove {
-            let (outbound, _received) = mpsc::channel(1);
-            let (_, generation, mut current) = runners
-                .admit(
-                    Some(b"rotated-secret".to_vec()),
-                    &hello("build-1"),
-                    "test",
-                    outbound,
-                )
-                .await
-                .unwrap();
-            assert_ne!(generation, old_generation);
-            runners.pass(crate::db::runs::now()).await;
-            assert_eq!(current.try_recv(), Err(oneshot::error::TryRecvError::Empty));
-        }
-    }
-}
-
-#[tokio::test]
 async fn each_refusal_has_its_code_reason_metric_and_journal_entry() {
     let forge = Forge::start().await;
     let capabilities = |change: fn(&mut Announced)| {
@@ -515,35 +430,42 @@ async fn each_refusal_has_its_code_reason_metric_and_journal_entry() {
     };
     let cases: Vec<(Option<&str>, Hello, tonic::Code, &str, &str)> = vec![
         (
-            Some(SECRET),
+            Some(BUILD_1),
             hello("nobody"),
             tonic::Code::Unauthenticated,
             "CREDENTIAL_INVALID",
-            "unknown",
+            "identity",
         ),
         (
-            Some(SECRET),
+            Some(BUILD_2),
+            hello("build-1"),
+            tonic::Code::Unauthenticated,
+            "CREDENTIAL_INVALID",
+            "identity",
+        ),
+        (
+            Some(GONE),
             hello("gone"),
             tonic::Code::Unauthenticated,
             "CREDENTIAL_INVALID",
             "disabled",
         ),
         (
-            Some("wrong"),
+            Some(UNDECLARED),
             hello("build-1"),
             tonic::Code::Unauthenticated,
             "CREDENTIAL_INVALID",
-            "secret",
+            "identity",
         ),
         (
             None,
             hello("build-1"),
             tonic::Code::Unauthenticated,
             "CREDENTIAL_INVALID",
-            "secret",
+            "identity",
         ),
         (
-            Some(SECRET),
+            Some(BUILD_1),
             Hello {
                 version: other_minor(),
                 ..hello("build-1")
@@ -553,42 +475,42 @@ async fn each_refusal_has_its_code_reason_metric_and_journal_entry() {
             "version",
         ),
         (
-            Some(SECRET),
+            Some(BUILD_1),
             capabilities(|c| c.arch = "x86_64".into()),
             tonic::Code::InvalidArgument,
             "INVALID_FIELD",
             "capabilities",
         ),
         (
-            Some(SECRET),
+            Some(BUILD_1),
             capabilities(|c| c.os = "darwin".into()),
             tonic::Code::InvalidArgument,
             "INVALID_FIELD",
             "capabilities",
         ),
         (
-            Some(SECRET),
+            Some(BUILD_1),
             capabilities(|c| c.backends.push("microvm".into())),
             tonic::Code::InvalidArgument,
             "INVALID_FIELD",
             "capabilities",
         ),
         (
-            Some(SECRET),
+            Some(BUILD_1),
             capabilities(|c| c.tags.push("gpu".into())),
             tonic::Code::InvalidArgument,
             "INVALID_FIELD",
             "capabilities",
         ),
         (
-            Some(SECRET),
+            Some(BUILD_1),
             capabilities(|c| c.max_jobs = 3),
             tonic::Code::InvalidArgument,
             "INVALID_FIELD",
             "capabilities",
         ),
         (
-            Some(SECRET),
+            Some(BUILD_1),
             Hello {
                 capabilities: None,
                 ..hello("build-1")
@@ -599,9 +521,9 @@ async fn each_refusal_has_its_code_reason_metric_and_journal_entry() {
         ),
     ];
     let mut journaled = Vec::new();
-    for (secret, hello, code, expected, why) in cases {
+    for (peer, hello, code, expected, why) in cases {
         let version = hello.version.clone();
-        let status = forge.connect(secret, hello).await.unwrap_err();
+        let status = forge.connect(peer, hello).await.unwrap_err();
         assert_eq!(
             (status.code(), reason(&status).as_str()),
             (code, expected),
@@ -610,7 +532,7 @@ async fn each_refusal_has_its_code_reason_metric_and_journal_entry() {
         if why == "version" {
             assert!(status.message().contains(&version) && status.message().contains(VERSION));
         }
-        // Only a caller holding the secret may grow the journal (0108).
+        // Only a caller holding the runner's certificate may grow the journal (0108).
         if matches!(why, "version" | "capabilities") {
             journaled.push(why);
         }
@@ -631,9 +553,8 @@ async fn each_refusal_has_its_code_reason_metric_and_journal_entry() {
         journaled
     );
     for (reason, count) in [
-        ("unknown", 1),
+        ("identity", 4),
         ("disabled", 1),
-        ("secret", 2),
         ("version", 1),
         ("capabilities", 6),
     ] {
@@ -659,7 +580,7 @@ async fn admission_records_the_runner_and_a_newer_connection_replaces_the_older(
     let patched = format!("{major}.{minor}.{}", patch + 1);
     let (_first, mut first_stream) = forge
         .connect(
-            Some(SECRET),
+            Some(BUILD_1),
             Hello {
                 version: patched.clone(),
                 ..hello("build-1")
@@ -677,7 +598,10 @@ async fn admission_records_the_runner_and_a_newer_connection_replaces_the_older(
     assert!(row[0].3.is_some() && row[0].4.is_none());
     assert!(forge.metric("kajiba_runners_connected 1"));
 
-    let (second, _second_stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let (second, _second_stream) = forge
+        .connect(Some(BUILD_1), hello("build-1"))
+        .await
+        .unwrap();
     let ended = tokio::time::timeout(Duration::from_secs(5), first_stream.message())
         .await
         .unwrap()
@@ -739,7 +663,7 @@ async fn a_stream_must_open_with_a_hello() {
     let mut request = Request::new(ReceiverStream::new(receiver));
     request
         .metadata_mut()
-        .insert("authorization", format!("Bearer {SECRET}").parse().unwrap());
+        .insert(PEER, BUILD_1.parse().unwrap());
     let status = forge.client.clone().connect(request).await.unwrap_err();
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
     let status = forge
@@ -786,17 +710,21 @@ async fn connection_logs_name_the_runner_and_the_request_method() {
                 refused[0]["reason"].as_str(),
                 refused[0]["runner"].as_str()
             ),
-            (Some("warn"), Some("unknown"), Some(""))
+            (Some("warn"), Some("identity"), Some(""))
         );
+        assert_eq!(refused[0]["spiffe_id"], UNDECLARED);
         assert!(
             !stderr.contains("not-a-runner"),
-            "an unknown name is never logged"
+            "an unverified name is never logged"
         );
         assert_eq!(
-            (refused[1]["reason"].as_str(), refused[1]["runner"].as_str()),
-            (Some("secret"), Some("build-1"))
+            (
+                refused[1]["reason"].as_str(),
+                refused[1]["runner"].as_str(),
+                refused[1]["spiffe_id"].as_str()
+            ),
+            (Some("identity"), Some("build-2"), Some(BUILD_2))
         );
-        assert!(!stderr.contains("wrong-secret") && !stderr.contains(SECRET));
         let connected = find("runner-connected");
         assert_eq!(connected.len(), 1, "{stderr}");
         assert_eq!(connected[0]["runner"], "build-1");
@@ -813,14 +741,17 @@ async fn connection_logs_name_the_runner_and_the_request_method() {
     kajiba_core::log::init("info").unwrap();
     let forge = Forge::start().await;
     forge
-        .connect(Some(SECRET), hello("not-a-runner"))
+        .connect(Some(UNDECLARED), hello("not-a-runner"))
         .await
         .unwrap_err();
     forge
-        .connect(Some("wrong-secret"), hello("build-1"))
+        .connect(Some(BUILD_2), hello("build-1"))
         .await
         .unwrap_err();
-    let (sender, stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let (sender, stream) = forge
+        .connect(Some(BUILD_1), hello("build-1"))
+        .await
+        .unwrap();
     drop((sender, stream));
     forge
         .until(
@@ -851,7 +782,10 @@ async fn a_pending_job_is_assigned_to_an_admitted_runner_and_accepted() {
             1,
         )
         .await;
-    let (sender, mut stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let (sender, mut stream) = forge
+        .connect(Some(BUILD_1), hello("build-1"))
+        .await
+        .unwrap();
     let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
         panic!("expected an assignment");
     };
@@ -921,7 +855,10 @@ async fn logs_and_results_are_acknowledged_and_counted() {
     use kajiba_proto::runner::v1::{Accept, LogChunk, Result as RunResult};
     let forge = Forge::start().await;
     let run = forge.run().await;
-    let (sender, mut stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let (sender, mut stream) = forge
+        .connect(Some(BUILD_1), hello("build-1"))
+        .await
+        .unwrap();
     let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
         panic!("expected an assignment");
     };
@@ -1015,7 +952,10 @@ async fn a_reconnected_runner_continues_its_attempt_and_resends_unacknowledged_l
     use kajiba_proto::runner::v1::{Accept, ContinueAttempt, LogChunk};
     let forge = Forge::start().await;
     forge.run().await;
-    let (sender, mut stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let (sender, mut stream) = forge
+        .connect(Some(BUILD_1), hello("build-1"))
+        .await
+        .unwrap();
     let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
         panic!("expected an assignment");
     };
@@ -1052,7 +992,7 @@ async fn a_reconnected_runner_continues_its_attempt_and_resends_unacknowledged_l
     let unknown = "7ZZZZZZZZZZZZZZZZZZZZZZZZZ".to_owned();
     let (sender, mut stream) = forge
         .connect(
-            Some(SECRET),
+            Some(BUILD_1),
             Hello {
                 in_flight_attempt_ids: vec![attempt.clone(), unknown.clone()],
                 ..hello("build-1")
@@ -1091,7 +1031,7 @@ async fn a_reconnected_runner_continues_its_attempt_and_resends_unacknowledged_l
 impl Forge {
     async fn bundle(
         &self,
-        secret: Option<&str>,
+        peer: Option<&str>,
         attempt: &str,
         have: &[&str],
     ) -> Result<String, Status> {
@@ -1099,10 +1039,8 @@ impl Forge {
             attempt_id: attempt.into(),
             have: have.iter().map(|id| id.to_string()).collect(),
         });
-        if let Some(secret) = secret {
-            request
-                .metadata_mut()
-                .insert("authorization", format!("Bearer {secret}").parse().unwrap());
+        if let Some(peer) = peer {
+            request.metadata_mut().insert(PEER, peer.parse().unwrap());
         }
         let mut stream = self
             .client
@@ -1189,7 +1127,10 @@ async fn bundles_serve_only_the_current_leased_attempt_of_the_calling_runner() {
     forge.exec("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
         INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')").await;
     forge.run_at(&second).await;
-    let (_sender, mut stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let (_sender, mut stream) = forge
+        .connect(Some(BUILD_1), hello("build-1"))
+        .await
+        .unwrap();
     let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
         panic!("expected an assignment");
     };
@@ -1197,14 +1138,14 @@ async fn bundles_serve_only_the_current_leased_attempt_of_the_calling_runner() {
 
     // An empty cache gets the full history; a cache holding the parent only the new
     // commit; unknown and malformed ids are ignored.
-    let full = forge.bundle(Some(SECRET), attempt, &[]).await.unwrap();
+    let full = forge.bundle(Some(BUILD_1), attempt, &[]).await.unwrap();
     assert!(
         full.starts_with(&format!("# v2 git bundle\n{second} refs/kajiba/run\n\n")),
         "{full}"
     );
     let incremental = forge
         .bundle(
-            Some(SECRET),
+            Some(BUILD_1),
             attempt,
             &[&first, "zz", "ffffffffffffffffffffffffffffffffffffffff"],
         )
@@ -1218,13 +1159,13 @@ async fn bundles_serve_only_the_current_leased_attempt_of_the_calling_runner() {
     );
     assert!(incremental.len() < full.len());
 
-    // Another runner's secret, no secret and an unknown attempt are not this runner.
-    for (secret, attempt) in [
-        (Some(OTHER_SECRET), attempt),
+    // Another runner's ID, no ID and an unknown attempt are not this runner.
+    for (peer, attempt) in [
+        (Some(BUILD_2), attempt),
         (None, attempt),
-        (Some(SECRET), "7ZZZZZZZZZZZZZZZZZZZZZZZZZ"),
+        (Some(BUILD_1), "7ZZZZZZZZZZZZZZZZZZZZZZZZZ"),
     ] {
-        let status = forge.bundle(secret, attempt, &[]).await.unwrap_err();
+        let status = forge.bundle(peer, attempt, &[]).await.unwrap_err();
         assert_eq!(
             (status.code(), reason(&status).as_str()),
             (tonic::Code::Unauthenticated, "CREDENTIAL_INVALID")
@@ -1237,7 +1178,7 @@ async fn bundles_serve_only_the_current_leased_attempt_of_the_calling_runner() {
             "UPDATE job_attempt SET state = 'lost' WHERE public_id = '{attempt}'"
         ))
         .await;
-    let status = forge.bundle(Some(SECRET), attempt, &[]).await.unwrap_err();
+    let status = forge.bundle(Some(BUILD_1), attempt, &[]).await.unwrap_err();
     assert_eq!(
         (status.code(), reason(&status).as_str()),
         (tonic::Code::FailedPrecondition, "INVALID_STATE")
@@ -1248,7 +1189,7 @@ async fn bundles_serve_only_the_current_leased_attempt_of_the_calling_runner() {
     };
     let attempt = assignment.attempt_id.as_str();
     let served = forge
-        .bundle(Some(SECRET), attempt, &[&second])
+        .bundle(Some(BUILD_1), attempt, &[&second])
         .await
         .unwrap();
     assert!(
@@ -1264,7 +1205,7 @@ async fn bundles_serve_only_the_current_leased_attempt_of_the_calling_runner() {
             "UPDATE job_attempt SET lease_expires_at = 1 WHERE public_id = '{attempt}'"
         ))
         .await;
-    let status = forge.bundle(Some(SECRET), attempt, &[]).await.unwrap_err();
+    let status = forge.bundle(Some(BUILD_1), attempt, &[]).await.unwrap_err();
     assert_eq!(status.code(), tonic::Code::FailedPrecondition);
     forge.exec(&format!("INSERT INTO job_attempt (public_id, job_id, number, runner_id, state, lease_expires_at, started_at)
         SELECT '7YYYYYYYYYYYYYYYYYYYYYYYYY', job_id, number + 1, runner_id, 'running', 9999999999999, 1 FROM job_attempt WHERE public_id = '{attempt}'")).await;
@@ -1273,7 +1214,7 @@ async fn bundles_serve_only_the_current_leased_attempt_of_the_calling_runner() {
             "UPDATE job_attempt SET lease_expires_at = 9999999999999 WHERE public_id = '{attempt}'"
         ))
         .await;
-    let status = forge.bundle(Some(SECRET), attempt, &[]).await.unwrap_err();
+    let status = forge.bundle(Some(BUILD_1), attempt, &[]).await.unwrap_err();
     assert_eq!(status.code(), tonic::Code::FailedPrecondition);
 }
 
@@ -1286,7 +1227,7 @@ impl Forge {
         });
         request
             .metadata_mut()
-            .insert("authorization", format!("Bearer {SECRET}").parse().unwrap());
+            .insert(PEER, BUILD_1.parse().unwrap());
         let mut stream = self
             .client
             .clone()
@@ -1390,7 +1331,10 @@ async fn a_worktree_attempt_gets_the_base_it_lacks_then_its_stored_bundle() {
             .join(format!("ci/bundles/{run}.bundle")),
     )
     .unwrap();
-    let (_sender, mut stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let (_sender, mut stream) = forge
+        .connect(Some(BUILD_1), hello("build-1"))
+        .await
+        .unwrap();
     let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
         panic!("expected an assignment");
     };
@@ -1442,9 +1386,9 @@ async fn a_worktree_attempt_gets_the_base_it_lacks_then_its_stored_bundle() {
             .success()
     );
 
-    // Another runner's secret is refused, as for any run.
+    // Another runner's ID is refused, as for any run.
     let status = forge
-        .bundle(Some(OTHER_SECRET), &attempt, &[])
+        .bundle(Some(BUILD_2), &attempt, &[])
         .await
         .unwrap_err();
     assert_eq!(status.code(), tonic::Code::Unauthenticated);
@@ -1514,7 +1458,7 @@ async fn runner_requests_waiting_for_admission_and_their_messages_are_bounded() 
     drop(senders);
     let mut admitted = false;
     for _ in 0..100 {
-        if forge.connect(Some(SECRET), hello("build-1")).await.is_ok() {
+        if forge.connect(Some(BUILD_1), hello("build-1")).await.is_ok() {
             admitted = true;
             break;
         }
@@ -1525,11 +1469,11 @@ async fn runner_requests_waiting_for_admission_and_their_messages_are_bounded() 
     // A message above 128 KiB is refused before it reaches the handler.
     let mut large = hello("build-2");
     large.in_flight_attempt_ids = vec!["7".repeat(1024); 130];
-    let status = forge.connect(Some(OTHER_SECRET), large).await.unwrap_err();
+    let status = forge.connect(Some(BUILD_2), large).await.unwrap_err();
     assert_eq!(status.code(), tonic::Code::OutOfRange, "{status:?}");
     let mut fits = hello("build-2");
     fits.in_flight_attempt_ids = vec!["7".repeat(1024); 120];
-    assert!(forge.connect(Some(OTHER_SECRET), fits).await.is_ok());
+    assert!(forge.connect(Some(BUILD_2), fits).await.is_ok());
 }
 
 /// Incompressible bytes, so a bundle holding them stays as large.
@@ -1557,7 +1501,7 @@ impl Forge {
         });
         request
             .metadata_mut()
-            .insert("authorization", format!("Bearer {SECRET}").parse().unwrap());
+            .insert(PEER, BUILD_1.parse().unwrap());
         let mut stream = self
             .client
             .clone()
@@ -1589,7 +1533,10 @@ async fn bundle_transfers_are_bounded_per_runner_and_end_with_their_stream_or_le
     forge.exec("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
         INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')").await;
     forge.run_at(&sha).await;
-    let (_sender, mut stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let (_sender, mut stream) = forge
+        .connect(Some(BUILD_1), hello("build-1"))
+        .await
+        .unwrap();
     let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
         panic!("expected an assignment");
     };

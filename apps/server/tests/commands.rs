@@ -87,7 +87,7 @@ fn config_check_validates_without_opening_secrets_and_files_checks_access() {
     let path = dir.join("server.toml");
     let secret = dir.join("token");
     let input = format!(
-        "[http]\npublic_url='https://example.org'\n[runners.build-1]\ntoken_file={:?}\ncapabilities={{arch='x86_64',os='linux'}}\n",
+        "[http]\npublic_url='https://example.org'\n[mirror.credentials.github]\ntoken_file={:?}\n",
         secret.to_str().unwrap()
     );
     std::fs::write(&path, input).unwrap();
@@ -97,7 +97,7 @@ fn config_check_validates_without_opening_secrets_and_files_checks_access() {
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
-            .contains("runners.build-1.token_file")
+            .contains("mirror.credentials.github.token_file")
     );
     std::fs::write(&secret, "DO-NOT-PRINT").unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -162,8 +162,8 @@ fn invalid_config_is_structured_for_check_and_startup() {
             "log.level",
         ),
         (
-            "[http]\npublic_url='https://example.org'\n[runners.build-1]\ntoken_file='/kajiba-test-missing/token'\ncapabilities={arch='x86_64',os='linux'}",
-            "runners.build-1.token_file",
+            "[http]\npublic_url='https://example.org'\n[runner_listener]\nlisten='127.0.0.1:8443'\ntrust_domain='example.org'\nsvid_file='/kajiba-test-missing/svid.pem'\nkey_file='/kajiba-test-missing/key.pem'\nbundle_file='/kajiba-test-missing/bundle.pem'",
+            "runner_listener.svid_file",
         ),
     ] {
         std::fs::write(&path, input).unwrap();

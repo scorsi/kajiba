@@ -1,10 +1,16 @@
 name = "build-1"
-url = "https://forge.example.org"
-token_file = "/run/secrets/kajiba-runner-build-1"
+url = "https://runners.forge.example.org"
 backends = ["nix"]
 tags = []
 max_jobs = 1
 state_dir = "/var/lib/kajiba-runner"
+
+[tls]
+trust_domain = "example.org"
+server_id = "spiffe://example.org/forge/kajiba-server"
+svid_file = "/var/lib/svid/kajiba-runner/svid.pem"
+key_file = "/var/lib/svid/kajiba-runner/key.pem"
+bundle_file = "/var/lib/svid/kajiba-runner/bundle.pem"
 
 [log]
 level = "info"

@@ -20,7 +20,9 @@ async fn fixture(extra: &str) -> (Fixture, Runs) {
     let fixture = Fixture::new(&format!("{REPOS}{extra}")).await;
     // One declared runner: x86_64-linux, nix, tagged `kvm` (offline: declared is enough).
     let runner = kajiba_core::config::ServerConfig::parse(
-        "[http]\npublic_url='https://example.org'\n[runners.build-1]\ntoken_file='/run/secrets/b'\n\
+        "[http]\npublic_url='https://example.org'\n[runner_listener]\nlisten='127.0.0.1:8443'\n\
+         trust_domain='example.org'\nsvid_file='/s'\nkey_file='/k'\nbundle_file='/b'\n\
+         [runners.build-1]\nspiffe_id='spiffe://example.org/build-1/kajiba-runner'\n\
          capabilities={ arch='x86_64', os='linux', tags=['kvm'] }\n",
     )
     .unwrap()

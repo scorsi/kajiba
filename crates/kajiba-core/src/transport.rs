@@ -1,4 +1,4 @@
-//! Where a client may send a credential (ADRs 0099, 0104), shared by the CLI and the runner.
+//! Where the CLI may send a credential (ADRs 0099, 0104).
 use http::Uri;
 
 /// `Ok(true)`: TLS to an `https` URL. `Ok(false)`: plain `http` to `localhost`, `127.0.0.1`

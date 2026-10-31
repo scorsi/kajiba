@@ -1,9 +1,8 @@
 #![allow(clippy::result_large_err)]
 use super::*;
-use crate::session::Identity;
 use kajiba_gitstore::GitStore;
 use kajiba_proto::runner::v1::{
-    Capabilities, ConnectRequest, ConnectResponse, FetchRunBundleResponse,
+    ConnectRequest, ConnectResponse, FetchRunBundleResponse,
     runner_service_server::{RunnerService, RunnerServiceServer},
 };
 use std::{pin::Pin, time::Duration};
@@ -44,10 +43,7 @@ impl RunnerService for Fake {
         &self,
         request: Request<FetchRunBundleRequest>,
     ) -> Result<Response<Bundle>, Status> {
-        assert_eq!(
-            request.metadata().get("authorization").unwrap(),
-            "Bearer s3cret"
-        );
+        assert!(request.metadata().get("authorization").is_none());
         let request = request.into_inner();
         self.requests.lock().unwrap().push(request.clone());
         let mut bundles = Vec::new();
@@ -198,16 +194,9 @@ pub(crate) async fn setup(name: &str, commits: usize) -> Setup {
     let channel = Endpoint::from_shared(format!("http://{addr}"))
         .unwrap()
         .connect_lazy();
-    let identity = Identity {
-        name: "build-1".into(),
-        hostname: "builder.example.org".into(),
-        capabilities: Capabilities::default(),
-        secret: "s3cret".into(),
-    };
     let cache = Arc::new(Cache::new(
         &dir.join("state"),
         RunnerServiceClient::new(channel),
-        identity,
     ));
     Setup {
         dir,
@@ -436,12 +425,6 @@ async fn interrupted_eviction_is_reconciled_on_the_next_preparation() {
     let cache = Arc::new(Cache::new(
         &dir.join("state"),
         RunnerServiceClient::new(Endpoint::from_static("http://127.0.0.1:1").connect_lazy()),
-        Identity {
-            name: "build-1".into(),
-            hostname: "builder.example.org".into(),
-            capabilities: Capabilities::default(),
-            secret: "s3cret".into(),
-        },
     ));
     let mut setup = Setup {
         dir,

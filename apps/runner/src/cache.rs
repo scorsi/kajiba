@@ -2,7 +2,6 @@
 //! `state_dir/cache`, fed by `FetchRunBundle`, and a scratch checkout per attempt under
 //! `state_dir/scratch`, removed when the attempt ends.
 
-use crate::session::Identity;
 use kajiba_core::names::is_public_id;
 use kajiba_proto::runner::v1::{
     Assignment, FetchRunBundleRequest, runner_service_client::RunnerServiceClient,
@@ -27,7 +26,6 @@ const BUNDLE_REF: &str = "refs/kajiba/run";
 pub struct Cache {
     dir: PathBuf,
     client: RunnerServiceClient<Channel>,
-    identity: Identity,
     locks: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -76,11 +74,10 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 impl Cache {
-    pub fn new(state_dir: &Path, client: RunnerServiceClient<Channel>, identity: Identity) -> Self {
+    pub fn new(state_dir: &Path, client: RunnerServiceClient<Channel>) -> Self {
         Self {
             dir: state_dir.to_owned(),
             client,
-            identity,
             locks: Mutex::default(),
         }
     }
@@ -167,12 +164,11 @@ impl Cache {
         sha: &str,
         have: &[String],
     ) -> Result<(), String> {
-        let mut request = Request::new(FetchRunBundleRequest {
+        let request = Request::new(FetchRunBundleRequest {
             attempt_id: attempt.into(),
             have: have.to_vec(),
         });
         let status = |status: tonic::Status| format!("fetch bundle: {}", status.message());
-        self.identity.authorize(&mut request).map_err(status)?;
         let mut stream = self
             .client
             .clone()

@@ -92,7 +92,6 @@ fn identity() -> Identity {
             tags: vec!["kvm".into()],
             max_jobs: 2,
         },
-        secret: "s3cret".into(),
     }
 }
 
@@ -374,7 +373,8 @@ async fn reconnection_resumes_in_flight_attempts_with_backoff() {
     // The hello carries the identity and the in-flight attempt; logs resume after the
     // acknowledged sequence.
     let mut first = offer(&mut offered).await;
-    assert_eq!(first.authorization.as_deref(), Some("Bearer s3cret"));
+    // The certificate is the credential (0124): no bearer metadata.
+    assert_eq!(first.authorization, None);
     assert_eq!(
         first.hello,
         Hello {

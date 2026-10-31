@@ -76,11 +76,11 @@ pub fn check_nix(json: &str, user: &str, groups: &[String]) -> Result<String, St
         .to_owned())
 }
 
-/// The token file is not readable by build users: `config check --files` already refuses
+/// The SVID key file (0124) is not readable by build users: `config check --files` already refuses
 /// access by others, so its group must not be theirs when it is group-readable.
 pub fn check_token(mode: u32, gid: u32, build_gid: Option<u32>) -> Result<(), String> {
     if mode & 0o040 != 0 && build_gid == Some(gid) {
-        return Err("token_file: must not be readable by the Nix build users' group".into());
+        return Err("tls.key_file: must not be readable by the Nix build users' group".into());
     }
     Ok(())
 }
@@ -102,7 +102,7 @@ async fn output(program: &str, args: &[&str]) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|err| format!("{program}: {err}"))
 }
 
-/// Every requirement of 0009 on this host, for the token file at `token`.
+/// Every requirement of 0009 on this host, for the SVID key file at `token`.
 pub async fn check(token: &Path) -> Result<(), String> {
     let json = output("nix", &["config", "show", "--json"]).await?;
     let user = output("id", &["-un"]).await?;
@@ -122,7 +122,7 @@ pub async fn check(token: &Path) -> Result<(), String> {
         ),
     };
     let metadata = std::fs::metadata(token)
-        .map_err(|err| format!("token_file ({}): {err}", token.display()))?;
+        .map_err(|err| format!("tls.key_file ({}): {err}", token.display()))?;
     check_token(metadata.mode(), metadata.gid(), build_gid)
 }
 
@@ -264,7 +264,7 @@ mod tests {
         assert!(check_token(0o640, 100, None).is_ok());
         assert_eq!(
             check_token(0o640, 30000, Some(30000)).unwrap_err(),
-            "token_file: must not be readable by the Nix build users' group"
+            "tls.key_file: must not be readable by the Nix build users' group"
         );
     }
 }
