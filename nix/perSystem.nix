@@ -161,6 +161,13 @@
               touch $out
             '';
 
+        # Gzip size of the initial JS, CSS and fonts, 300 KB (J5 task 9).
+        ui-budget = pkgs.runCommand "ui-budget" { } ''
+          bash ${./checks/ui-budget-test.sh} ${./checks/ui-budget.sh}
+          bash ${./checks/ui-budget.sh} ${config.packages.kajiba-ui} 300000
+          touch $out
+        '';
+
         buf-lint = pkgs.runCommand "buf-lint" { nativeBuildInputs = [ pkgs.buf ]; } ''
           export HOME=$TMPDIR
           cd ${../proto}

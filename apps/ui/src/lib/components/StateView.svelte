@@ -21,7 +21,7 @@
 	);
 	const message = $derived(error instanceof Error ? error.message : String(error));
 	const next = $derived(
-		encodeURIComponent(page.url.pathname + page.url.search.replace(/[?&]mock=[^&]*/, ''))
+		encodeURIComponent(page.url.pathname + page.url.search)
 	);
 
 	const view = $derived.by((): { status: string; icon: IconName; tone: string; title: string } => {

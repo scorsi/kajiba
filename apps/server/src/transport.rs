@@ -5,7 +5,10 @@ use crate::{
 use axum::{
     Router,
     extract::{Request as HttpRequest, State},
-    http::{StatusCode, header::CONTENT_TYPE},
+    http::{
+        StatusCode,
+        header::{ACCEPT_ENCODING, CONTENT_TYPE},
+    },
     middleware::{self, Next},
     response::{IntoResponse, Response as HttpResponse},
     routing::get,
@@ -323,7 +326,14 @@ fn runner_router(health: Health, registry: Arc<Registry>) -> Router {
 async fn ui_response(dir: Option<&PathBuf>, request: HttpRequest) -> HttpResponse {
     let page = match (dir, request.headers().contains_key(CONTENT_TYPE)) {
         // A body-less GET or HEAD: a page or asset, never an API call.
-        (Some(dir), false) => ui::file(dir, request.method(), request.uri().path()).await,
+        (Some(dir), false) => {
+            let encodings = request
+                .headers()
+                .get(ACCEPT_ENCODING)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            ui::file(dir, request.method(), request.uri().path(), encodings).await
+        }
         _ => None,
     };
     page.unwrap_or_else(|| refusal(&request, StatusCode::NOT_FOUND, tonic::Code::Unimplemented))

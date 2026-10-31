@@ -1,5 +1,5 @@
-# kajiba-ui (0006): the static SvelteKit SPA bundle. Embedded into kajiba-server
-# starting J5; for now it's built and shipped as its own artifact. Part of the pnpm
+# kajiba-ui (0006, 0146): the static SvelteKit SPA bundle, shipped as its own artifact and
+# served by kajiba-server with `--ui-dir` (the NixOS module passes it). Part of the pnpm
 # workspace (pnpm-workspace.yaml at repo root), hence the repo-root src and the
 # `--filter` build rather than a self-contained apps/ui source tree.
 {

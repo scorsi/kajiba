@@ -1,18 +1,13 @@
 # kajiba-frontend — design
 
 The owner's validated design of the kajiba web interface, imported in J4. Views
-only import from `src/lib/api.ts`: sign-in, enrollment, sign-out and
-`getViewer` talk to kajiba-server; every other function still reads the mock
-(`src/lib/mock.ts`) until J5 wires it to the connect-web client.
+only import from `src/lib/api.ts`, which talks to kajiba-server.
 
 ```sh
 pnpm install && pnpm dev     # http://localhost:5173
 pnpm check                   # svelte-check, must stay at 0 errors / 0 warnings
-pnpm build                   # static SPA in build/, fallback index.html, .gz/.br precompressed
+pnpm build                   # static SPA in build/, fallback index.html
 ```
-
-Append `?mock=slow|error|unauth|empty` to any URL to see the loading, error,
-signed-out and empty states.
 
 ## 1. Direction: C — "Ai" (藍), sidebar workbench
 

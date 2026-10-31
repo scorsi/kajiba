@@ -2,15 +2,8 @@
  * Data access for the whole UI — the ONLY module views use to get data.
  *
  * Mirrors `kajiba.v1` with protobuf-es naming (camelCase fields, `{ … }` request
- * objects, numeric enums). Sign-in, enrollment, logout, `getViewer`, passkey and
- * token management talk to kajiba-server (the WebAuthn ceremonies and the committed
- * connect-web client); everything else is still a MOCK reading `./mock.ts`, replaced
- * slice by slice in J5 keeping the exported names and types.
- *
- * Everything under "ASSUMED" does not exist in the API yet: each item is a
- * question for the integrator (see DESIGN.md → "Mock assumptions").
- *
- * Dev switch: `?mock=slow|error|unauth|empty|member|broken` forces a state on the mocked calls.
+ * objects, numeric enums); every call goes to kajiba-server through the committed
+ * connect-web client and the WebAuthn ceremonies.
  */
 
 import { createClient } from "@connectrpc/connect";
@@ -35,7 +28,6 @@ import {
   TokenSource,
   type Token as TokenMessage,
 } from "./gen/kajiba/v1/token_pb.ts";
-import { MOCK_TOKENS } from "./mock";
 import { RunLog } from "./runlog.ts";
 
 // ── Types (shape of protobuf-es generated messages) ─────────────────────
@@ -1032,34 +1024,4 @@ export async function watchRun(req: {
     clearTimeout(timer);
     req.onChange?.();
   }
-}
-
-// ── mock internals
-
-type Scenario =
-  | "slow"
-  | "error"
-  | "unauth"
-  | "empty"
-  | "member"
-  | "broken"
-  | null;
-
-function scenario(): Scenario {
-  if (typeof location === "undefined") return null;
-  return new URLSearchParams(location.search).get("mock") as Scenario;
-}
-
-async function mockGate() {
-  const s = scenario();
-  await new Promise((r) => setTimeout(r, s === "slow" ? 2500 : 120));
-  if (s === "error")
-    throw new ApiError(Code.Unavailable, "kajiba-server is unreachable");
-  if (s === "unauth")
-    throw new ApiError(Code.Unauthenticated, "sign in required");
-  if (s === "broken")
-    throw new ApiError(
-      Code.Unknown,
-      "internal: database is locked (SQLITE_BUSY)",
-    );
 }
