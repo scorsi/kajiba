@@ -3,20 +3,24 @@ use crate::cache::tests::{Setup, setup};
 use kajiba_proto::runner::v1::ConnectRequest;
 use std::{future::Future, path::PathBuf, time::Duration};
 
-/// Commit `n` of the fixture holds `file` = `n`: 1 succeeds, 2 fails with exit 2, 3 runs
-/// until cancelled.
+/// Commit `n` of the fixture holds `file` = `n`: 1 succeeds, 2 fails with exit 2 (in its
+/// first selected check, if any), 3 runs until cancelled.
 struct Fake;
 
 impl Executor for Fake {
-    type Env = PathBuf;
+    type Env = (PathBuf, Option<String>);
 
-    fn prepare(&self, job: &kajiba_exec::Job) -> Result<(PathBuf, Vec<String>), String> {
-        Ok((job.source.to_owned(), vec!["fake".into()]))
+    fn prepare(
+        &self,
+        job: &kajiba_exec::Job,
+    ) -> Result<((PathBuf, Option<String>), Vec<String>), String> {
+        let check = job.checks.first().cloned();
+        Ok(((job.source.to_owned(), check), vec!["fake".into()]))
     }
 
     async fn run(
         &self,
-        source: &PathBuf,
+        (source, _): &(PathBuf, Option<String>),
         _: usize,
         log: mpsc::Sender<Vec<u8>>,
         cancel: impl Future<Output = ()> + Send,
@@ -35,7 +39,12 @@ impl Executor for Fake {
         }
     }
 
-    fn cleanup(&self, _: PathBuf) {}
+    fn failing_check(&self, (source, check): &(PathBuf, Option<String>)) -> Option<String> {
+        let file = std::fs::read_to_string(source.join("file")).unwrap();
+        check.clone().filter(|_| file == "2")
+    }
+
+    fn cleanup(&self, _: (PathBuf, Option<String>)) {}
 }
 
 struct Running {
@@ -133,7 +142,11 @@ async fn an_attempt_is_accepted_executed_and_its_result_sent() {
             }),
         ]
     );
-    let id = running.assign(2, 1).await;
+    // The backend names the failing selected check.
+    let mut assignment = running.setup.assignment(2, 1);
+    assignment.checks = vec!["b".into(), "c".into()];
+    let id = assignment.attempt_id.clone();
+    running.jobs.send(Job::Assigned(assignment)).await.unwrap();
     let mut last = running.next().await;
     while !matches!(last, Message::Result(_)) {
         last = running.next().await;
@@ -144,7 +157,7 @@ async fn an_attempt_is_accepted_executed_and_its_result_sent() {
             attempt_id: id,
             state: ResultState::Failed.into(),
             exit_code: Some(2),
-            failing_check: String::new(),
+            failing_check: "b".into(),
             reason: "exit status 2".into(),
         })
     );

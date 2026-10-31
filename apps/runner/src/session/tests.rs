@@ -253,6 +253,7 @@ async fn reconnection_resumes_in_flight_attempts_with_backoff() {
         repo_public_id: "00000000000000000000000001".into(),
         sha: "1111111111111111111111111111111111111111".into(),
         system: "x86_64-linux".into(),
+        checks: Vec::new(),
     };
     server
         .send(response(connect_response::Message::Assignment(

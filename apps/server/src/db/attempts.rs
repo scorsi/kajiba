@@ -47,6 +47,8 @@ pub struct Assigned {
     pub sha: String,
     /// The Nix system of the matched runner (0010).
     pub system: String,
+    /// A worktree run's selected checks; empty for the whole `nix flake check` (0097).
+    pub checks: Vec<String>,
 }
 
 fn place<'a>(
@@ -100,15 +102,15 @@ pub async fn assign(
     .await?
     .into_iter()
     .collect();
-    let jobs: Vec<(i64, String, String, String)> = sqlx::query_as(
-        "SELECT job.id, job.requirements, run.sha, repo.public_id FROM job
+    let jobs: Vec<(i64, String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT job.id, job.requirements, run.sha, repo.public_id, run.checks FROM job
          JOIN run ON run.id = job.run_id JOIN repo ON repo.id = run.repo_id
          WHERE job.state = 'pending' ORDER BY job.id",
     )
     .fetch_all(&mut *tx)
     .await?;
     let (mut assigned, mut pending) = (Vec::new(), 0);
-    for (job_id, requirements, sha, repo) in jobs {
+    for (job_id, requirements, sha, repo, checks) in jobs {
         // Unreadable requirements match no backend.
         let requirements = serde_json::from_str(&requirements).unwrap_or_default();
         let offer = match place(&requirements, offers, &used) {
@@ -150,6 +152,9 @@ pub async fn assign(
             repo,
             sha,
             system: format!("{}-{}", offer.arch, offer.os),
+            checks: checks
+                .and_then(|checks| serde_json::from_str(&checks).ok())
+                .unwrap_or_default(),
         });
     }
     Ok((assigned, pending))

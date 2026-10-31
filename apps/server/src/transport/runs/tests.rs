@@ -1069,6 +1069,7 @@ async fn a_worktree_bundle_becomes_a_run_outside_the_repository() {
             "bob"
         )
     );
+    assert_eq!(run.checks, ["vm", "unit"]);
     let state = fixture.dir.join("server");
     assert_eq!(
         std::fs::read(state.join(format!("ci/bundles/{}.bundle", run.public_id))).unwrap(),

@@ -21,6 +21,8 @@ pub const KEPT: usize = 16;
 /// Kept commits, most recently fetched first, one id per line.
 const RECENT: &str = "kajiba-recent";
 const INCOMING: &str = "kajiba-incoming.bundle";
+/// The single ref name of every bundle head the server sends (0106).
+const BUNDLE_REF: &str = "refs/kajiba/run";
 
 pub struct Cache {
     dir: PathBuf,
@@ -163,27 +165,53 @@ impl Cache {
             .await
             .map_err(status)?
             .into_inner();
-        let path = cache.join(INCOMING);
-        let mut file = std::fs::File::create(&path).map_err(|err| format!("bundle: {err}"))?;
-        while let Some(message) = stream.message().await.map_err(status)? {
-            file.write_all(&message.data)
-                .map_err(|err| format!("bundle: {err}"))?;
+        // One file per bundle, in the order received (0097: base commits, then the run's).
+        let mut files: Vec<(u32, PathBuf, std::fs::File)> = Vec::new();
+        let written = async {
+            while let Some(message) = stream.message().await.map_err(status)? {
+                if files
+                    .last()
+                    .is_none_or(|(bundle, ..)| *bundle != message.bundle)
+                {
+                    if files.iter().any(|(bundle, ..)| *bundle >= message.bundle) {
+                        return Err("bundle: out of order".to_owned());
+                    }
+                    let path = cache.join(format!("{INCOMING}.{}", message.bundle));
+                    let file =
+                        std::fs::File::create(&path).map_err(|err| format!("bundle: {err}"))?;
+                    files.push((message.bundle, path, file));
+                }
+                let (_, _, file) = files.last_mut().expect("pushed above");
+                file.write_all(&message.data)
+                    .map_err(|err| format!("bundle: {err}"))?;
+            }
+            Ok(())
         }
-        drop(file);
-        let bundle = path.to_str().ok_or("cache: path is not UTF-8")?;
-        let kept = format!("refs/kept/{sha}");
-        let fetched = git(
-            cache,
-            &[
-                "fetch",
-                "-q",
-                "--no-write-fetch-head",
-                bundle,
-                &format!("refs/kajiba/run:{kept}"),
-            ],
-        )
         .await;
-        let _ = std::fs::remove_file(&path);
+        let paths: Vec<PathBuf> = files.into_iter().map(|(_, path, _)| path).collect();
+        let kept = format!("refs/kept/{sha}");
+        let mut fetched = written;
+        for (index, path) in paths.iter().enumerate() {
+            if fetched.is_err() {
+                break;
+            }
+            let bundle = path.to_str().ok_or("cache: path is not UTF-8")?;
+            // The last bundle holds the commit; earlier ones only its base, kept by it.
+            let refspec = if index + 1 == paths.len() {
+                format!("{BUNDLE_REF}:{kept}")
+            } else {
+                BUNDLE_REF.to_owned()
+            };
+            fetched = git(
+                cache,
+                &["fetch", "-q", "--no-write-fetch-head", bundle, &refspec],
+            )
+            .await
+            .map(|_| ());
+        }
+        for path in &paths {
+            let _ = std::fs::remove_file(path);
+        }
         fetched?;
         if git(cache, &["rev-parse", &kept]).await? != sha {
             git(cache, &["update-ref", "-d", &kept]).await?;

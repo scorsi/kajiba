@@ -109,6 +109,8 @@ message Run {
   Job job = 11;
   // Set for a failed run.
   FailureSummary failure = 12;
+  // A worktree run's selected checks; empty for the whole `nix flake check` (0097).
+  repeated string checks = 13;
 }
 
 enum JobState {

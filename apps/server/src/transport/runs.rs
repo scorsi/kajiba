@@ -50,11 +50,12 @@ type Row = (
     Option<i64>,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 const SELECT: &str = "SELECT run.id, run.public_id, repo.public_id, run.sha, run.ref, run.trigger,
         user.name, run.state, run.created_at, run.started_at, run.finished_at,
-        run.failure_check, run.failure_reason
+        run.failure_check, run.failure_reason, run.checks
     FROM run JOIN repo ON repo.id = run.repo_id LEFT JOIN user ON user.id = run.triggered_by";
 
 fn time(ms: Option<i64>) -> Option<Timestamp> {
@@ -114,7 +115,7 @@ impl Runs {
         let (id, public_id, repo, sha, reference, trigger, triggered_by, state, created, started) = (
             row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
         );
-        let (finished, check, reason) = (row.10, row.11, row.12);
+        let (finished, check, reason, checks) = (row.10, row.11, row.12, row.13);
         let job: Option<(i64, String, String, String, Option<String>)> = sqlx::query_as(
             "SELECT id, public_id, name, state, pending_reason FROM job WHERE run_id = ? ORDER BY id LIMIT 1",
         )
@@ -177,6 +178,9 @@ impl Runs {
             finished_at: time(finished),
             job,
             failure,
+            checks: checks
+                .and_then(|checks| serde_json::from_str(&checks).ok())
+                .unwrap_or_default(),
         })
     }
 }
@@ -443,16 +447,18 @@ fn bundle_invalid() -> Status {
 }
 
 /// The prerequisites and the single head of a v2 bundle, or a v3 one in SHA-1, read
-/// from its header; a pack must follow.
-fn bundle_header(path: &Path) -> Result<(Vec<String>, String), Status> {
+/// from its header, and the header's length; a pack must follow.
+pub(super) fn bundle_header(path: &Path) -> Result<(Vec<String>, String, u64), Status> {
     use std::io::BufRead;
     let file =
         std::fs::File::open(path).map_err(|err| Status::internal(format!("bundle: {err}")))?;
     let mut reader = std::io::BufReader::new(file);
-    let next = |reader: &mut std::io::BufReader<std::fs::File>| {
+    let mut length = 0;
+    let mut next = |reader: &mut std::io::BufReader<std::fs::File>| {
         let mut line = Vec::new();
         match reader.read_until(b'\n', &mut line) {
-            Ok(_) if line.pop() == Some(b'\n') => {
+            Ok(read) if line.pop() == Some(b'\n') => {
+                length += read as u64;
                 String::from_utf8(line).map_err(|_| bundle_invalid())
             }
             _ => Err(bundle_invalid()),
@@ -492,7 +498,7 @@ fn bundle_header(path: &Path) -> Result<(Vec<String>, String), Status> {
     let mut magic = [0; 4];
     std::io::Read::read_exact(&mut reader, &mut magic).map_err(|_| bundle_invalid())?;
     match (heads.pop(), heads.is_empty(), &magic) {
-        (Some(head), true, b"PACK") => Ok((prerequisites, head)),
+        (Some(head), true, b"PACK") => Ok((prerequisites, head, length)),
         _ => Err(bundle_invalid()),
     }
 }
@@ -780,7 +786,7 @@ impl RunService for Runs {
         file.sync_all().await.map_err(io)?;
         drop(file);
         let header = path.clone();
-        let (prerequisites, head) = tokio::task::spawn_blocking(move || bundle_header(&header))
+        let (prerequisites, head, _) = tokio::task::spawn_blocking(move || bundle_header(&header))
             .await
             .map_err(|err| Status::internal(format!("bundle: {err}")))??;
         let root = self.0.git_state_dir.join("repos");

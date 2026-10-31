@@ -482,6 +482,7 @@ impl Runners {
                     repo_public_id: assigned.repo,
                     sha: assigned.sha,
                     system: assigned.system,
+                    checks: assigned.checks,
                 });
                 let _ = outbound.send(Ok(response(message))).await;
             }
@@ -757,19 +758,19 @@ impl RunnerService for Runners {
             attempt_id,
             mut have,
         } = request.into_inner();
-        let (repo, sha) = self.leased(secret, &attempt_id).await?;
+        let (repo, sha, run, trigger) = self.leased(secret, &attempt_id).await?;
         // The runner's cache keeps 16 commits (0106): more ids only make a smaller bundle.
         have.truncate(MAX_HAVE);
         let repos = self.health.git_state_dir.join("repos");
+        // A worktree run's commit is only in its stored bundle (0097).
+        let stored = (trigger == "worktree").then(|| {
+            self.health
+                .state_dir
+                .join(format!("ci/bundles/{run}.bundle"))
+        });
         let (sender, receiver) = mpsc::channel(4);
         tokio::task::spawn_blocking(move || {
-            let mut out = std::io::BufWriter::with_capacity(MAX_CHUNK, Chunks(sender.clone()));
-            let path = repos.join(format!("{repo}.git"));
-            let written = Gix::shared(&repos)
-                .bundle(&path, &sha, &have, &mut out)
-                .map_err(|err| err.to_string())
-                .and_then(|()| std::io::Write::flush(&mut out).map_err(|err| err.to_string()));
-            if let Err(err) = written {
+            if let Err(err) = sources(&repos, &repo, &sha, stored.as_deref(), &have, &sender) {
                 // A runner gone mid-transfer closed the channel: nothing to report to it.
                 let _ = sender.blocking_send(Err(internal(format!("bundle of {repo}: {err}"))));
             }
@@ -778,14 +779,64 @@ impl RunnerService for Runners {
     }
 }
 
-/// Bundle bytes as consecutive `FetchRunBundleResponse` messages.
-struct Chunks(mpsc::Sender<Result<FetchRunBundleResponse, Status>>);
+/// Send an attempt's bundles. A push or manual run: its commit minus `have` (bundle 0).
+/// A worktree run: the commits its stored bundle requires, minus `have` (bundle 0, omitted
+/// when `have` holds them), then the stored bundle with its head renamed to
+/// [`kajiba_gitstore::BUNDLE_REF`], so the runner never reads a client's ref name (bundle 1).
+fn sources(
+    repos: &std::path::Path,
+    repo: &str,
+    sha: &str,
+    stored: Option<&std::path::Path>,
+    have: &[String],
+    sender: &mpsc::Sender<Result<FetchRunBundleResponse, Status>>,
+) -> Result<(), String> {
+    use std::io::Write;
+    let path = repos.join(format!("{repo}.git"));
+    let gix = Gix::shared(repos);
+    let text = |err: &dyn std::fmt::Display| err.to_string();
+    let open =
+        |bundle| std::io::BufWriter::with_capacity(MAX_CHUNK, Chunks(sender.clone(), bundle));
+    let Some(stored) = stored else {
+        let mut out = open(0);
+        gix.bundle(&path, &[sha.into()], have, &mut out)
+            .map_err(|err| text(&err))?;
+        return out.flush().map_err(|err| text(&err));
+    };
+    let (prerequisites, head, length) =
+        super::runs::bundle_header(stored).map_err(|status| status.message().to_owned())?;
+    if !gix
+        .covered(&path, &prerequisites, have)
+        .map_err(|err| text(&err))?
+    {
+        let mut out = open(0);
+        gix.bundle(&path, &prerequisites, have, &mut out)
+            .map_err(|err| text(&err))?;
+        out.flush().map_err(|err| text(&err))?;
+    }
+    let mut header = String::from("# v2 git bundle\n");
+    for id in &prerequisites {
+        header.push_str(&format!("-{id}\n"));
+    }
+    header.push_str(&format!("{head} {}\n\n", kajiba_gitstore::BUNDLE_REF));
+    let mut file = std::fs::File::open(stored).map_err(|err| text(&err))?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(length)).map_err(|err| text(&err))?;
+    let mut out = open(1);
+    out.write_all(header.as_bytes())
+        .and_then(|()| std::io::copy(&mut file, &mut out).map(|_| ()))
+        .and_then(|()| out.flush())
+        .map_err(|err| text(&err))
+}
+
+/// The bytes of bundle `.1` as consecutive `FetchRunBundleResponse` messages.
+struct Chunks(mpsc::Sender<Result<FetchRunBundleResponse, Status>>, u32);
 
 impl std::io::Write for Chunks {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         self.0
             .blocking_send(Ok(FetchRunBundleResponse {
                 data: data.to_vec(),
+                bundle: self.1,
             }))
             .map_err(|_| std::io::ErrorKind::BrokenPipe)?;
         Ok(data.len())
@@ -797,13 +848,14 @@ impl std::io::Write for Chunks {
 }
 
 impl Runners {
-    /// The repository public id and commit of an attempt that is its job's current one,
-    /// still leased and held by the runner whose secret is presented (0106).
+    /// The repository public id, commit, run public id and trigger of an attempt that is
+    /// its job's current one, still leased and held by the runner whose secret is
+    /// presented (0106).
     async fn leased(
         &self,
         secret: Option<Vec<u8>>,
         attempt: &str,
-    ) -> Result<(String, String), Status> {
+    ) -> Result<(String, String, String, String), Status> {
         let unauthenticated = || {
             refused(
                 tonic::Code::Unauthenticated,
@@ -855,7 +907,7 @@ impl Runners {
                 )
             })?;
         sqlx::query_as(
-            "SELECT repo.public_id, run.sha FROM run JOIN repo ON repo.id = run.repo_id WHERE run.id = ?",
+            "SELECT repo.public_id, run.sha, run.public_id, run.trigger FROM run JOIN repo ON repo.id = run.repo_id WHERE run.id = ?",
         )
         .bind(current.run_id)
         .fetch_one(&mut *connection)

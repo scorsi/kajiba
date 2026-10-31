@@ -10,16 +10,22 @@ use std::{pin::Pin, time::Duration};
 use tokio_stream::Stream;
 use tonic::{Response, Status, Streaming, transport::Endpoint};
 
+/// A worktree run's base commit and stored bundle.
+type Stored = (String, Vec<u8>);
 type Bundle = Pin<Box<dyn Stream<Item = Result<FetchRunBundleResponse, Status>> + Send>>;
 
 /// Serves the bundles of `source` the forge would: each attempt's commit, minus the
-/// `have` commits; `corrupt` attempts get bytes that are no bundle.
+/// `have` commits; `corrupt` attempts get bytes that are no bundle; `worktree` attempts
+/// get the base commits `have` lacks (bundle 0), then their stored bundle (bundle 1).
 #[derive(Clone, Default)]
 struct Fake {
     source: PathBuf,
     attempts: Arc<Mutex<BTreeMap<String, String>>>,
     corrupt: Arc<Mutex<Vec<String>>>,
+    worktree: Arc<Mutex<BTreeMap<String, Stored>>>,
     requests: Arc<Mutex<Vec<FetchRunBundleRequest>>>,
+    /// The bundle indexes sent per request.
+    sent: Arc<Mutex<Vec<Vec<u32>>>>,
 }
 
 #[tonic::async_trait]
@@ -44,20 +50,48 @@ impl RunnerService for Fake {
         );
         let request = request.into_inner();
         self.requests.lock().unwrap().push(request.clone());
-        let mut data = Vec::new();
+        let mut bundles = Vec::new();
+        let worktree = self
+            .worktree
+            .lock()
+            .unwrap()
+            .get(&request.attempt_id)
+            .cloned();
         if self.corrupt.lock().unwrap().contains(&request.attempt_id) {
-            data.extend(b"# v2 git bundle\nnot a pack");
+            bundles.push((0, b"# v2 git bundle\nnot a pack".to_vec()));
+        } else if let Some((base, stored)) = worktree {
+            let base = [base];
+            if !kajiba_gitstore::Gix
+                .covered(&self.source, &base, &request.have)
+                .unwrap()
+            {
+                let mut data = Vec::new();
+                kajiba_gitstore::Gix
+                    .bundle(&self.source, &base, &request.have, &mut data)
+                    .unwrap();
+                bundles.push((0, data));
+            }
+            bundles.push((1, stored));
         } else {
             let sha = self.attempts.lock().unwrap()[&request.attempt_id].clone();
+            let mut data = Vec::new();
             kajiba_gitstore::Gix
-                .bundle(&self.source, &sha, &request.have, &mut data)
+                .bundle(&self.source, &[sha], &request.have, &mut data)
                 .unwrap();
+            bundles.push((0, data));
         }
-        let chunks: Vec<_> = data
-            .chunks(1000)
-            .map(|data| {
-                Ok(FetchRunBundleResponse {
-                    data: data.to_vec(),
+        self.sent
+            .lock()
+            .unwrap()
+            .push(bundles.iter().map(|(bundle, _)| *bundle).collect());
+        let chunks: Vec<_> = bundles
+            .iter()
+            .flat_map(|(bundle, data)| {
+                data.chunks(1000).map(|data| {
+                    Ok(FetchRunBundleResponse {
+                        data: data.to_vec(),
+                        bundle: *bundle,
+                    })
                 })
             })
             .collect();
@@ -78,6 +112,29 @@ fn run(dir: &Path, args: &[&str]) -> String {
         .env("GIT_COMMITTER_EMAIL", "alice@example.org")
         .output()
         .unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// `git` reading `input` on stdin; its trimmed output.
+fn stdin(dir: &Path, args: &[&str], input: &str) -> String {
+    let mut child = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "git {args:?}: {output:?}");
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
@@ -162,6 +219,53 @@ impl Setup {
             repo_public_id: REPO.into(),
             sha: self.commits[index].clone(),
             system: "x86_64-linux".into(),
+            checks: Vec::new(),
+        }
+    }
+
+    /// Worktree attempt `0…0<n>`: a commit setting `file` to `content` on top of commit
+    /// `base`, known to the fake forge only as a stored bundle requiring `base`.
+    fn worktree(&self, n: usize, base: usize, content: &str) -> Assignment {
+        let source = &self.fake.source;
+        std::fs::write(source.join("file"), content).unwrap();
+        let blob = run(source, &["hash-object", "-w", "file"]);
+        let tree = stdin(source, &["mktree"], &format!("100644 blob {blob}\tfile\n"));
+        let commit = run(
+            source,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &self.commits[base],
+                "-m",
+                "worktree",
+            ],
+        );
+        run(source, &["update-ref", "refs/kajiba/run", &commit]);
+        let path = self.dir.join(format!("stored-{n}.bundle"));
+        run(
+            source,
+            &[
+                "bundle",
+                "create",
+                "-q",
+                path.to_str().unwrap(),
+                "refs/kajiba/run",
+                &format!("^{}", self.commits[base]),
+            ],
+        );
+        run(source, &["update-ref", "-d", "refs/kajiba/run"]);
+        let attempt = format!("{n:0>26}");
+        self.fake.worktree.lock().unwrap().insert(
+            attempt.clone(),
+            (self.commits[base].clone(), std::fs::read(&path).unwrap()),
+        );
+        Assignment {
+            attempt_id: attempt,
+            repo_public_id: REPO.into(),
+            sha: commit,
+            system: "x86_64-linux".into(),
+            checks: vec!["a".into()],
         }
     }
 
@@ -317,4 +421,41 @@ async fn malformed_assignments_touch_no_path() {
     assignment.repo_public_id = "../escape".into();
     assert!(setup.cache.prepare(&assignment).await.is_err());
     assert!(!setup.dir.join("state").exists());
+}
+
+#[tokio::test]
+async fn a_worktree_attempt_takes_its_base_then_its_stored_bundle() {
+    let setup = setup("worktree", 2).await;
+    drop(setup.cache.prepare(&setup.assignment(1, 0)).await.unwrap());
+    // The cache lacks the base: both bundles, applied in order.
+    let first = setup.worktree(2, 1, "dirty");
+    let checkout = setup.cache.prepare(&first).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(checkout.dir.join("file")).unwrap(),
+        "dirty"
+    );
+    assert_eq!(run(&checkout.dir, &["rev-parse", "HEAD"]), first.sha);
+    let scratch = checkout.dir.clone();
+    drop(checkout);
+    assert!(!scratch.exists());
+    // The cache now holds the base: the stored bundle alone.
+    let second = setup.worktree(3, 1, "dirtier");
+    let checkout = setup.cache.prepare(&second).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(checkout.dir.join("file")).unwrap(),
+        "dirtier"
+    );
+    drop(checkout);
+    assert_eq!(
+        *setup.fake.sent.lock().unwrap(),
+        [vec![0], vec![0, 1], vec![1]]
+    );
+    // No incoming bundle file is left behind.
+    assert!(!setup.cached().read_dir().unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("incoming")
+    }));
 }

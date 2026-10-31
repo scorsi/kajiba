@@ -1,7 +1,7 @@
 use super::*;
 use std::{path::PathBuf, sync::OnceLock, time::Duration};
 
-const SCRIPTS: [(&str, &str); 4] = [
+const SCRIPTS: [(&str, &str); 5] = [
     (
         "succeeds",
         "printf 'args:'; printf ' %s' \"$@\"; echo; echo warning >&2; exit 0",
@@ -11,6 +11,11 @@ const SCRIPTS: [(&str, &str); 4] = [
     (
         "verbose",
         "i=0; while [ $i -lt 3000 ]; do echo \"line $i ................................................................................\"; i=$((i+1)); done",
+    ),
+    // Fails only the build of check `b`.
+    (
+        "fails-b",
+        "printf 'args:'; printf ' %s' \"$@\"; echo; case \"$*\" in *.b) exit 4;; esac",
     ),
     // A background child that would leave a marker if it outlived the cancellation.
     (
@@ -36,11 +41,25 @@ fn scripts() -> &'static Path {
     })
 }
 
-/// Run the `nix` backend with the fake `program`; returns the exit and the log chunks.
+/// Run the `nix` backend with the fake `program` on the whole flake; returns the exit and
+/// the log chunks.
 async fn check(
     program: &str,
     cancel: impl Future<Output = ()> + Send,
 ) -> (Result<Exit, String>, Vec<Vec<u8>>) {
+    let (exit, chunks, failed) = build(program, &[], cancel).await;
+    assert_eq!(failed, None);
+    (exit, chunks)
+}
+
+/// Run the `nix` backend with the fake `program` and the selected `checks`; returns the
+/// exit, the log chunks and the failing check.
+async fn build(
+    program: &str,
+    checks: &[&str],
+    cancel: impl Future<Output = ()> + Send,
+) -> (Result<Exit, String>, Vec<Vec<u8>>, Option<String>) {
+    let checks: Vec<String> = checks.iter().map(|name| name.to_string()).collect();
     let nix = Nix {
         program: scripts().join(program),
     };
@@ -49,9 +68,15 @@ async fn check(
             source: Path::new("/scratch/01"),
             sha: "0123456789abcdef0123456789abcdef01234567",
             system: "x86_64-linux",
+            checks: &checks,
         })
         .unwrap();
-    assert_eq!(steps, ["flake-check"]);
+    let step = if checks.is_empty() {
+        "flake-check"
+    } else {
+        "build-checks"
+    };
+    assert_eq!(steps, [step]);
     let (log, mut received) = mpsc::channel(4);
     let collect = async {
         let mut chunks = Vec::new();
@@ -61,8 +86,9 @@ async fn check(
         chunks
     };
     let (exit, chunks) = tokio::join!(nix.run(&env, 0, log, cancel), collect);
+    let failed = nix.failing_check(&env);
     nix.cleanup(env);
-    (exit, chunks)
+    (exit, chunks, failed)
 }
 
 #[tokio::test]
@@ -74,6 +100,32 @@ async fn success_runs_flake_check_on_the_commit_with_both_streams_logged() {
         "args: flake check --print-build-logs \
          git+file:///scratch/01?rev=0123456789abcdef0123456789abcdef01234567\nwarning\n"
     );
+}
+
+const FLAKE: &str = "git+file:///scratch/01?rev=0123456789abcdef0123456789abcdef01234567";
+
+#[tokio::test]
+async fn selected_checks_are_built_one_by_one_and_only_them() {
+    let (exit, chunks, failed) = build("succeeds", &["a", "c"], std::future::pending()).await;
+    assert_eq!(exit, Ok(Exit::Code(0)));
+    assert_eq!(failed, None);
+    assert_eq!(
+        String::from_utf8(chunks.concat()).unwrap(),
+        format!(
+            "args: build --no-link --print-build-logs {FLAKE}#checks.x86_64-linux.a\nwarning\n\
+             args: build --no-link --print-build-logs {FLAKE}#checks.x86_64-linux.c\nwarning\n"
+        )
+    );
+}
+
+#[tokio::test]
+async fn the_first_failing_selected_check_stops_the_step_and_is_named() {
+    let (exit, chunks, failed) = build("fails-b", &["a", "b", "c"], std::future::pending()).await;
+    assert_eq!(exit, Ok(Exit::Code(4)));
+    assert_eq!(failed.as_deref(), Some("b"));
+    let text = String::from_utf8(chunks.concat()).unwrap();
+    assert!(text.contains("checks.x86_64-linux.b"), "{text}");
+    assert!(!text.contains("checks.x86_64-linux.c"), "{text}");
 }
 
 #[tokio::test]
@@ -130,8 +182,14 @@ async fn a_missing_program_is_an_error() {
         program: "/nonexistent/nix".into(),
     };
     let (log, _received) = mpsc::channel(1);
-    let exit = nix
-        .run(&String::new(), 0, log, std::future::pending())
-        .await;
+    let (flake, _) = nix
+        .prepare(&Job {
+            source: Path::new("/scratch/01"),
+            sha: "0123456789abcdef0123456789abcdef01234567",
+            system: "x86_64-linux",
+            checks: &[],
+        })
+        .unwrap();
+    let exit = nix.run(&flake, 0, log, std::future::pending()).await;
     assert!(exit.unwrap_err().starts_with("/nonexistent/nix: "));
 }

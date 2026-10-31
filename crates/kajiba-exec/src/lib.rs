@@ -12,6 +12,8 @@ pub struct Job<'a> {
     pub sha: &'a str,
     /// The Nix system to build for, e.g. `x86_64-linux`.
     pub system: &'a str,
+    /// The checks to build one by one; empty for the whole `nix flake check` (0097).
+    pub checks: &'a [String],
 }
 
 /// How a step ended.
@@ -38,10 +40,16 @@ pub trait Executor: Send + Sync + 'static {
         cancel: impl Future<Output = ()> + Send,
     ) -> impl Future<Output = Result<Exit, String>> + Send;
 
+    /// The check whose build failed, when the backend knows it structurally (0112).
+    fn failing_check(&self, _env: &Self::Env) -> Option<String> {
+        None
+    }
+
     fn cleanup(&self, env: Self::Env);
 }
 
-/// The `nix` backend: one step, `nix flake check` on the checked-out commit (0009, 0010).
+/// The `nix` backend: one step, `nix flake check` on the checked-out commit, or a
+/// `nix build` of each selected check in turn, stopping at the first failure (0009, 0097).
 pub struct Nix {
     pub program: std::path::PathBuf,
 }
@@ -54,29 +62,74 @@ impl Default for Nix {
     }
 }
 
-impl Executor for Nix {
-    /// The flake reference of the checkout.
-    type Env = String;
+/// The flake reference of the checkout, the selected checks as `(name, installable)`, and
+/// the one whose build failed.
+pub struct Flake {
+    reference: String,
+    checks: Vec<(String, String)>,
+    failed: std::sync::Mutex<Option<String>>,
+}
 
-    fn prepare(&self, job: &Job) -> Result<(String, Vec<String>), String> {
+impl Executor for Nix {
+    type Env = Flake;
+
+    fn prepare(&self, job: &Job) -> Result<(Flake, Vec<String>), String> {
         let source = job.source.to_str().ok_or("source: path is not UTF-8")?;
-        let flake = format!("git+file://{source}?rev={}", job.sha);
-        Ok((flake, vec!["flake-check".into()]))
+        let reference = format!("git+file://{source}?rev={}", job.sha);
+        let checks = job
+            .checks
+            .iter()
+            .map(|name| {
+                let installable = format!("{reference}#checks.{}.{name}", job.system);
+                (name.clone(), installable)
+            })
+            .collect::<Vec<_>>();
+        let step = if checks.is_empty() {
+            "flake-check"
+        } else {
+            "build-checks"
+        };
+        let flake = Flake {
+            reference,
+            checks,
+            failed: std::sync::Mutex::default(),
+        };
+        Ok((flake, vec![step.into()]))
     }
 
     async fn run(
         &self,
-        flake: &String,
+        flake: &Flake,
         _: usize,
         log: mpsc::Sender<Vec<u8>>,
         cancel: impl Future<Output = ()> + Send,
     ) -> Result<Exit, String> {
-        let mut command = Command::new(&self.program);
-        command.args(["flake", "check", "--print-build-logs", flake]);
-        spawn(command, log, cancel).await
+        if flake.checks.is_empty() {
+            let mut command = Command::new(&self.program);
+            command.args(["flake", "check", "--print-build-logs", &flake.reference]);
+            return spawn(command, log, cancel).await;
+        }
+        // Completes only when a step returns `Cancelled`, so it is never polled again.
+        let mut cancel = std::pin::pin!(cancel);
+        for (name, installable) in &flake.checks {
+            let mut command = Command::new(&self.program);
+            command.args(["build", "--no-link", "--print-build-logs", installable]);
+            let exit = spawn(command, log.clone(), cancel.as_mut()).await?;
+            if exit != Exit::Code(0) {
+                if exit != Exit::Cancelled {
+                    *flake.failed.lock().unwrap() = Some(name.clone());
+                }
+                return Ok(exit);
+            }
+        }
+        Ok(Exit::Code(0))
     }
 
-    fn cleanup(&self, _: String) {}
+    fn failing_check(&self, flake: &Flake) -> Option<String> {
+        flake.failed.lock().unwrap().clone()
+    }
+
+    fn cleanup(&self, _: Flake) {}
 }
 
 /// Run `command` in its own process group with stdout and stderr interleaved into `log`;

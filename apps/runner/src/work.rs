@@ -76,7 +76,11 @@ async fn attempt<E: Executor>(
         sha = assignment.sha
     );
     worker.attempts.accept(id);
-    let (state, exit_code, reason) = match execute(worker, assignment, cancelled).await {
+    let (exit, failing_check) = match execute(worker, assignment, cancelled).await {
+        Ok((exit, check)) => (Ok(exit), check.unwrap_or_default()),
+        Err(err) => (Err(err), String::new()),
+    };
+    let (state, exit_code, reason) = match exit {
         Ok(Exit::Code(0)) => (ResultState::Succeeded, Some(0), String::new()),
         Ok(Exit::Code(code)) => (
             ResultState::Failed,
@@ -112,28 +116,30 @@ async fn attempt<E: Executor>(
             state: state.into(),
             exit_code,
             // ADR 0112: known only structurally, never parsed from the output.
-            failing_check: String::new(),
+            failing_check,
             reason,
         },
         &worker.metrics,
     );
 }
 
-/// Sources, then each step until one does not succeed; the scratch goes when this returns.
+/// Sources, then each step until one does not succeed, and the failing check when the
+/// backend knows it; the scratch goes when this returns.
 async fn execute<E: Executor>(
     worker: &Worker<E>,
     assignment: &Assignment,
     mut cancelled: oneshot::Receiver<()>,
-) -> Result<Exit, String> {
+) -> Result<(Exit, Option<String>), String> {
     let id = assignment.attempt_id.as_str();
     let checkout = tokio::select! {
         checkout = worker.cache.prepare(assignment) => checkout?,
-        _ = &mut cancelled => return Ok(Exit::Cancelled),
+        _ = &mut cancelled => return Ok((Exit::Cancelled, None)),
     };
     let (env, steps) = worker.executor.prepare(&kajiba_exec::Job {
         source: &checkout.dir,
         sha: &assignment.sha,
         system: &assignment.system,
+        checks: &assignment.checks,
     })?;
     let status = |index: usize, name: &str, state: StepState, exit_code| {
         worker.attempts.send(Message::StepStatus(StepStatus {
@@ -167,8 +173,9 @@ async fn execute<E: Executor>(
             break;
         }
     }
+    let check = worker.executor.failing_check(&env);
     worker.executor.cleanup(env);
-    exit
+    exit.map(|exit| (exit, check))
 }
 
 #[cfg(test)]

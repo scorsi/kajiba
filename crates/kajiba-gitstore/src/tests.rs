@@ -1151,7 +1151,8 @@ fn bundles_are_incremental_over_the_commits_the_receiver_holds() {
     let bundle = |commit: &str, have: &[&str]| {
         let mut out = Vec::new();
         let have: Vec<String> = have.iter().map(|id| id.to_string()).collect();
-        Gix.bundle(&f.bare, commit, &have, &mut out).map(|()| out)
+        Gix.bundle(&f.bare, &[commit.to_owned()], &have, &mut out)
+            .map(|()| out)
     };
     let cache = f.bare.with_file_name("cache.git");
     git(
@@ -1218,6 +1219,46 @@ fn bundles_are_incremental_over_the_commits_the_receiver_holds() {
     );
     assert_eq!(bundle(&tag, &[]), Err(Error::NotFound));
     assert_eq!(bundle("zz", &[]), Err(Error::NotFound));
+
+    // Several heads, all under the run ref: the receiver gets their objects.
+    let mut both = Vec::new();
+    Gix.bundle(
+        &f.bare,
+        &[f.first.clone(), f.second.clone()],
+        &[],
+        &mut both,
+    )
+    .unwrap();
+    assert!(String::from_utf8_lossy(&both).starts_with(&format!(
+        "# v2 git bundle\n{} {BUNDLE_REF}\n{} {BUNDLE_REF}\n\n",
+        f.first, f.second
+    )));
+    let path = empty.with_extension("both.bundle");
+    fs::write(&path, &both).unwrap();
+    git(
+        &empty,
+        &["fetch", "-q", path.to_str().unwrap(), BUNDLE_REF],
+        "1700000000 +0000",
+    );
+    git(&empty, &["cat-file", "-e", &f.second], "1700000000 +0000");
+}
+
+#[test]
+fn coverage_follows_the_history_of_the_held_commits() {
+    let f = fixture("covered");
+    let ids = |ids: &[&String]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+    let covered = |commits: &[&String], have: &[&String]| {
+        Gix.covered(&f.bare, &ids(commits), &ids(have)).unwrap()
+    };
+    assert!(covered(&[&f.first, &f.second], &[&f.third]));
+    assert!(covered(&[&f.second], &[&f.second]));
+    assert!(covered(&[], &[]));
+    assert!(!covered(&[&f.third], &[&f.second]));
+    assert!(!covered(&[&f.first], &[]));
+    // Ids that are not commits of the repository hold nothing.
+    let unknown = "ffffffffffffffffffffffffffffffffffffffff".to_owned();
+    assert!(!covered(&[&f.first], &[&unknown]));
+    assert_eq!(Gix.covered(&f.bare, &[unknown], &[]), Err(Error::NotFound));
 }
 
 #[test]

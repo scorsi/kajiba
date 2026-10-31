@@ -231,17 +231,21 @@ pub trait GitStore {
         verification: &push::Verification,
         allowed_signers: &Path,
     ) -> Result<bool>;
-    /// Writes to `out` a git bundle of `commit` under [`BUNDLE_REF`], minus the history
-    /// of the `have` ids that are commits of the repository (others are ignored); read
-    /// only (ADR 0106). The bundle is valid even when `have` already holds `commit`.
-    /// Blocking; `NotFound` when `commit` is not a commit of the repository.
+    /// Writes to `out` a git bundle of `commits`, each a head named [`BUNDLE_REF`], minus
+    /// the history of the `have` ids that are commits of the repository (others are
+    /// ignored); read only (ADR 0106). The bundle is valid even when `have` already holds
+    /// `commits`. Blocking; `NotFound` when one of `commits` is not a commit of the
+    /// repository.
     fn bundle(
         &self,
         repo: &Path,
-        commit: &str,
+        commits: &[String],
         have: &[String],
         out: &mut dyn std::io::Write,
     ) -> Result<()>;
+    /// Whether the history of the `have` ids that are commits of the repository already
+    /// holds every one of `commits`; read only, blocking.
+    fn covered(&self, repo: &Path, commits: &[String], have: &[String]) -> Result<bool>;
     /// Whether `commit` (a full id) is a commit reachable from any ref of the repository,
     /// whatever its namespace; read only, blocking.
     fn reachable(&self, repo: &Path, commit: &str) -> Result<bool>;
@@ -588,6 +592,37 @@ impl<'a> Gix<'a> {
         }
         Ok(gix::open_opts(repo, options)?)
     }
+
+    /// `commits` and `have` as full ids of commits of the repository: `NotFound` when one
+    /// of `commits` is not one, `have` ids that are not are dropped (sorted, deduplicated).
+    fn commits(
+        &self,
+        repo: &Path,
+        commits: &[String],
+        have: &[String],
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let opened = self.open(repo)?;
+        let is_commit = |id: &String| {
+            gix::ObjectId::from_hex(id.as_bytes())
+                .ok()
+                .filter(|id| {
+                    opened
+                        .try_find_header(*id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|header| header.kind() == gix::object::Kind::Commit)
+                })
+                .map(|id| id.to_string())
+        };
+        let commits = commits
+            .iter()
+            .map(|id| is_commit(id).ok_or(Error::NotFound))
+            .collect::<Result<_>>()?;
+        let mut have: Vec<String> = have.iter().filter_map(is_commit).collect();
+        have.sort();
+        have.dedup();
+        Ok((commits, have))
+    }
 }
 
 /// Caps on the objects browsing loads whole (ADR 0047), checked on the object header
@@ -742,28 +777,12 @@ impl GitStore for Gix<'_> {
     fn bundle(
         &self,
         repo: &Path,
-        commit: &str,
+        commits: &[String],
         have: &[String],
         out: &mut dyn std::io::Write,
     ) -> Result<()> {
         use std::io::Write;
-        let opened = self.open(repo)?;
-        let is_commit = |id: &str| {
-            gix::ObjectId::from_hex(id.as_bytes())
-                .ok()
-                .filter(|id| {
-                    opened
-                        .try_find_header(*id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|header| header.kind() == gix::object::Kind::Commit)
-                })
-                .map(|id| id.to_string())
-        };
-        let commit = is_commit(commit).ok_or(Error::NotFound)?;
-        let mut have: Vec<String> = have.iter().filter_map(|id| is_commit(id)).collect();
-        have.sort();
-        have.dedup();
+        let (commits, have) = self.commits(repo, commits, have)?;
         // `git bundle create` refuses a bare commit id and an empty bundle, and naming a
         // ref would write the repository: the bundle (v2 format) is assembled here, its
         // prerequisites being the `have` commits, which the receiver holds.
@@ -771,7 +790,10 @@ impl GitStore for Gix<'_> {
         for id in &have {
             header.push_str(&format!("-{id}\n"));
         }
-        header.push_str(&format!("{commit} {BUNDLE_REF}\n\n"));
+        for commit in &commits {
+            header.push_str(&format!("{commit} {BUNDLE_REF}\n"));
+        }
+        header.push('\n');
         let io = |err: std::io::Error| Error::Git(format!("bundle: {err}"));
         out.write_all(header.as_bytes()).map_err(io)?;
         let mut command = git();
@@ -795,10 +817,8 @@ impl GitStore for Gix<'_> {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|err| Error::Git(format!("git: {err}")))?;
-        let revs = format!(
-            "{commit}\n--not\n{}",
-            have.iter().map(|id| format!("{id}\n")).collect::<String>()
-        );
+        let lines = |ids: &[String]| ids.iter().map(|id| format!("{id}\n")).collect::<String>();
+        let revs = format!("{}--not\n{}", lines(&commits), lines(&have));
         // Revisions are read whole before the pack is written: no deadlock on the pipes.
         let written = child
             .stdin
@@ -817,6 +837,38 @@ impl GitStore for Gix<'_> {
             return Err(Error::Git(format!("git pack-objects: {status}")));
         }
         Ok(())
+    }
+
+    fn covered(&self, repo: &Path, commits: &[String], have: &[String]) -> Result<bool> {
+        let (commits, have) = self.commits(repo, commits, have)?;
+        if commits.is_empty() {
+            return Ok(true);
+        }
+        let mut command = git();
+        if let Some(path) = self.trusted(repo) {
+            command
+                .arg("-c")
+                .arg(format!("safe.directory={}", path.display()));
+        }
+        let mut arguments = vec!["rev-list".to_owned(), "--max-count=1".to_owned()];
+        arguments.extend(commits);
+        arguments.push("--not".into());
+        arguments.extend(have);
+        let output = command
+            .arg("-C")
+            .arg(repo)
+            .args(&arguments)
+            .stdin(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|err| Error::Git(format!("git: {err}")))?;
+        if !output.status.success() {
+            return Err(Error::Git(format!(
+                "git rev-list: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(output.stdout.is_empty())
     }
 
     fn tips_reach(&self, repo: &Path, commits: &[String]) -> Result<bool> {

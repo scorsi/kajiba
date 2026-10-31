@@ -998,3 +998,200 @@ async fn bundles_serve_only_the_current_leased_attempt_of_the_calling_runner() {
     let status = forge.bundle(Some(SECRET), attempt, &[]).await.unwrap_err();
     assert_eq!(status.code(), tonic::Code::FailedPrecondition);
 }
+
+impl Forge {
+    /// The bundles served to `attempt`, by index, in order.
+    async fn bundles(&self, attempt: &str, have: &[&str]) -> Result<Vec<(u32, Vec<u8>)>, Status> {
+        let mut request = Request::new(FetchRunBundleRequest {
+            attempt_id: attempt.into(),
+            have: have.iter().map(|id| id.to_string()).collect(),
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {SECRET}").parse().unwrap());
+        let mut stream = self
+            .client
+            .clone()
+            .fetch_run_bundle(request)
+            .await?
+            .into_inner();
+        let mut bundles: Vec<(u32, Vec<u8>)> = Vec::new();
+        while let Some(message) = stream.message().await? {
+            match bundles.last_mut() {
+                Some((bundle, data)) if *bundle == message.bundle => data.extend(message.data),
+                _ => bundles.push((message.bundle, message.data)),
+            }
+        }
+        Ok(bundles)
+    }
+}
+
+/// The header of a bundle, up to its pack.
+fn header(bundle: &[u8]) -> String {
+    let end = bundle.windows(5).position(|w| w == b"\nPACK").unwrap() + 1;
+    String::from_utf8(bundle[..end].to_vec()).unwrap()
+}
+
+#[tokio::test]
+async fn a_worktree_attempt_gets_the_base_it_lacks_then_its_stored_bundle() {
+    let forge = Forge::start().await;
+    let git_dir = forge.state.health.git_state_dir.clone();
+    let repo = git_dir.join("repos/00000000000000000000000001.git");
+    git(&git_dir, &["init", "-q", "--bare", repo.to_str().unwrap()]);
+    let empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    let first = git(&repo, &["commit-tree", "-m", "first", empty_tree]);
+    let second = git(
+        &repo,
+        &["commit-tree", "-p", &first, "-m", "second", empty_tree],
+    );
+    git(&repo, &["update-ref", "refs/heads/main", &second]);
+    // The client's commit exists only in its clone and in the stored bundle.
+    let clone = git_dir.join("clone");
+    git(
+        &git_dir,
+        &[
+            "clone",
+            "-q",
+            repo.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    let captured = git(
+        &clone,
+        &["commit-tree", "-p", &second, "-m", "wip", empty_tree],
+    );
+    git(&clone, &["update-ref", "refs/kajiba/worktree/x", &captured]);
+    let stored = git_dir.join("stored.bundle");
+    git(
+        &clone,
+        &[
+            "bundle",
+            "create",
+            "-q",
+            stored.to_str().unwrap(),
+            "refs/kajiba/worktree/x",
+            &format!("^{second}"),
+        ],
+    );
+
+    forge.exec("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
+        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')").await;
+    let run = {
+        let mut writer = forge.state.health.writer.get().unwrap().lock().await;
+        let mut tx = writer.begin().await.unwrap();
+        let run = crate::db::runs::create_run(
+            &mut tx,
+            &crate::db::runs::NewRun {
+                repo_id: 1,
+                sha: &captured,
+                reference: None,
+                trigger: "worktree",
+                event_id: None,
+                triggered_by: Some(1),
+                correlation_id: "worktree",
+                now: 1,
+                worktree: Some(crate::db::runs::Worktree {
+                    checks: &["a".into(), "b".into()],
+                    arch: "aarch64",
+                    os: "linux",
+                    features: &["kvm".into()],
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        run
+    };
+    std::fs::copy(
+        &stored,
+        forge
+            .state
+            .health
+            .state_dir
+            .join(format!("ci/bundles/{run}.bundle")),
+    )
+    .unwrap();
+    let (_sender, mut stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
+        panic!("expected an assignment");
+    };
+    assert_eq!(assignment.sha, captured);
+    assert_eq!(assignment.checks, ["a", "b"]);
+    assert_eq!(assignment.system, "aarch64-linux");
+    let attempt = assignment.attempt_id.clone();
+
+    // An empty cache: the base, then the stored bundle under the run ref; both apply.
+    let bundles = forge.bundles(&attempt, &[]).await.unwrap();
+    assert_eq!(bundles.iter().map(|(n, _)| *n).collect::<Vec<_>>(), [0, 1]);
+    assert_eq!(
+        header(&bundles[0].1),
+        format!("# v2 git bundle\n{second} refs/kajiba/run\n\n")
+    );
+    assert_eq!(
+        header(&bundles[1].1),
+        format!("# v2 git bundle\n-{second}\n{captured} refs/kajiba/run\n\n")
+    );
+    let cache = git_dir.join("cache.git");
+    git(&git_dir, &["init", "-q", "--bare", cache.to_str().unwrap()]);
+    for (n, (_, data)) in bundles.iter().enumerate() {
+        let path = git_dir.join(format!("part-{n}.bundle"));
+        std::fs::write(&path, data).unwrap();
+        git(
+            &cache,
+            &["fetch", "-q", path.to_str().unwrap(), "refs/kajiba/run"],
+        );
+    }
+    git(
+        &cache,
+        &["cat-file", "-e", &format!("{captured}^{{commit}}")],
+    );
+    // Holding the parent of the base: only the base's own commit, then the stored bundle.
+    let bundles = forge.bundles(&attempt, &[&first]).await.unwrap();
+    assert_eq!(
+        header(&bundles[0].1),
+        format!("# v2 git bundle\n-{first}\n{second} refs/kajiba/run\n\n")
+    );
+    // Holding the base: the stored bundle alone.
+    let bundles = forge.bundles(&attempt, &[&second]).await.unwrap();
+    assert_eq!(bundles.iter().map(|(n, _)| *n).collect::<Vec<_>>(), [1]);
+    // The captured commit never entered the repository.
+    assert!(
+        !std::process::Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "cat-file", "-e", &captured])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    // Another runner's secret is refused, as for any run.
+    let status = forge
+        .bundle(Some(OTHER_SECRET), &attempt, &[])
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    // A replayed attempt fetches again; the stale one is refused.
+    forge
+        .exec(&format!(
+            "UPDATE job_attempt SET state = 'lost', lease_expires_at = 1 WHERE public_id = '{attempt}';
+             UPDATE job SET state = 'pending'"
+        ))
+        .await;
+    let connect_response::Message::Assignment(replayed) = next(&mut stream).await else {
+        panic!("expected an assignment");
+    };
+    assert_ne!(replayed.attempt_id, attempt);
+    assert_eq!(
+        forge
+            .bundles(&replayed.attempt_id, &[&second])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let status = forge.bundles(&attempt, &[]).await.unwrap_err();
+    assert_eq!(
+        (status.code(), reason(&status).as_str()),
+        (tonic::Code::FailedPrecondition, "INVALID_STATE")
+    );
+}

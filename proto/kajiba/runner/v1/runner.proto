@@ -12,7 +12,7 @@ service RunnerService {
   // status (0020), an admitted one keeps the stream. A second connection under the same
   // name replaces the first.
   rpc Connect(stream ConnectRequest) returns (stream ConnectResponse);
-  // The sources of an attempt the calling runner holds a lease on, as one git bundle
+  // The sources of an attempt the calling runner holds a lease on, as git bundles
   // (ADR 0106): the attempt's commit, minus what the runner's cache already holds.
   rpc FetchRunBundle(FetchRunBundleRequest) returns (stream FetchRunBundleResponse);
 }
@@ -125,6 +125,9 @@ message Assignment {
   string sha = 3;
   // The Nix system to build for, e.g. `x86_64-linux`.
   string system = 4;
+  // The checks to build, `checks.<system>.<name>` one by one; empty for the whole
+  // `nix flake check` (0097).
+  repeated string checks = 5;
 }
 
 // Stop the attempt: it is not current, or it was cancelled.
@@ -156,7 +159,11 @@ message FetchRunBundleRequest {
   repeated string have = 2;
 }
 
-// Consecutive pieces of one git bundle.
+// Consecutive pieces of the bundles of an attempt, applied in order; every head of a
+// bundle is named `refs/kajiba/run`. A push or manual run has one bundle (index 0). A
+// worktree run has the commits its stored bundle requires (index 0, absent when the
+// runner's cache already holds them), then the stored bundle (index 1) (0097).
 message FetchRunBundleResponse {
   bytes data = 1;
+  uint32 bundle = 2;
 }
