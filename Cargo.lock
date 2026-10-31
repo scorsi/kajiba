@@ -2238,6 +2238,7 @@ dependencies = [
  "axum",
  "clap",
  "kajiba-core",
+ "kajiba-gitstore",
  "kajiba-proto",
  "libc",
  "serde_json",

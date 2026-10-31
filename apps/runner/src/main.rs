@@ -1,3 +1,4 @@
+mod cache;
 mod host;
 mod metrics;
 mod session;

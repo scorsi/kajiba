@@ -25,3 +25,7 @@ tokio-stream.workspace = true
 tonic = { workspace = true, features = ["tls-native-roots"] }
 # Already transitive (tonic): the log facade of the nisshi layer (0022).
 tracing.workspace = true
+
+[dev-dependencies]
+# The fake forge serves the bundles the server would (0106).
+kajiba-gitstore = { path = "../../crates/kajiba-gitstore" }
