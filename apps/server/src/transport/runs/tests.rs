@@ -18,8 +18,15 @@ const BOB: i64 = 2;
 
 async fn fixture(extra: &str) -> (Fixture, Runs) {
     let fixture = Fixture::new(&format!("{REPOS}{extra}")).await;
+    // One declared runner: x86_64-linux, nix, tagged `kvm` (offline: declared is enough).
+    let runner = kajiba_core::config::ServerConfig::parse(
+        "[http]\npublic_url='https://example.org'\n[runners.build-1]\ntoken_file='/run/secrets/b'\n\
+         capabilities={ arch='x86_64', os='linux', tags=['kvm'] }\n",
+    )
+    .unwrap()
+    .runners;
     fixture.repos.0.set_runners(Declared {
-        runners: Default::default(),
+        runners: runner,
         bus: Arc::default(),
         wake: Arc::default(),
     });
@@ -202,6 +209,10 @@ async fn methods_require_their_scope() {
     .unwrap();
     let tip = head(&fixture.bare("alice/ci").await);
     let (read, ci) = (format!("Bearer {READ}"), format!("Bearer {CI}"));
+    let base = GetWorktreeBaseRequest {
+        spec: Some(spec("alice/ci")),
+    }
+    .encode_to_vec();
     let trigger = TriggerRunRequest {
         repo: "alice/ci".into(),
         sha: tip,
@@ -215,6 +226,7 @@ async fn methods_require_their_scope() {
     let path = |method: &str| format!("/kajiba.v1.RunService/{method}");
     for (method, token, message) in [
         ("TriggerRun", &read, trigger.clone()),
+        ("GetWorktreeBase", &read, base.clone()),
         ("ListRuns", &ci, list.clone()),
         ("GetRun", &ci, GetRunRequest::default().encode_to_vec()),
     ] {
@@ -236,6 +248,16 @@ async fn methods_require_their_scope() {
     assert!(
         send(
             &mut app,
+            &path("GetWorktreeBase"),
+            &[("authorization", &ci)],
+            base
+        )
+        .await
+        .is_none()
+    );
+    assert!(
+        send(
+            &mut app,
             &path("TriggerRun"),
             &[("authorization", &ci)],
             trigger
@@ -253,6 +275,209 @@ async fn methods_require_their_scope() {
         .await
         .is_none()
     );
+}
+
+fn spec(repo: &str) -> WorktreeRunSpec {
+    WorktreeRunSpec {
+        repo: repo.into(),
+        system: "x86_64-linux".into(),
+        checks: vec![],
+        features: vec![],
+    }
+}
+
+async fn base(runs: &Runs, user: i64, spec: WorktreeRunSpec) -> Result<Vec<String>, Status> {
+    runs.get_worktree_base(as_user(user, GetWorktreeBaseRequest { spec: Some(spec) }))
+        .await
+        .map(|response| response.into_inner().ids)
+}
+
+#[tokio::test]
+async fn worktree_base_lists_branch_and_tag_tips_only() {
+    let (fixture, runs) =
+        fixture("[repos.empty]\nowner='alice'\ndescription=''\nci_enabled=true\n").await;
+    fixture
+        .fill(
+            "bob/zeta",
+            &[("flake.nix", "{}\n")],
+            &["refs/heads/dev", "refs/tags/v1"],
+        )
+        .await;
+    let bare = fixture.bare("bob/zeta").await;
+    git(
+        &bare,
+        &["tag", "-a", "-m", "annotated", "v2", "refs/heads/main"],
+    );
+    git(
+        &bare,
+        &["update-ref", "refs/contrib/alice/x", "refs/heads/dev"],
+    );
+    git(
+        &bare,
+        &["update-ref", "refs/kajiba/other", "refs/heads/dev~1"],
+    );
+    let mut expected: Vec<String> = [
+        "refs/heads/main",
+        "refs/heads/dev",
+        "refs/tags/v1",
+        "refs/tags/v2",
+    ]
+    .iter()
+    .map(|name| git(&bare, &["rev-parse", name]).trim().to_owned())
+    .collect();
+    expected.sort();
+    expected.dedup();
+    assert_eq!(base(&runs, BOB, spec("bob/zeta")).await.unwrap(), expected);
+    assert_eq!(
+        base(&runs, ALICE, spec("alice/empty")).await.unwrap(),
+        Vec::<String>::new()
+    );
+}
+
+#[tokio::test]
+async fn worktree_admission_refuses_in_order() {
+    let (mut fixture, runs) = fixture("").await;
+    let with = |repo: &str, edit: fn(&mut WorktreeRunSpec)| {
+        let mut spec = spec(repo);
+        edit(&mut spec);
+        spec
+    };
+    let invalid = (Code::InvalidArgument, "INVALID_FIELD");
+    let no_runner = (Code::FailedPrecondition, "NO_MATCHING_RUNNER");
+    let cases = [
+        (BOB, spec("alice/nope"), (Code::NotFound, "REPO_NOT_FOUND")),
+        (
+            ALICE,
+            spec("bob/zeta"),
+            (Code::PermissionDenied, "ROLE_MISSING"),
+        ),
+        // The role comes before CI and the names.
+        (
+            ALICE,
+            with("bob/zeta", |s| s.system = "bad".into()),
+            (Code::PermissionDenied, "ROLE_MISSING"),
+        ),
+        (
+            ALICE,
+            spec("alice/off"),
+            (Code::FailedPrecondition, "CI_DISABLED"),
+        ),
+        (
+            BOB,
+            with("alice/ci", |s| s.checks = vec!["a".into(), "a b".into()]),
+            invalid,
+        ),
+        (
+            BOB,
+            with("alice/ci", |s| s.checks = vec![String::new()]),
+            invalid,
+        ),
+        (
+            BOB,
+            with("alice/ci", |s| s.system = "x86_64".into()),
+            invalid,
+        ),
+        (
+            BOB,
+            with("alice/ci", |s| s.system = "X86_64-linux".into()),
+            invalid,
+        ),
+        (
+            BOB,
+            with("alice/ci", |s| s.system = "-linux".into()),
+            invalid,
+        ),
+        (
+            BOB,
+            with("alice/ci", |s| s.features = vec!["KVM".into()]),
+            invalid,
+        ),
+        // Names before matching: a bad name for an absent system is still INVALID_FIELD.
+        (
+            BOB,
+            with("alice/ci", |s| {
+                s.system = "aarch64-linux".into();
+                s.checks = vec!["a.b".into()]
+            }),
+            invalid,
+        ),
+        (
+            BOB,
+            with("alice/ci", |s| s.system = "aarch64-linux".into()),
+            no_runner,
+        ),
+        (
+            BOB,
+            with("alice/ci", |s| s.system = "x86_64-darwin".into()),
+            no_runner,
+        ),
+        (
+            BOB,
+            with("alice/ci", |s| {
+                s.features = vec!["kvm".into(), "big-parallel".into()]
+            }),
+            no_runner,
+        ),
+    ];
+    for (user, spec, expected) in cases {
+        let status = base(&runs, user, spec.clone()).await.unwrap_err();
+        assert_eq!(refusal(status), (expected.0, expected.1.into()), "{spec:?}");
+    }
+    let accepted = with("alice/ci", |s| {
+        s.checks = vec!["vm-test_1".into()];
+        s.features = vec!["kvm".into()];
+    });
+    assert_eq!(base(&runs, BOB, accepted.clone()).await.unwrap().len(), 1);
+
+    // Four active worktree runs of bob's are the limit; terminal ones and others' don't count.
+    let tip = head(&fixture.bare("alice/ci").await);
+    {
+        let mut writer = fixture.writer.lock().await;
+        for (index, (user, trigger, state)) in [
+            (BOB, "worktree", "queued"),
+            (BOB, "worktree", "running"),
+            (BOB, "worktree", "running"),
+            (BOB, "worktree", "succeeded"),
+            (BOB, "manual", "queued"),
+            (ALICE, "worktree", "queued"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query("INSERT INTO run (public_id, repo_id, sha, trigger, triggered_by, state, created_at) VALUES (?, 1, ?, ?, ?, ?, 0)")
+                .bind(format!("{:026}", index + 1))
+                .bind(&tip)
+                .bind(trigger)
+                .bind(user)
+                .bind(state)
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+        }
+    }
+    assert!(base(&runs, BOB, accepted.clone()).await.is_ok());
+    sqlx::query("INSERT INTO run (public_id, repo_id, sha, trigger, triggered_by, state, created_at) VALUES ('00000000000000000000000010', 1, ?, 'worktree', ?, 'queued', 0)")
+        .bind(&tip)
+        .bind(BOB)
+        .execute(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    let status = base(&runs, BOB, accepted.clone()).await.unwrap_err();
+    assert_eq!(
+        refusal(status),
+        (Code::ResourceExhausted, "WORKTREE_RUNS_LIMIT".into())
+    );
+    // Archived: told before the role (ADR 0118), for a writer as for the owner.
+    fixture
+        .apply("[repos.off]\nowner='alice'\ndescription=''\n")
+        .await;
+    for user in [ALICE, BOB] {
+        let status = base(&runs, user, spec("alice/ci")).await.unwrap_err();
+        assert_eq!(
+            refusal(status),
+            (Code::FailedPrecondition, "INVALID_STATE".into())
+        );
+    }
 }
 
 const ATTEMPT: &str = "01J0000000000000000000000A";

@@ -7,14 +7,15 @@ use super::{
     local::refused,
     repos::{caller, find_readable, internal},
 };
-use kajiba_core::config::Role;
+use kajiba_core::config::{Backend, Role};
 use kajiba_gitstore::{GitStore, Gix};
 use kajiba_proto::{
     google::protobuf::Timestamp,
     v1::{
-        Attempt, AttemptState, FailureSummary, GetRunRequest, GetRunResponse, Job, JobState,
-        ListRunsRequest, ListRunsResponse, LogBytes, LogSection, Run, RunState, RunTrigger,
-        TriggerRunRequest, TriggerRunResponse, WatchRunRequest, WatchRunResponse,
+        Attempt, AttemptState, FailureSummary, GetRunRequest, GetRunResponse,
+        GetWorktreeBaseRequest, GetWorktreeBaseResponse, Job, JobState, ListRunsRequest,
+        ListRunsResponse, LogBytes, LogSection, Run, RunState, RunTrigger, TriggerRunRequest,
+        TriggerRunResponse, WatchRunRequest, WatchRunResponse, WorktreeRunSpec,
         run_service_server::RunService, watch_run_response,
     },
 };
@@ -269,6 +270,152 @@ async fn readable_run(
     Ok(row)
 }
 
+/// ADR 0097: at most this many non-terminal worktree runs per user.
+pub const WORKTREE_RUNS: i64 = 4;
+
+/// A worktree run that passed the creation checks (ADR 0118).
+#[derive(Debug)]
+// shortcut: CreateWorktreeRun (J6 task 23) reads the other fields; drop this then.
+#[allow(dead_code)]
+pub struct Admitted {
+    pub repo_id: i64,
+    pub repo: String,
+    pub arch: String,
+    pub os: String,
+}
+
+/// `[A-Za-z0-9_-]+` (0097).
+fn check_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
+/// `<arch>-<os>`, each half `[a-z0-9_]+` (ADR 0118).
+fn system(name: &str) -> Option<(&str, &str)> {
+    let half = |text: &str| {
+        !text.is_empty()
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    };
+    name.split_once('-')
+        .filter(|(arch, os)| half(arch) && half(os))
+}
+
+impl Runs {
+    /// ADR 0114 and 0118: not archived, then the `write` role, then CI enabled.
+    async fn may_run(&self, user: i64, repo_id: i64) -> Result<(), Status> {
+        let (archived, ci_enabled): (bool, bool) =
+            sqlx::query_as("SELECT archived_at IS NOT NULL, ci_enabled FROM repo WHERE id = ?")
+                .bind(repo_id)
+                .fetch_one(self.readers()?)
+                .await
+                .map_err(internal)?;
+        if archived {
+            return Err(refused(
+                tonic::Code::FailedPrecondition,
+                "INVALID_STATE",
+                "the repository is archived".into(),
+            ));
+        }
+        let role = crate::db::permissions::role(self.readers()?, user, repo_id)
+            .await
+            .map_err(internal)?;
+        if role.is_none_or(|role| role < Role::Write) {
+            return Err(refused(
+                tonic::Code::PermissionDenied,
+                "ROLE_MISSING",
+                "triggering a run needs the write role".into(),
+            ));
+        }
+        if !ci_enabled {
+            return Err(refused(
+                tonic::Code::FailedPrecondition,
+                "CI_DISABLED",
+                "CI is disabled on this repository".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The checks of a worktree run's creation, in ADR 0118's order, shared by
+    /// `GetWorktreeBase` and `CreateWorktreeRun`; the scope is checked by the auth layer.
+    pub async fn admit(&self, user: i64, spec: &WorktreeRunSpec) -> Result<Admitted, Status> {
+        let declared = self
+            .0
+            .runners
+            .get()
+            .ok_or_else(|| Status::unavailable("starting"))?;
+        let (repo_id, repo) = find_readable(self.readers()?, user, &spec.repo).await?;
+        self.may_run(user, repo_id).await?;
+        if !spec.checks.iter().all(|name| check_name(name)) {
+            return Err(cursor::invalid_field(
+                "spec.checks",
+                "a check name is [A-Za-z0-9_-]+",
+            ));
+        }
+        let (arch, os) = system(&spec.system)
+            .ok_or_else(|| cursor::invalid_field("spec.system", "a system is <arch>-<os>"))?;
+        for feature in &spec.features {
+            kajiba_core::config::validate_tag(feature)
+                .map_err(|err| cursor::invalid_field("spec.features", err))?;
+        }
+        let matches = declared.runners.values().any(|runner| {
+            let capabilities = &runner.capabilities;
+            // Compared by their configuration names, as admission does.
+            serde_json::to_value(capabilities.arch).is_ok_and(|name| name == arch)
+                && serde_json::to_value(capabilities.os).is_ok_and(|name| name == os)
+                && capabilities.backends.contains(&Backend::Nix)
+                && spec
+                    .features
+                    .iter()
+                    .all(|feature| capabilities.tags.contains(feature))
+        });
+        if !matches {
+            return Err(refused(
+                tonic::Code::FailedPrecondition,
+                "NO_MATCHING_RUNNER",
+                format!(
+                    "no declared runner can run {} with these features",
+                    spec.system
+                ),
+            ));
+        }
+        active_worktree_runs(self.readers()?, user).await?;
+        Ok(Admitted {
+            repo_id,
+            repo,
+            arch: arch.into(),
+            os: os.into(),
+        })
+    }
+}
+
+/// WORKTREE_RUNS_LIMIT when `user` already has [`WORKTREE_RUNS`] non-terminal worktree runs.
+pub async fn active_worktree_runs<'e>(
+    executor: impl sqlx::SqliteExecutor<'e>,
+    user: i64,
+) -> Result<(), Status> {
+    let active: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM run WHERE trigger = 'worktree' AND triggered_by = ?
+           AND state IN ('queued', 'running')",
+    )
+    .bind(user)
+    .fetch_one(executor)
+    .await
+    .map_err(internal)?;
+    if active >= WORKTREE_RUNS {
+        return Err(refused(
+            tonic::Code::ResourceExhausted,
+            "WORKTREE_RUNS_LIMIT",
+            format!("at most {WORKTREE_RUNS} worktree runs may be active at once"),
+        ));
+    }
+    Ok(())
+}
+
 type Watcher = mpsc::Sender<Result<WatchRunResponse, Status>>;
 
 /// Watchers re-read the run this often even without a progress signal.
@@ -426,37 +573,7 @@ impl RunService for Runs {
             _ => return Err(Status::unavailable("starting")),
         };
         let (repo_id, repo) = find_readable(self.readers()?, user, &request.repo).await?;
-        // ADR 0114: archived, then the role, then CI, then the commit.
-        let (archived, ci_enabled): (bool, bool) =
-            sqlx::query_as("SELECT archived_at IS NOT NULL, ci_enabled FROM repo WHERE id = ?")
-                .bind(repo_id)
-                .fetch_one(self.readers()?)
-                .await
-                .map_err(internal)?;
-        if archived {
-            return Err(refused(
-                tonic::Code::FailedPrecondition,
-                "INVALID_STATE",
-                "the repository is archived".into(),
-            ));
-        }
-        let role = crate::db::permissions::role(self.readers()?, user, repo_id)
-            .await
-            .map_err(internal)?;
-        if role.is_none_or(|role| role < Role::Write) {
-            return Err(refused(
-                tonic::Code::PermissionDenied,
-                "ROLE_MISSING",
-                "triggering a run needs the write role".into(),
-            ));
-        }
-        if !ci_enabled {
-            return Err(refused(
-                tonic::Code::FailedPrecondition,
-                "CI_DISABLED",
-                "CI is disabled on this repository".into(),
-            ));
-        }
+        self.may_run(user, repo_id).await?;
         let root = self.0.git_state_dir.join("repos");
         let (dir, sha) = (root.join(format!("{repo}.git")), request.sha.clone());
         let reachable =
@@ -501,6 +618,29 @@ impl RunService for Runs {
         tracing::info!(event = "run-state", run = public_id, state = "queued");
         declared.wake.notify_one();
         Ok(Response::new(TriggerRunResponse { run: Some(run) }))
+    }
+
+    async fn get_worktree_base(
+        &self,
+        request: Request<GetWorktreeBaseRequest>,
+    ) -> Result<Response<GetWorktreeBaseResponse>, Status> {
+        let user = caller(&request)?;
+        let spec = request.into_inner().spec.unwrap_or_default();
+        let admitted = self.admit(user, &spec).await?;
+        let root = self.0.git_state_dir.join("repos");
+        let dir = root.join(format!("{}.git", admitted.repo));
+        let refs = tokio::task::spawn_blocking(move || Gix::shared(&root).refs(&dir))
+            .await
+            .map_err(|err| Status::internal(format!("git: {err}")))?
+            .map_err(super::repos::git_error("REPO_NOT_FOUND"))?;
+        let ids: std::collections::BTreeSet<String> = refs
+            .into_iter()
+            .filter(|r| r.name.starts_with("refs/heads/") || r.name.starts_with("refs/tags/"))
+            .map(|r| r.target)
+            .collect();
+        Ok(Response::new(GetWorktreeBaseResponse {
+            ids: ids.into_iter().collect(),
+        }))
     }
 
     async fn get_run(

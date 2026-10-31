@@ -609,7 +609,7 @@ fn normalize<T>(map: &mut BTreeMap<String, T>, field: &str) -> Result<(), String
 }
 
 /// Tags are matched exactly (0008), like Nix system features: lowercase, never normalized.
-fn validate_tag(tag: &str) -> Result<(), &'static str> {
+pub fn validate_tag(tag: &str) -> Result<(), &'static str> {
     if (1..=63).contains(&tag.len())
         && tag.as_bytes()[0].is_ascii_alphanumeric()
         && tag.bytes().all(|b| {

@@ -270,6 +270,12 @@ impl RunService for Fake {
     ) -> Result<Response<ListRunsResponse>, Status> {
         unimplemented()
     }
+    async fn get_worktree_base(
+        &self,
+        _: tonic::Request<kajiba_proto::v1::GetWorktreeBaseRequest>,
+    ) -> Result<Response<kajiba_proto::v1::GetWorktreeBaseResponse>, Status> {
+        unimplemented()
+    }
 
     type WatchRunStream = std::pin::Pin<
         Box<

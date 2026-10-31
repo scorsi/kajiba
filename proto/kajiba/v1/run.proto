@@ -30,6 +30,13 @@ service RunService {
   rpc WatchRun(WatchRunRequest) returns (stream WatchRunResponse) {
     option (kajiba.v1.scope) = SCOPE_REPO_READ;
   }
+  // The ids `refs/heads/*` and `refs/tags/*` point to, for a worktree run's bundle
+  // (0097), after the checks a worktree run's creation makes (ADR 0118): REPO_NOT_FOUND,
+  // INVALID_STATE (archived), ROLE_MISSING (below `write`), CI_DISABLED, INVALID_FIELD
+  // (check, system or feature name), NO_MATCHING_RUNNER, WORKTREE_RUNS_LIMIT.
+  rpc GetWorktreeBase(GetWorktreeBaseRequest) returns (GetWorktreeBaseResponse) {
+    option (kajiba.v1.scope) = SCOPE_CI_TRIGGER;
+  }
 }
 
 message TriggerRunRequest {
@@ -177,4 +184,24 @@ message LogBytes {
   // Where `data` starts in the run's log: the attempts' logs one after the other.
   uint64 offset = 1;
   bytes data = 2;
+}
+
+// A worktree run to create (0097, ADR 0118).
+message WorktreeRunSpec {
+  string repo = 1;
+  // A Nix system, `<arch>-<os>`.
+  string system = 2;
+  // Check names to build; empty runs the whole `nix flake check`.
+  repeated string checks = 3;
+  // The selected checks' `requiredSystemFeatures`, required as runner tags.
+  repeated string features = 4;
+}
+
+message GetWorktreeBaseRequest {
+  WorktreeRunSpec spec = 1;
+}
+
+message GetWorktreeBaseResponse {
+  // Distinct, sorted; empty for an empty repository.
+  repeated string ids = 1;
 }
