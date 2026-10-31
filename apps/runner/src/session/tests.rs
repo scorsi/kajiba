@@ -140,6 +140,7 @@ fn logs_and_results_are_kept_until_acknowledged_and_resent_after_a_continue() {
     for data in ["one", "two", "three"] {
         attempts.log("A1", 0, data.into());
     }
+    assert_eq!(attempts.reconcile(), ["A1"]);
     let (outbound, mut sent) = mpsc::unbounded_channel();
     attempts.attach(Some(outbound));
     let mut drain = || {
@@ -192,6 +193,73 @@ async fn offer(offered: &mut mpsc::Receiver<Offered>) -> Offered {
         .await
         .unwrap()
         .unwrap()
+}
+
+#[test]
+fn completion_during_reconnection_waits_for_log_replay() {
+    for finish_before_continue in [true, false] {
+        let (attempts, metrics) = (Attempts::default(), Metrics::default());
+        attempts.accept("A1");
+        attempts.log("A1", 0, b"one".to_vec());
+        attempts.log("A1", 0, b"two".to_vec());
+        assert_eq!(attempts.reconcile(), ["A1"]);
+        let (outbound, mut sent) = mpsc::unbounded_channel();
+        attempts.attach(Some(outbound));
+        attempts.accept("A2");
+        assert_eq!(
+            sent.try_recv().unwrap().message,
+            Some(Message::Accept(Accept {
+                attempt_id: "A2".into(),
+            }))
+        );
+        attempts.send(Message::Heartbeat(Heartbeat {}));
+        assert_eq!(
+            sent.try_recv().unwrap().message,
+            Some(Message::Heartbeat(Heartbeat {}))
+        );
+        assert_eq!(
+            attempts.receive(connect_response::Message::CancelAttempt(CancelAttempt {
+                attempt_id: "A2".into(),
+            })),
+            Some(Job::Cancelled("A2".into()))
+        );
+        let result = RunResult {
+            attempt_id: "A1".into(),
+            state: ResultState::Succeeded.into(),
+            exit_code: Some(0),
+            ..Default::default()
+        };
+        if finish_before_continue {
+            attempts.log("A1", 0, b"three".to_vec());
+            attempts.finish(result.clone(), &metrics);
+        }
+        assert!(sent.try_recv().is_err());
+        attempts.receive(connect_response::Message::ContinueAttempt(
+            ContinueAttempt {
+                attempt_id: "A1".into(),
+            },
+        ));
+        if !finish_before_continue {
+            attempts.log("A1", 0, b"three".to_vec());
+            attempts.finish(result.clone(), &metrics);
+        }
+        assert!(sent.try_recv().is_err());
+        attempts.receive(connect_response::Message::LogAck(LogAck {
+            attempt_id: "A1".into(),
+            sequence: 1,
+        }));
+        let messages: Vec<_> = std::iter::from_fn(|| sent.try_recv().ok())
+            .map(|request| request.message.unwrap())
+            .collect();
+        assert_eq!(
+            messages,
+            [chunk(2, "two"), chunk(3, "three"), Message::Result(result)]
+        );
+        attempts.receive(connect_response::Message::ResultAck(ResultAck {
+            attempt_id: "A1".into(),
+        }));
+        assert!(attempts.ids().is_empty());
+    }
 }
 
 #[tokio::test]

@@ -65,6 +65,8 @@ struct Attempt {
     next: u64,
     unacknowledged: VecDeque<LogChunk>,
     result: Option<RunResult>,
+    /// Wait for ContinueAttempt and its LogAck before sending on a new stream.
+    reconciling: bool,
     /// Continued after a reconnection: resend from the log acknowledgment that follows.
     resend: bool,
 }
@@ -77,6 +79,19 @@ struct Inner {
 
 impl Inner {
     fn send(&self, message: Message) {
+        let attempt = match &message {
+            Message::Accept(accept) => Some(&accept.attempt_id),
+            Message::LogChunk(chunk) => Some(&chunk.attempt_id),
+            Message::StepStatus(step) => Some(&step.attempt_id),
+            Message::Result(result) => Some(&result.attempt_id),
+            _ => None,
+        };
+        if attempt
+            .and_then(|id| self.attempts.get(id))
+            .is_some_and(|held| held.reconciling)
+        {
+            return;
+        }
         if let Some(outbound) = &self.outbound {
             let _ = outbound.send(ConnectRequest {
                 message: Some(message),
@@ -133,8 +148,18 @@ impl Attempts {
         inner.send(Message::Result(result));
     }
 
+    #[cfg(test)]
     fn ids(&self) -> Vec<String> {
         self.0.lock().unwrap().attempts.keys().cloned().collect()
+    }
+
+    fn reconcile(&self) -> Vec<String> {
+        let mut inner = self.0.lock().unwrap();
+        for held in inner.attempts.values_mut() {
+            held.reconciling = true;
+            held.resend = false;
+        }
+        inner.attempts.keys().cloned().collect()
     }
 
     pub(crate) fn attach(&self, outbound: Option<mpsc::UnboundedSender<ConnectRequest>>) {
@@ -166,6 +191,7 @@ impl Attempts {
                     held.unacknowledged.pop_front();
                 }
                 if std::mem::take(&mut held.resend) {
+                    held.reconciling = false;
                     let mut resent: Vec<Message> = held
                         .unacknowledged
                         .iter()
@@ -205,7 +231,7 @@ async fn session(
             version: env!("CARGO_PKG_VERSION").into(),
             capabilities: Some(identity.capabilities.clone()),
             hostname: identity.hostname.clone(),
-            in_flight_attempt_ids: attempts.ids(),
+            in_flight_attempt_ids: attempts.reconcile(),
         })),
     });
     let mut request = Request::new(UnboundedReceiverStream::new(receiver));
