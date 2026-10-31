@@ -548,8 +548,8 @@ impl Runners {
             (Some(writer), Some(declared)) => (writer, declared),
             _ => return Err(internal("not started")),
         };
-        let now = crate::db::runs::now();
         let mut writer = writer.lock().await;
+        let now = crate::db::runs::now();
         let mut tx = writer.begin().await.map_err(internal)?;
         let (attempt, outcome, acknowledgment) = match message {
             Message::Heartbeat(_) => {
@@ -583,6 +583,7 @@ impl Runners {
                         step: chunk.step_index,
                         data: &chunk.data,
                     },
+                    now,
                 )
                 .await
                 .map_err(internal)?;

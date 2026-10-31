@@ -289,6 +289,7 @@ async fn log(
             step: 0,
             data,
         },
+        10,
     )
     .await
     .unwrap();
@@ -353,6 +354,136 @@ async fn log_chunks_are_appended_in_sequence_only() {
     assert_eq!(log(&mut writer, &logs, 2, &attempt, 6, b"x").await, None);
     readers.close().await;
     writer.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn only_running_unexpired_attempts_accept_new_logs_and_steps() {
+    for (state, deadline, writable) in [
+        ("running", 20, true),  // The lease includes its last millisecond.
+        ("running", 19, false), // Expired, before the scheduler's sweep.
+        ("succeeded", 30_000, false),
+        ("failed", 30_000, false),
+        ("cancelled", 30_000, false),
+        ("lost", 30_000, false), // No replacement yet: still the latest attempt.
+    ] {
+        let dir = TempDir::new();
+        let (mut writer, readers) = open(&dir.database()).await.unwrap();
+        populate(&mut writer).await;
+        let (_, attempt) = running(&mut writer).await;
+        assert_eq!(
+            log(&mut writer, &dir.0, 1, &attempt, 1, b"original").await,
+            Some(1)
+        );
+        assert!(
+            step(
+                &mut writer,
+                1,
+                &attempt,
+                (0, "flake-check", "failed", Some(1)),
+                10
+            )
+            .await
+            .unwrap()
+        );
+        sqlx::query("UPDATE job_attempt SET state = ?, lease_expires_at = ?, finished_at = ?")
+            .bind(state)
+            .bind(deadline)
+            .bind((state != "running").then_some(15_i64))
+            .execute(&mut writer)
+            .await
+            .unwrap();
+        let mut tx = writer.begin().await.unwrap();
+        // Replayed chunks are acknowledged even after termination or lease expiry.
+        for (sequence, data, expected) in [
+            (1, &b"duplicate"[..], Some(1)),
+            (2, &b"new"[..], writable.then_some(2)),
+        ] {
+            assert_eq!(
+                append_log(
+                    &mut tx,
+                    &dir.0,
+                    1,
+                    &Chunk {
+                        attempt: &attempt,
+                        sequence,
+                        step: 0,
+                        data,
+                    },
+                    20
+                )
+                .await
+                .unwrap(),
+                expected,
+                "{state}, lease {deadline}"
+            );
+        }
+        assert_eq!(
+            step(&mut tx, 1, &attempt, (0, "changed", "running", None), 20)
+                .await
+                .unwrap(),
+            writable
+        );
+        // An absent step must not be created either.
+        assert_eq!(
+            step(&mut tx, 1, &attempt, (1, "new", "running", None), 20)
+                .await
+                .unwrap(),
+            writable
+        );
+        tx.commit().await.unwrap();
+        let path = dir.0.join(format!("{attempt}.log"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            if writable {
+                &b"originalnew"[..]
+            } else {
+                &b"original"[..]
+            }
+        );
+        assert_eq!(
+            count(&mut writer, "SELECT count(*) FROM log_chunk").await,
+            if writable { 2 } else { 1 }
+        );
+        if !writable {
+            let steps: Vec<StepRow> = sqlx::query_as(
+                "SELECT idx, name, state, exit_code, started_at, finished_at FROM step",
+            )
+            .fetch_all(&mut writer)
+            .await
+            .unwrap();
+            assert_eq!(
+                steps,
+                [(
+                    0,
+                    "flake-check".into(),
+                    "failed".into(),
+                    Some(1),
+                    None,
+                    Some(10)
+                )]
+            );
+        }
+        if state != "running" {
+            assert_eq!(
+                crate::db::retention::purge_logs(&mut writer, &dir.0, Duration::from_secs(1), 2000)
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert!(!path.exists());
+            assert_eq!(
+                log(&mut writer, &dir.0, 1, &attempt, 1, b"recreated").await,
+                None
+            );
+            assert!(!path.exists());
+            assert_eq!(
+                count(&mut writer, "SELECT count(*) FROM log_chunk").await,
+                0
+            );
+        }
+        readers.close().await;
+        writer.close().await.unwrap();
+    }
 }
 
 async fn result(

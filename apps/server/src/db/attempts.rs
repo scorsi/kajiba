@@ -338,12 +338,14 @@ pub struct Chunk<'a> {
 /// Append the chunk when its sequence is the next one: bytes to
 /// `<logs>/<attempt public id>.log`, then its `log_chunk` row (offset, length). A
 /// duplicate or a gap changes nothing. Returns the highest contiguous sequence to
-/// acknowledge, or `None` (cancel) when the attempt is not this runner's current one.
+/// acknowledge, or `None` (cancel) when the attempt is not this runner's current one
+/// or a new chunk targets a terminal or expired attempt. Duplicates remain acknowledged.
 pub async fn append_log(
     tx: &mut SqliteConnection,
     logs: &Path,
     runner_id: i64,
     chunk: &Chunk<'_>,
+    now: i64,
 ) -> Result<Option<u64>, sqlx::Error> {
     let Some(attempt) = current(tx, runner_id, chunk.attempt).await? else {
         return Ok(None);
@@ -354,6 +356,12 @@ pub async fn append_log(
     .bind(attempt.id)
     .fetch_one(&mut *tx)
     .await?;
+    if chunk.sequence <= highest as u64 {
+        return Ok(Some(highest as u64));
+    }
+    if attempt.state != "running" || attempt.lease_expires_at < now {
+        return Ok(None);
+    }
     if i64::try_from(chunk.sequence) != Ok(highest + 1) {
         return Ok(Some(highest as u64));
     }
@@ -380,7 +388,7 @@ pub async fn append_log(
 }
 
 /// Record a step's state (`running`, `succeeded`, `failed`, `skipped`); false when the
-/// attempt is not this runner's current one.
+/// attempt is not this runner's current, running, unexpired one.
 pub async fn step(
     tx: &mut SqliteConnection,
     runner_id: i64,
@@ -391,6 +399,9 @@ pub async fn step(
     let Some(attempt) = current(tx, runner_id, attempt).await? else {
         return Ok(false);
     };
+    if attempt.state != "running" || attempt.lease_expires_at < now {
+        return Ok(false);
+    }
     let running = state == "running";
     sqlx::query(
         "INSERT INTO step (attempt_id, idx, name, state, exit_code, started_at, finished_at)
