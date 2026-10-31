@@ -381,7 +381,7 @@ pkgs.testers.runNixOSTest {
         assert code == 1, forge.succeed("cat /tmp/r2-manual.err")
 
     with subtest("a closed pipe ends kajiba ci logs quietly"):
-        assert forge.succeed(f"set -o pipefail; {writer_cli} ci logs {r2} 2>/tmp/head.err | head -n 1").strip() != ""
+        assert forge.succeed(f"set -o pipefail; {writer_cli} ci logs {r2} 2>/tmp/head.err | head -c 4096").strip() != ""
         assert forge.succeed("cat /tmp/head.err") == ""
 
     with subtest("refs/contrib does not trigger; a write user can, a read user cannot"):
