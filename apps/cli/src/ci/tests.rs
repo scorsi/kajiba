@@ -229,6 +229,30 @@ async fn watch_prints_the_pending_reason_then_follows() {
 }
 
 #[tokio::test]
+async fn watching_a_terminal_run_prints_its_outcome_once() {
+    for (run, summary) in [
+        (
+            failed("fmt"),
+            format!(
+                "kajiba: run {ID} failed in check fmt: exit status 1\nerror: build failed\n1 check failed\n"
+            ),
+        ),
+        (
+            run_in(RunState::Cancelled),
+            format!("kajiba: run {ID} cancelled\n"),
+        ),
+    ] {
+        let (fake, url) = fake(run.clone()).await;
+        fake.0.lock().unwrap().run = Some(run);
+        let (code, out, err) = output(&url, Command::Watch { run: ID.into() }, false).await;
+        assert_eq!(code, ExitCode::FAILURE);
+        assert_eq!(out.as_bytes(), LOG);
+        assert_eq!(err, format!("{MARK}{summary}"));
+        assert_eq!(fake.0.lock().unwrap().watches, [(0, true)]);
+    }
+}
+
+#[tokio::test]
 async fn an_interrupted_stream_resumes_from_the_received_offset() {
     let (fake, url) = fake(run_in(RunState::Succeeded)).await;
     fake.0.lock().unwrap().drop_at = Some(10);

@@ -125,7 +125,9 @@ pub async fn run(
         }
         Command::Watch { run } => {
             let run = get(&mut runs, run).await?;
-            explain(&run, err);
+            if state(&run) == RunState::Queued {
+                explain(&run, err);
+            }
             follow(&mut runs, &run.public_id, true, out, err).await
         }
         Command::Logs { run } => follow(&mut runs, &run, false, out, err).await,
