@@ -1,7 +1,32 @@
 //! Runner-host requirements of the `nix` backend (0009), checked at startup.
 
 use serde_json::Value;
-use std::{os::unix::fs::MetadataExt, path::Path};
+use std::{
+    fs,
+    os::unix::fs::{DirBuilderExt, MetadataExt},
+    path::Path,
+};
+
+/// Keep private source caches and checkouts behind a runner-owned directory.
+pub fn prepare_state(path: &Path) -> Result<(), String> {
+    let check = || -> std::io::Result<()> {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_dir()
+            || metadata.uid() != kajiba_core::local::effective_uid()
+            || metadata.mode() & 0o7777 != 0o700
+        {
+            return Err(std::io::Error::other(
+                "must be a runner-owned directory with mode 0700",
+            ));
+        }
+        Ok(())
+    };
+    check().map_err(|err| format!("state_dir ({}): {err}", path.display()))
+}
 
 /// Check `nix config show --json` for the runner `user`, member of `groups`: the build
 /// sandbox is on, the user is not trusted by the daemon, a flake's `nixConfig` is not
@@ -96,6 +121,32 @@ pub async fn check(token: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn state_is_private_and_unsafe_existing_paths_are_refused() {
+        let dir = std::env::temp_dir().join(format!("kajiba-runner-state-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let state = dir.join("nested/state");
+        prepare_state(&state).unwrap();
+        let metadata = fs::symlink_metadata(&state).unwrap();
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+        assert_eq!(metadata.uid(), kajiba_core::local::effective_uid());
+        prepare_state(&state).unwrap();
+        for mode in [0o755, 0o750, 0o770, 0o777, 0o1700] {
+            fs::set_permissions(&state, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(prepare_state(&state).unwrap_err().starts_with("state_dir"));
+            assert_eq!(fs::metadata(&state).unwrap().mode() & 0o7777, mode);
+        }
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let link = dir.join("link");
+        symlink(&state, &link).unwrap();
+        assert!(prepare_state(&link).is_err());
+        let file = dir.join("file");
+        fs::write(&file, "").unwrap();
+        assert!(prepare_state(&file).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     fn nix(sandbox: &str, accept: &str, trusted: &str) -> String {
         format!(
