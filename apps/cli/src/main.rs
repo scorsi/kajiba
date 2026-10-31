@@ -6,6 +6,13 @@ use std::{
     process::ExitCode,
 };
 
+/// `eprintln!` without its panic: a closed stderr only loses the message (ADR 0116).
+macro_rules! report {
+    ($($arg:tt)*) => {{
+        let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("{}\n", format_args!($($arg)*)));
+    }};
+}
+
 mod client;
 mod login;
 mod repo;
@@ -53,21 +60,37 @@ async fn main() -> ExitCode {
     let stdin = std::io::stdin();
     let tty = stdin.is_terminal();
     let env = |name: &str| std::env::var_os(name);
-    match run(
-        Args::parse(),
-        &env,
-        &mut stdin.lock(),
-        tty,
-        &mut std::io::stdout(),
-    )
-    .await
-    {
+    finish(run(Args::parse(), &env, &mut stdin.lock(), tty, &mut Stdout).await)
+}
+
+fn finish(result: Result<(), client::Error>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("kajiba: {err}");
+            report!("kajiba: {err}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Every command's standard output: once its reader is gone (`kajiba … | head`), the
+/// process ends at once, quietly and successfully (ADR 0116).
+struct Stdout;
+
+impl Write for Stdout {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        quiet(std::io::stdout().write(buf))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        quiet(std::io::stdout().flush())
+    }
+}
+
+fn quiet<T>(result: std::io::Result<T>) -> std::io::Result<T> {
+    if matches!(&result, Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe) {
+        std::process::exit(0);
+    }
+    result
 }
 
 async fn run(

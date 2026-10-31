@@ -156,7 +156,7 @@ pub fn connect(url: &str, token: &str, development: bool) -> Result<Api, Error> 
             .tls_config(ClientTlsConfig::new().with_native_roots())
             .map_err(|err| Error(format!("TLS for {url}: {err}")))?;
     } else {
-        eprintln!("kajiba: warning: development mode: sending the token over plain http to {url}");
+        report!("kajiba: warning: development mode: sending the token over plain http to {url}");
     }
     Ok(InterceptedService::new(
         endpoint.connect_lazy(),
@@ -171,7 +171,7 @@ pub fn answer<T>(result: Result<tonic::Response<T>, Status>) -> Result<T, Error>
         Err(status) => status.metadata(),
     };
     if let Some(warning) = server_version(metadata).and_then(|server| warning(VERSION, &server)) {
-        eprintln!("kajiba: warning: {warning}");
+        report!("kajiba: warning: {warning}");
     }
     Ok(result?.into_inner())
 }

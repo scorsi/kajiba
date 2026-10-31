@@ -184,3 +184,54 @@ async fn an_unknown_repository_names_the_reason() {
         "no repository by this id or name (REPO_NOT_FOUND, request 01JBREQUEST0000000000000000)"
     );
 }
+
+/// Child half of the test below: `fd` (1 or 2) becomes a pipe whose reader is gone.
+async fn list_into_a_closed(fd: i32) {
+    let mut ends = [0; 2];
+    // SAFETY: plain descriptor calls on descriptors this process owns.
+    unsafe {
+        assert_eq!(libc::pipe(ends.as_mut_ptr()), 0);
+        libc::close(ends[0]);
+        libc::dup2(ends[1], fd);
+        libc::close(ends[1]);
+    }
+    let (_fake, url) = fake().await;
+    // Warns on stderr: development mode over plain http.
+    let api = connect(&url, TOKEN, true).unwrap();
+    let result = run(Command::List, api, false, &mut crate::Stdout).await;
+    if fd == 1 {
+        panic!("still running after writing to a closed stdout: {result:?}");
+    }
+    assert!(result.is_ok());
+    assert_eq!(
+        crate::finish(Err(Error("unprinted".into()))),
+        std::process::ExitCode::FAILURE
+    );
+}
+
+#[tokio::test]
+async fn list_into_a_closed_stdout_or_stderr_exits_quietly() {
+    const CHILD: &str = "KAJIBA_CLOSED_OUTPUT_TEST";
+    if let Some(fd) = std::env::var_os(CHILD) {
+        return list_into_a_closed(fd.to_str().unwrap().parse().unwrap()).await;
+    }
+    for fd in ["1", "2"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "repo::tests::list_into_a_closed_stdout_or_stderr_exits_quietly",
+            ])
+            .env(CHILD, fd)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "fd {fd}: {output:?}");
+        // No panic and no error: at most the development warning, before the closed write.
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr
+                .lines()
+                .all(|line| line.starts_with("kajiba: warning: development mode")),
+            "fd {fd}: {stderr}"
+        );
+    }
+}

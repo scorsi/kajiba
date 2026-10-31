@@ -47,10 +47,10 @@ pub async fn run(
 fn read(input: &mut dyn BufRead, tty: bool) -> io::Result<String> {
     let mut line = String::new();
     if tty {
-        eprint!("Token: ");
+        let _ = write!(io::stderr(), "Token: ");
         let _quiet = NoEcho::new()?;
         input.read_line(&mut line)?;
-        eprintln!();
+        report!("");
     } else {
         input.read_line(&mut line)?;
     }
