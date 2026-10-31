@@ -58,7 +58,7 @@ let
               } // extra);
             in
             {
-              pass = check "pass" ("echo pass-" + state + "; test " + state + " = ok; echo > $out") { };
+              pass = check "pass" ("echo pass-" + state + "; test " + state + " = ok && echo > $out") { };
               a = check "a" "echo a-ok; echo > $out" { };
               b = check "b" "echo b-ok; echo > $out" { };
               vm = check "vm" "echo vm-ok; echo > $out" { requiredSystemFeatures = [ "kvm" ]; };
