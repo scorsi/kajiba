@@ -112,3 +112,46 @@ test("alice/demo: history per branch, filtered by a file, a commit and its diff"
   await page.getByRole("link", { name: "Back to now" }).click();
   await expect(page).not.toHaveURL(/at=/);
 });
+
+test("alice/demo: switching ref and path in place shows the new one at once", async ({
+  page,
+}) => {
+  await authenticator(page);
+  await enroll(page, enrollLink());
+  await page.getByRole("link", { name: "Continue to kajiba" }).click();
+
+  // Same route, other query: History follows the ref chosen in the switcher.
+  await page.goto("/alice/demo?history=1");
+  const history = page.getByRole("region", { name: "History" });
+  await expect(history.getByText("Add the README and a guide")).toBeVisible();
+  await expect(history.getByText("Extend the guide")).toHaveCount(0);
+  await page.getByLabel("Branch or tag").selectOption("refs/heads/feature");
+  await expect(page).toHaveURL(/ref=feature/);
+  await expect(history.getByText("Extend the guide")).toBeVisible();
+  await page.getByLabel("Branch or tag").selectOption("refs/heads/main");
+  await expect(history.getByText("Extend the guide")).toHaveCount(0);
+
+  // Files: another file in the same column replaces the preview.
+  await page.goto("/alice/demo?files=1&path=docs%2Fguide%2Fintro.md");
+  await expect(page.getByText("Start here.")).toBeVisible();
+  await page.goto("/alice/demo?files=1");
+  await page
+    .getByRole("region", { name: "root" })
+    .getByRole("link", { name: /README\.md/ })
+    .click();
+  await expect(page).toHaveURL(/path=README\.md/);
+  await expect(page.getByText("Start here.")).toHaveCount(0);
+  await page
+    .getByRole("region", { name: "root" })
+    .getByRole("link", { name: /^docs/ })
+    .click();
+  await page
+    .getByRole("region", { name: "docs" })
+    .getByRole("link", { name: /^guide/ })
+    .click();
+  await page
+    .getByRole("region", { name: "docs/guide" })
+    .getByRole("link", { name: /intro\.md/ })
+    .click();
+  await expect(page.getByText("Start here.")).toBeVisible();
+});

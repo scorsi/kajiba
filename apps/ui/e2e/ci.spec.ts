@@ -113,4 +113,35 @@ test.describe.serial("CI runs", () => {
     const pipelines = page.getByRole("region", { name: "Pipelines" });
     await expect(pipelines.locator(`a[href="/-/runs/${id}"]`)).toBeVisible();
   });
+
+  test("a link to another run of the ref opens it on the first click", async ({
+    page,
+  }) => {
+    await signedIn(page);
+    const first = env("KAJIBA_E2E_PENDING_RUN");
+    await page.goto(`/-/runs/${first}`);
+    const heading = (id: string) =>
+      page.getByRole("heading", { name: `Run #${id.slice(-8).toLowerCase()}` });
+    await expect(heading(first)).toBeVisible();
+
+    // Same route, other id: each click shows the clicked run at once, with no reload.
+    const others = pulse(page).locator(
+      'a[href^="/-/runs/"]:not([aria-current])',
+    );
+    await expect(others.first()).toBeVisible();
+    // A slow backend: the clicked run must not leave the previous one on screen.
+    await page.route("**/RunService/GetRun", async (route) => {
+      await new Promise((done) => setTimeout(done, 700));
+      await route.continue();
+    });
+    const next = (await others.first().getAttribute("href"))!.split("/").pop()!;
+    await others.first().click();
+    await expect(page).toHaveURL(new RegExp(`/-/runs/${next}$`));
+    await expect(heading(first)).toHaveCount(0, { timeout: 300 });
+    await expect(heading(next)).toBeVisible();
+
+    await pulse(page).locator(`a[href="/-/runs/${first}"]`).first().click();
+    await expect(heading(first)).toBeVisible();
+    await expect(heading(next)).toHaveCount(0);
+  });
 });
