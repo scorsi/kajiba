@@ -741,7 +741,9 @@ in
         # Only the configured listeners may bind (the local socket is AF_UNIX, not filtered).
         SocketBindDeny = "any";
         SocketBindAllow = map (addr: "tcp:${lib.last (lib.splitString ":" addr)}") (
-          [ listen ] ++ lib.optional (cfg.metrics.listen != null) cfg.metrics.listen
+          [ listen ]
+          ++ lib.optional (cfg.metrics.listen != null) cfg.metrics.listen
+          ++ lib.optional (cfg.runnerListener != null) cfg.runnerListener.listen
         );
       };
     };
