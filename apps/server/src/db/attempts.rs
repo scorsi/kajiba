@@ -348,7 +348,8 @@ pub const TRUNCATED: &[u8] =
 /// being stored (0121). Returns the highest contiguous sequence to acknowledge and
 /// whether this chunk truncated the log, or `None` (cancel) when the attempt is not this
 /// runner's current one or a new chunk targets a terminal or expired attempt. Duplicates
-/// remain acknowledged.
+/// remain acknowledged. Empty chunks advance the last row's sequence without adding
+/// a row, except the first chunk which establishes the acknowledgment position.
 pub async fn append_log(
     tx: &mut SqliteConnection,
     logs: &Path,
@@ -374,8 +375,8 @@ pub async fn append_log(
     if i64::try_from(chunk.sequence) != Ok(highest + 1) {
         return Ok(Some((highest as u64, false)));
     }
-    if end > MAX_LOG {
-        // Already truncated: the last row takes the sequence, so no row is added.
+    if end > MAX_LOG || (chunk.data.is_empty() && highest > 0) {
+        // Truncated or empty: the last row takes the sequence, so no row is added.
         sqlx::query("UPDATE log_chunk SET seq = ? WHERE attempt_id = ? AND seq = ?")
             .bind(highest + 1)
             .bind(attempt.id)

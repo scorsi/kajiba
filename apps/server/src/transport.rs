@@ -359,15 +359,20 @@ impl http_body::Body for Idle {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
         use std::{future::Future, task::Poll};
+        if self.deadline.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Some(Err(axum::Error::new(Status::deadline_exceeded(
+                "no bytes received for the upload's idle time",
+            )))));
+        }
         if let Poll::Ready(frame) = std::pin::Pin::new(&mut self.body).poll_frame(cx) {
-            let next = tokio::time::Instant::now() + self.idle;
-            self.deadline.as_mut().reset(next);
+            if matches!(&frame, Some(Ok(frame)) if frame.data_ref().is_some_and(|data| !data.is_empty()))
+            {
+                let next = tokio::time::Instant::now() + self.idle;
+                self.deadline.as_mut().reset(next);
+            }
             return Poll::Ready(frame);
         }
-        std::task::ready!(self.deadline.as_mut().poll(cx));
-        Poll::Ready(Some(Err(axum::Error::new(Status::deadline_exceeded(
-            "no bytes received for the upload's idle time",
-        )))))
+        Poll::Pending
     }
 
     fn is_end_stream(&self) -> bool {

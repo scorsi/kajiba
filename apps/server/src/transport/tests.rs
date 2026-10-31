@@ -1077,6 +1077,33 @@ async fn non_streaming_routes_time_out_with_http_or_grpc_status() {
 }
 
 #[tokio::test]
+async fn empty_upload_frames_do_not_extend_or_bypass_the_idle_deadline() {
+    use http_body::Body as _;
+    let frames = std::iter::repeat_with(|| Ok::<_, std::io::Error>(axum::body::Bytes::new()));
+    let mut body = Box::pin(Idle::new(
+        Body::from_stream(tokio_stream::iter(frames)),
+        TIMEOUTS.upload_idle,
+    ));
+    let deadline = body.deadline.deadline();
+    assert!(
+        std::future::poll_fn(|cx| body.as_mut().poll_frame(cx))
+            .await
+            .unwrap()
+            .is_ok()
+    );
+    assert_eq!(body.deadline.deadline(), deadline);
+    body.deadline
+        .as_mut()
+        .reset(tokio::time::Instant::now() - Duration::from_secs(1));
+    assert!(
+        std::future::poll_fn(|cx| body.as_mut().poll_frame(cx))
+            .await
+            .unwrap()
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn a_worktree_upload_is_cut_when_idle_or_too_long_not_by_the_request_timeout() {
     // The handler reads the whole body, as `CreateWorktreeRun` does, then answers.
     let app = Router::new()

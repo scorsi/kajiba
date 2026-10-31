@@ -357,6 +357,42 @@ async fn log_chunks_are_appended_in_sequence_only() {
 }
 
 #[tokio::test]
+async fn empty_log_chunks_advance_acknowledgments_without_growing_the_index() {
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    populate(&mut writer).await;
+    let (_, attempt) = running(&mut writer).await;
+    for (sequence, data, expected) in [
+        (1, &b""[..], 1),
+        (2, b"", 2),
+        (4, b"gap", 2),
+        (3, b"one", 3),
+        (4, b"", 4),
+        (4, b"duplicate", 4),
+        (5, b"", 5),
+        (6, b"two", 6),
+        (7, b"", 7),
+    ] {
+        assert_eq!(
+            log(&mut writer, &dir.0, 1, &attempt, sequence, data).await,
+            Some(expected)
+        );
+    }
+    let index: Vec<(i64, i64, i64)> =
+        sqlx::query_as("SELECT seq, offset, length FROM log_chunk ORDER BY seq")
+            .fetch_all(&mut writer)
+            .await
+            .unwrap();
+    assert_eq!(index, [(2, 0, 0), (5, 0, 3), (7, 3, 3)]);
+    assert_eq!(
+        std::fs::read(dir.0.join(format!("{attempt}.log"))).unwrap(),
+        b"onetwo"
+    );
+    readers.close().await;
+    writer.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_log_past_its_bound_is_truncated_once_and_later_chunks_are_acknowledged() {
     let dir = TempDir::new();
     let (mut writer, readers) = open(&dir.database()).await.unwrap();
