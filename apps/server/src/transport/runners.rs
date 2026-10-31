@@ -32,16 +32,23 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot, watch};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 /// Declared runners and the bus their events wake, set once startup has reconciled them.
 pub struct Declared {
-    pub runners: BTreeMap<String, RunnerDeclaration>,
+    /// Replaced by a configuration reload (0141).
+    pub runners: watch::Sender<Arc<BTreeMap<String, RunnerDeclaration>>>,
     pub bus: Arc<EventBus>,
     /// Wakes matching: job creation, runner admission and attempt end (0008).
     pub wake: Arc<Notify>,
+}
+
+impl Declared {
+    pub fn current(&self) -> Arc<BTreeMap<String, RunnerDeclaration>> {
+        self.runners.borrow().clone()
+    }
 }
 
 /// Matching and lease expiry also run this often without a wake-up.
@@ -274,7 +281,8 @@ impl Runners {
             .writer
             .get()
             .ok_or_else(|| internal("no writer"))?;
-        let Some((name, declaration)) = declared_by(&declared.runners, peer) else {
+        let runners = declared.current();
+        let Some((name, declaration)) = declared_by(&runners, peer) else {
             let mut writer = writer.lock().await;
             let disabled: Option<i64> = sqlx::query_scalar(
                 "SELECT 1 FROM runner WHERE name = ? AND disabled_at IS NOT NULL",
@@ -415,6 +423,22 @@ impl Runners {
         );
         declared.wake.notify_one();
         Ok((id, generation, receiver))
+    }
+
+    /// Resolves once `name` is no longer declared with `spiffe_id`.
+    async fn withdrawn(&self, name: &str, spiffe_id: Option<&str>) {
+        if let Some(declared) = self.health.runners.get() {
+            let same = |runners: &Arc<BTreeMap<String, RunnerDeclaration>>| {
+                runners
+                    .get(name)
+                    .is_some_and(|declaration| Some(declaration.spiffe_id.as_str()) == spiffe_id)
+            };
+            let mut changes = declared.runners.subscribe();
+            if changes.wait_for(|runners| !same(runners)).await.is_ok() {
+                return;
+            }
+        }
+        std::future::pending().await
     }
 
     /// Unregister a stream if it is still the current one; true when it was.
@@ -822,6 +846,11 @@ impl RunnerService for Runners {
                 _ = &mut replaced => {
                     let _ = outbound.try_send(Err(Status::aborted("runner connection ended")));
                 }
+                // A reload withdrew or changed its declaration: its reconnection is admitted
+                // or refused against the new one (0141).
+                () = runners.withdrawn(&hello.name, peer.as_ref().map(|peer| peer.id.as_str())) => {
+                    let _ = outbound.try_send(Err(Status::unavailable("the runner's declaration changed")));
+                }
                 // The runner reconnects to the restarted server (0105, 0140).
                 () = runners.health.stopped() => {
                     let _ = outbound.try_send(Err(Status::unavailable("the server is stopping")));
@@ -869,7 +898,7 @@ impl RunnerService for Runners {
             .health
             .runners
             .get()
-            .and_then(|declared| declared.runners.get(&name))
+            .and_then(|declared| declared.current().get(&name).cloned())
             .map_or(0, |declaration| declaration.capabilities.max_jobs as usize);
         let slot: Slot<String> = self.transfers.take(name, max_jobs).ok_or_else(|| {
             refused(
@@ -1091,7 +1120,8 @@ impl Runners {
         .fetch_optional(&mut *connection)
         .await
         .map_err(internal)?;
-        let caller = declared_by(&declared.runners, peer).map(|(name, _)| name);
+        let runners = declared.current();
+        let caller = declared_by(&runners, peer).map(|(name, _)| name);
         let Some((id, name)) = holder.filter(|(_, name)| caller == Some(name.as_str())) else {
             self.refuse_identity(caller.unwrap_or(""), peer);
             return Err(unauthenticated());

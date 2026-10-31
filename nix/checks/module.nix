@@ -511,12 +511,31 @@ in
       && systemd.tmpfiles.settings."10-kajiba-server" == { }
       && unit.SocketBindAllow == [ "tcp:8080" ]
       && lib.hasSuffix " http://127.0.0.1:8080/readyz" unit.ExecStartPost
+      # The file reloads the unit; the package and the settings outside users, runners,
+      # repos and mirror restart it (0141).
+      && systemd.services.kajiba-server.reloadTriggers == [ environment.etc."kajiba/server.toml".source ]
       &&
-        systemd.services.kajiba-server.restartTriggers == [
-          environment.etc."kajiba/server.toml".source
-          inputs.self.packages.${linux}.kajiba-server
-        ]
+        lib.head systemd.services.kajiba-server.restartTriggers
+        == inputs.self.packages.${linux}.kajiba-server
+      && lib.hasInfix " serve --config /etc/kajiba/server.toml" unit.ExecStart
+      && lib.hasSuffix "kill -HUP $MAINPID" unit.ExecReload
       && lib.elem inputs.self.packages.${linux}.kajiba-server environment.systemPackages;
+    # Declaring a user changes only the reload triggers; a listen address restarts.
+    assert
+      let
+        triggers =
+          modules:
+          lib.getAttrs [
+            "restartTriggers"
+            "reloadTriggers"
+          ] (evaluateWith false modules).config.systemd.services.kajiba-server;
+        base = triggers [ ];
+        user = triggers [ { services.kajiba-server.users.zed = { }; } ];
+        moved = triggers [ { services.kajiba-server.http.listen = "127.0.0.1:8081"; } ];
+      in
+      user.restartTriggers == base.restartTriggers
+      && user.reloadTriggers != base.reloadTriggers
+      && moved.restartTriggers != base.restartTriggers;
     assert lib.all
       (
         evaluation:
@@ -874,16 +893,14 @@ in
       .config.systemd.services.kajiba-server.serviceConfig.StateDirectory == [ "kajiba-dumps" ];
     # The bundle is served by default (0128), and the flag is gone once disabled.
     assert
-      (evaluate false { }).config.systemd.services.kajiba-server.serviceConfig.ExecStart
-      == "${lib.getExe inputs.self.packages.${linux}.kajiba-server} serve --config ${
-        (evaluate false { }).config.environment.etc."kajiba/server.toml".source
-      } --ui-dir ${inputs.self.packages.${linux}.kajiba-ui}";
+      (evaluate false { }).config.systemd.services.kajiba-server.serviceConfig.ExecStart == "${
+        lib.getExe inputs.self.packages.${linux}.kajiba-server
+      } serve --config /etc/kajiba/server.toml --ui-dir ${inputs.self.packages.${linux}.kajiba-ui}";
     assert
       (evaluate false { services.kajiba-server.ui.enable = false; })
-      .config.systemd.services.kajiba-server.serviceConfig.ExecStart
-      == "${lib.getExe inputs.self.packages.${linux}.kajiba-server} serve --config ${
-        (evaluate false { }).config.environment.etc."kajiba/server.toml".source
-      }";
+      .config.systemd.services.kajiba-server.serviceConfig.ExecStart == "${
+        lib.getExe inputs.self.packages.${linux}.kajiba-server
+      } serve --config /etc/kajiba/server.toml";
     assert lib.all
       (address: !(assertionsPass { services.kajiba-server.metrics.listen = lib.mkForce address; }))
       [

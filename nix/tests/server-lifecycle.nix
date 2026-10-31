@@ -1,6 +1,8 @@
 # J1 task 28: the server becomes ready through the module, reconciles a declared user and key,
 # keeps its rows across a reboot, re-migrates a wiped stateDir, and refuses a second instance
 # on the same stateDir (0012, 0014, 0015, 0023); it serves the web application by default (0094, 0128).
+# A switch that declares a repository reloads the unit instead of restarting it, and a restart is
+# prompt (0140, 0141).
 {
   pkgs,
   kajibaServerPackage,
@@ -38,6 +40,11 @@ pkgs.testers.runNixOSTest {
       pkgs.curl
       pkgs.sqlite
     ];
+    # Only a reloadable setting differs: switching to it reloads the server (0141).
+    specialisation.repository.configuration.services.kajiba-server.repos.demo = {
+      owner = "alice";
+      description = "";
+    };
   };
 
   testScript = testLib + ''
@@ -180,6 +187,29 @@ pkgs.testers.runNixOSTest {
         # Same declared content, new rows: the reconciliation re-created them from the config.
         assert without_ids(fresh) == without_ids(first), f"{fresh} != {first}"
         assert fresh[0] != first[0] and fresh[5] != first[5], f"public ids kept: {fresh} vs {first}"
+
+    with subtest("declaring a repository reloads the server: same process, repository created"):
+        pid = machine.succeed(f"systemctl show -P MainPID {unit}").strip()
+        invocation = machine.succeed(f"systemctl show -P InvocationID {unit}").strip()
+        machine.succeed("/run/current-system/specialisation/repository/bin/switch-to-configuration test")
+        # ExecReload only signals: the reload completes in the server, shortly after.
+        machine.wait_until_succeeds(f"test \"$(sqlite3 {db} \"SELECT count(*) FROM repo WHERE name = 'demo' AND archived_at IS NULL\")\" = 1", timeout=30)
+        public_id = sql("SELECT public_id FROM repo WHERE name = 'demo'")
+        machine.succeed(f"test -d /var/lib/kajiba-git/repos/{public_id}.git")
+        assert machine.succeed(f"systemctl show -P MainPID {unit}").strip() == pid
+        assert machine.succeed(f"systemctl show -P InvocationID {unit}").strip() == invocation
+        events = invocation_events()
+        reloaded = [e for e in events if e["event"] == "config-reloaded"]
+        assert [e["generation"] for e in reloaded] == [2], f"reloads: {events}"
+        assert not [e for e in events if e["event"] in ("config-reload-failed", "config-reload-partial")], f"{events}"
+        assert_ready()
+
+    with subtest("a restart completes within a few seconds"):
+        started = machine.succeed("date +%s.%N")
+        machine.succeed(f"systemctl restart {unit}")
+        elapsed = float(machine.succeed("date +%s.%N")) - float(started)
+        assert elapsed < 10, f"restart took {elapsed:.1f} s"
+        assert_ready()
 
     with subtest("every service log line validates against the nisshi schema"):
         validate_logs(machine, unit)

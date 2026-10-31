@@ -1368,3 +1368,23 @@ fn runner_hostname() {
         runner_error(&format!("hostname = {hostname}\n{RUNNER}"), "hostname");
     }
 }
+
+#[test]
+fn restart_keys_name_only_non_reloadable_differences() {
+    let base = ServerConfig::parse(MINIMAL).unwrap();
+    // Users, runners, repositories and mirrors reload (0141).
+    let declared = ServerConfig::parse(&format!(
+        "{MINIMAL}{LISTENER}{REPOS}[users.alice]\n[mirror.credentials.github]\ntoken_file = '/run/github'\n[runners.build-1]\nspiffe_id = 'spiffe://example.org/build-1/kajiba-runner'\ncapabilities = {{ arch = 'x86_64', os = 'linux' }}\n"
+    ))
+    .unwrap();
+    assert!(base.restart_keys(&base.clone()).is_empty());
+    assert_eq!(base.restart_keys(&declared), ["runner_listener"]);
+    let moved = ServerConfig::parse(
+        "state_dir = '/srv/kajiba'\n[http]\npublic_url = 'https://forge.example.org'\nlisten = '127.0.0.1:9090'\n[log]\nlevel = 'debug'\n[ci]\nlog_retention = '1d'\n",
+    )
+    .unwrap();
+    assert_eq!(
+        base.restart_keys(&moved),
+        ["state_dir", "http", "log", "ci"]
+    );
+}

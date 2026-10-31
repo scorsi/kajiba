@@ -207,6 +207,15 @@ let
       cp ${raw} "$out"
     '';
 
+  # A change to these restarts the server; any other change of the file only reloads it
+  # (SIGHUP, 0141). A restart is chosen over a reload when both change.
+  restartSettings = removeAttrs settings [
+    "users"
+    "runners"
+    "repos"
+    "mirror"
+  ];
+
   hooksPath = pkgs.runCommand "kajiba-hooks" { } ''
     mkdir "$out"
     for hook in pre-receive post-receive; do
@@ -736,15 +745,18 @@ in
         "kajiba-sshd.service"
       ];
       restartTriggers = [
-        configFile
         cfg.package
+        (builtins.toJSON restartSettings)
       ];
+      reloadTriggers = [ configFile ];
       # Smart HTTP upload-pack and mirror pushes read repositories (0052).
       path = [ pkgs.git ];
       serviceConfig = hardening // {
         ExecStart =
-          "${lib.getExe cfg.package} serve --config ${configFile}"
+          # The stable path, so that a configuration change alone leaves the unit file as is.
+          "${lib.getExe cfg.package} serve --config /etc/kajiba/server.toml"
           + lib.optionalString cfg.ui.enable " --ui-dir ${cfg.ui.package}";
+        ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
         # The unit is active only once /readyz answers 200 (0022); TimeoutStartSec bounds it.
         ExecStartPost = "${readyProbe} http://${probe}/readyz";
         Restart = "on-failure";

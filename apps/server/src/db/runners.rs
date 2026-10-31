@@ -3,9 +3,18 @@ use kajiba_core::config::RunnerDeclaration;
 use sqlx::{Connection, SqliteConnection};
 use std::collections::BTreeMap;
 
+/// No connection survives a restart, so at startup every row starts disconnected; a
+/// reload keeps live connections (0141).
+pub async fn disconnect_all(writer: &mut SqliteConnection) -> Result<(), String> {
+    sqlx::query("UPDATE runner SET connected = 0 WHERE connected = 1")
+        .execute(writer)
+        .await
+        .map(drop)
+        .map_err(|err| format!("runner reconciliation: {err}"))
+}
+
 /// ADR 0026: make `runner` rows equal the declared runners, matching by name. A removed
 /// runner is disabled (its row stays for its attempts) and a re-declared one re-enabled.
-/// No connection survives a restart, so every row starts disconnected.
 pub async fn reconcile_runners(
     writer: &mut SqliteConnection,
     declared: &BTreeMap<String, RunnerDeclaration>,
@@ -13,10 +22,6 @@ pub async fn reconcile_runners(
 ) -> Result<(), String> {
     let sql = |err: sqlx::Error| format!("runner reconciliation: {err}");
     let mut tx = writer.begin().await.map_err(sql)?;
-    sqlx::query("UPDATE runner SET connected = 0 WHERE connected = 1")
-        .execute(&mut *tx)
-        .await
-        .map_err(sql)?;
     let rows: BTreeMap<String, (i64, String, bool)> =
         sqlx::query_as::<_, (String, i64, String, bool)>(
             "SELECT name, id, capabilities, disabled_at IS NOT NULL FROM runner",

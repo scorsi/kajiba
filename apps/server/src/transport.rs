@@ -120,6 +120,19 @@ impl Health {
         self.clone_base.get()
     }
 
+    /// A reload was applied: the declared runners change, which cuts the streams of the
+    /// ones withdrawn; matching and run watchers wake for the runs an archival cancelled.
+    pub fn reloaded(
+        &self,
+        runners: std::collections::BTreeMap<String, kajiba_core::config::RunnerDeclaration>,
+    ) {
+        if let Some(declared) = self.runners.get() {
+            declared.runners.send_replace(Arc::new(runners));
+            declared.wake.notify_one();
+        }
+        self.ci_progress.send_replace(());
+    }
+
     pub fn set_passkeys(&self, passkeys: webauthn::Passkeys) {
         assert!(self.passkeys.set(passkeys).is_ok(), "passkeys set twice");
     }
@@ -588,10 +601,10 @@ pub async fn serve(
     readers: SqlitePool,
     bus: Arc<EventBus>,
     admin: local::Admin,
+    registry: Arc<Registry>,
 ) -> std::io::Result<()> {
     let (config, metrics_config, git_config, run_dir) =
         (&server.http, &server.metrics, &server.git, &server.run_dir);
-    let registry = Arc::new(Registry::default());
     let local = local::bind(
         &run_dir.join(local::SOCKET_NAME),
         health.local_serving.clone(),

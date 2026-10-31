@@ -58,7 +58,7 @@ impl Forge {
                 .unwrap();
         }
         state.health.set_runners(Declared {
-            runners: config.runners,
+            runners: watch::Sender::new(Arc::new(config.runners)),
             bus: Arc::default(),
             wake: Arc::default(),
         });
@@ -1796,6 +1796,48 @@ async fn stopping_ends_runner_streams_with_unavailable() {
         .unwrap();
     forge.state.health.stop.send_replace(true);
     let ended = tokio::time::timeout(Duration::from_secs(5), stream.message())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(ended.code(), tonic::Code::Unavailable);
+}
+
+#[tokio::test]
+async fn a_reload_cuts_only_the_streams_whose_declaration_went_or_changed_identity() {
+    let forge = Forge::start().await;
+    let streams = [BUILD_1, BUILD_2].map(|id| (id, id.split('/').nth(3).unwrap()));
+    let mut open = Vec::new();
+    for (id, name) in streams {
+        open.push(forge.connect(Some(id), hello(name)).await.unwrap());
+    }
+    let mut runners = forge
+        .state
+        .health
+        .runners
+        .get()
+        .unwrap()
+        .current()
+        .as_ref()
+        .clone();
+    // build-1 gets another ID; build-2 only other capabilities.
+    runners.get_mut("build-1").unwrap().spiffe_id = UNDECLARED.into();
+    runners.get_mut("build-2").unwrap().capabilities.max_jobs = 1;
+    forge.state.health.reloaded(runners.clone());
+    let ended = tokio::time::timeout(Duration::from_secs(5), open[0].1.message())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(ended.code(), tonic::Code::Unavailable);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), open[1].1.message())
+            .await
+            .is_err(),
+        "build-2's stream stays open"
+    );
+    // A removed declaration is cut too.
+    runners.remove("build-2");
+    forge.state.health.reloaded(runners);
+    let ended = tokio::time::timeout(Duration::from_secs(5), open[1].1.message())
         .await
         .unwrap()
         .unwrap_err();

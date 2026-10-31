@@ -5,6 +5,7 @@ use std::{path::PathBuf, process::ExitCode};
 mod db;
 mod import;
 mod metrics;
+mod reload;
 mod state;
 mod transport;
 
@@ -106,8 +107,11 @@ async fn main() -> ExitCode {
         }
     };
     match command {
-        Command::Serve { config, ui_dir } => {
-            let config = match load_config(&config, true) {
+        Command::Serve {
+            config: path,
+            ui_dir,
+        } => {
+            let config = match load_config(&path, true) {
                 Ok(config) => config,
                 Err(err) => {
                     log::error("config-invalid", &err);
@@ -168,6 +172,10 @@ async fn main() -> ExitCode {
             )
             .await
             {
+                log::error("fatal", &err);
+                return ExitCode::FAILURE;
+            }
+            if let Err(err) = db::runners::disconnect_all(&mut writer).await {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
@@ -243,13 +251,32 @@ async fn main() -> ExitCode {
                 retention: retention.clone(),
             };
             health.set_runners(transport::runners::Declared {
-                runners: config.runners.clone(),
+                runners: tokio::sync::watch::Sender::new(config.runners.clone().into()),
                 bus: bus.clone(),
                 wake,
             });
             health.started(readers.clone(), writer.clone());
+            let registry = std::sync::Arc::new(metrics::Registry::default());
+            // Registered before `ready`: a SIGHUP from then on reloads, never terminates.
+            let hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            {
+                Ok(hangup) => hangup,
+                Err(err) => {
+                    log::error("fatal", &err.to_string());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let reload = reload::Reload {
+                path,
+                running: config.clone(),
+                generation: 1,
+                writer: writer.clone(),
+                health: health.clone(),
+                registry: registry.clone(),
+            };
             return match tokio::select! {
-                result = transport::serve(&config, health, readers, bus.clone(), admin) => result,
+                result = transport::serve(&config, health, readers, bus.clone(), admin, registry) => result,
+                () = reload.run(hangup) => unreachable!("reload runs until shutdown"),
                 () = dispatcher.run(&bus, &writer) => unreachable!("dispatcher runs until shutdown"),
                 () = db::sessions::purge_periodically(&writer) => unreachable!("purge runs until shutdown"),
                 () = db::retention::purge_daily(&writer, &retention, config.ci.run_at) => unreachable!("retention runs until shutdown"),

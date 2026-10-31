@@ -112,6 +112,7 @@ pub struct Registry {
     pushes: [Counter; 2],
     auth_refusals: [Counter; 3],
     runners_connected: AtomicU64,
+    config_generation: AtomicU64,
     jobs_pending: AtomicU64,
     logs_truncated: Counter,
     runs: [Counter; 3],
@@ -130,6 +131,11 @@ impl Registry {
         if let Some(index) = RUNNER_REASONS.iter().position(|known| *known == reason) {
             self.runner_refusals[index].add(1);
         }
+    }
+
+    /// The configuration generation: 1 at startup, plus one per applied reload (0141).
+    pub fn set_config_generation(&self, generation: u64) {
+        self.config_generation.store(generation, Relaxed);
     }
 
     pub fn set_runners_connected(&self, count: u64) {
@@ -231,6 +237,13 @@ impl Registry {
             out,
             "kajiba_runners_connected {}",
             self.runners_connected.load(Relaxed)
+        )
+        .unwrap();
+        out.push_str("# HELP kajiba_config_generation Configuration generation: 1 at startup, plus one per applied reload.\n# TYPE kajiba_config_generation gauge\n");
+        writeln!(
+            out,
+            "kajiba_config_generation {}",
+            self.config_generation.load(Relaxed)
         )
         .unwrap();
         out.push_str("# HELP kajiba_runner_refusals_total Runner connections refused at admission.\n# TYPE kajiba_runner_refusals_total counter\n");

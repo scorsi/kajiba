@@ -28,7 +28,7 @@ async fn fixture(extra: &str) -> (Fixture, Runs) {
     .unwrap()
     .runners;
     fixture.repos.0.set_runners(Declared {
-        runners: runner,
+        runners: tokio::sync::watch::Sender::new(Arc::new(runner)),
         bus: Arc::default(),
         wake: Arc::default(),
     });

@@ -377,7 +377,7 @@ impl Runs {
             kajiba_core::config::validate_tag(feature)
                 .map_err(|err| cursor::invalid_field("spec.features", err))?;
         }
-        let matches = declared.runners.values().any(|runner| {
+        let matches = declared.current().values().any(|runner| {
             let capabilities = &runner.capabilities;
             // Compared by their configuration names, as admission does.
             serde_json::to_value(capabilities.arch).is_ok_and(|name| name == arch)

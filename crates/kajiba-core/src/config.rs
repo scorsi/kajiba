@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer, de::DeserializeOwned};
 
 use crate::names::validate_name;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "server_state_dir")]
@@ -50,7 +50,7 @@ pub struct ServerConfig {
     pub dump: DumpConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GitSideConfig {
     pub state_dir: PathBuf,
@@ -96,7 +96,7 @@ pub struct GitConfig {
     pub metrics: MetricsConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     #[serde(default = "http_listen")]
@@ -106,7 +106,7 @@ pub struct HttpConfig {
     pub reflection: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SshConfig {
     pub host: Option<String>,
@@ -125,7 +125,7 @@ impl Default for SshConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LogConfig {
     pub level: String,
@@ -139,13 +139,13 @@ impl Default for LogConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MetricsConfig {
     pub listen: Option<SocketAddr>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuthConfig {
     #[serde(deserialize_with = "duration")]
@@ -163,7 +163,7 @@ impl Default for AuthConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UserConfig {
     pub is_admin: bool,
@@ -176,7 +176,7 @@ pub struct UserConfig {
 /// (ADR 0028): only its hash is declared, so validation cannot check it. ADR 0014's format
 /// (`kjb_` + 32 random bytes in base64url) has 256; generate one and its hash with
 /// `t="kjb_$(head -c 32 /dev/urandom | basenc --base64url | tr -d '=')"; echo "$t"; printf %s "$t" | sha256sum`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TokenConfig {
     pub sha256: String,
@@ -184,7 +184,7 @@ pub struct TokenConfig {
     pub expires: Option<String>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub enum Scope {
     #[serde(rename = "repo:read")]
     RepoRead,
@@ -196,14 +196,14 @@ pub enum Scope {
     Admin,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialConfig {
     pub token_file: PathBuf,
 }
 
 /// The TLS listener serving only `kajiba.runner.v1` (0124) and the forge's SVID files (0125).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerListenerConfig {
     pub listen: SocketAddr,
@@ -249,7 +249,7 @@ pub enum Os {
     Darwin,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MirrorConfig {
     pub credentials: BTreeMap<String, CredentialConfig>,
@@ -267,7 +267,7 @@ impl Default for MirrorConfig {
 }
 
 /// A declared repository (0026); its map key is its stable identity.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepoConfig {
     pub owner: String,
@@ -290,7 +290,7 @@ pub struct RepoConfig {
     pub mirrors: Vec<RepoMirrorConfig>,
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Visibility {
     #[default]
@@ -330,7 +330,7 @@ pub enum Role {
     Admin,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepoMirrorConfig {
     pub remote_url: String,
@@ -339,7 +339,7 @@ pub struct RepoMirrorConfig {
     pub enabled: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CiConfig {
     #[serde(deserialize_with = "positive")]
@@ -380,7 +380,7 @@ fn local_time<'de, D: Deserializer<'de>>(de: D) -> Result<(u8, u8), D::Error> {
         .ok_or_else(|| serde::de::Error::custom("expected a local time HH:MM"))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DumpConfig {
     pub dir: PathBuf,
@@ -849,6 +849,30 @@ fn validate_repos(config: &mut ServerConfig) -> Result<(), String> {
 }
 
 impl ServerConfig {
+    /// The top-level keys that differ in `next` and that a reload cannot apply: all but
+    /// `users`, `runners`, `repos` and `mirror` (ADR 0141).
+    pub fn restart_keys(&self, next: &Self) -> Vec<&'static str> {
+        [
+            ("state_dir", self.state_dir != next.state_dir),
+            ("run_dir", self.run_dir != next.run_dir),
+            ("http", self.http != next.http),
+            ("git", self.git != next.git),
+            ("ssh", self.ssh != next.ssh),
+            ("log", self.log != next.log),
+            ("metrics", self.metrics != next.metrics),
+            ("auth", self.auth != next.auth),
+            (
+                "runner_listener",
+                self.runner_listener != next.runner_listener,
+            ),
+            ("ci", self.ci != next.ci),
+            ("dump", self.dump != next.dump),
+        ]
+        .into_iter()
+        .filter_map(|(key, differs)| differs.then_some(key))
+        .collect()
+    }
+
     /// Parse and structurally validate without opening any referenced file.
     pub fn parse(input: &str) -> Result<Self, String> {
         let mut config: Self = parse(input)?;

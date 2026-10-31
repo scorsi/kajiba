@@ -90,9 +90,14 @@ async fn runner_rows_follow_the_declaration() {
     assert!(after[0].2.contains(r#""backends":["nix","process"]"#));
     assert_eq!(after[1].2, added[1].2);
     for row in &after {
-        // Every row starts disconnected; the announced version stays until the next hello.
-        assert_eq!((row.3.as_str(), row.4, row.5), ("0.1.0", false, None));
+        // A reload keeps the connection; the announced version stays until the next hello.
+        assert_eq!((row.3.as_str(), row.4, row.5), ("0.1.0", true, None));
     }
+    // At startup every row starts disconnected.
+    crate::db::runners::disconnect_all(&mut writer)
+        .await
+        .unwrap();
+    assert!(rows(&mut writer).await.iter().all(|row| !row.4));
 
     // Removal disables and keeps the row; a second pass keeps the first timestamp.
     let removed = declared(&runner(
