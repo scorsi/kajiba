@@ -1,6 +1,9 @@
 # J6 task 20: a declared runner behind an nginx TLS front runs `nix flake check` on pushes and
 # manual triggers; admission, leases, reconnection, pending reasons, the journal, the CLI and
-# log retention, end to end (every non-worktree acceptance criterion of J6).
+# log retention, end to end (every non-worktree acceptance criterion of J6). Runner mTLS task 8:
+# the runner reaches the forge's runner listener by SVID through nginx relaying `runners.forge`
+# as raw TCP by SNI (a stand-in for the reverse proxy); refusals by identity, the public port
+# without kajiba.runner.v1, and SVIDs reissued in place (0124, 0125, 0126).
 {
   pkgs,
   kajibaServerPackage,
@@ -15,10 +18,11 @@ let
   # Public fixture credentials, never deployment secrets.
   writerPat = "kjb_" + lib.concatStrings (lib.replicate 43 "W");
   readerPat = "kjb_" + lib.concatStrings (lib.replicate 43 "R");
-  secret = "runner-fixture-secret-not-a-secret";
+  svid = import ./svid.nix { inherit pkgs; };
+  runnerId = svid.id "runner" "kajiba-runner";
   version = kajibaRunnerPackage.version;
   otherVersion = if builtins.elemAt (lib.splitString "." version) 1 == "2" then "0.3.0" else "0.2.0";
-  # A test CA and the forge's certificate (SAN `forge`), built in the test (not development mode).
+  # The HTTP front's own test CA and certificate (SAN `forge`), for the CLI and git.
   tls = pkgs.runCommand "kajiba-test-tls" { nativeBuildInputs = [ pkgs.openssl ]; } ''
     mkdir "$out"
     cd "$out"
@@ -31,20 +35,15 @@ let
     openssl x509 -req -in forge.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 3650 \
       -extfile forge.ext -out forge.pem
   '';
-  secretRule = user: {
-    "/run/secrets/kajiba-runner".f = {
-      inherit user;
-      group = user;
-      mode = "0400";
-      argument = secret;
-    };
-  };
 in
 pkgs.testers.runNixOSTest {
   name = "kajiba-ci";
 
   nodes.forge = {
-    imports = [ ../nixosModules/server.nix ];
+    imports = [
+      ../nixosModules/server.nix
+      (svid.install "kajiba-server" "forge")
+    ];
     virtualisation.memorySize = 2048;
     services.kajiba-git.package = kajibaGitPackage;
     services.kajiba-server = {
@@ -73,8 +72,13 @@ pkgs.testers.runNixOSTest {
           ];
         };
       };
+      runnerListener = {
+        listen = "127.0.0.1:8443";
+        trustDomain = "example.org";
+      }
+      // svid.files "kajiba-server";
       runners.build-1 = {
-        tokenFile = "/run/secrets/kajiba-runner";
+        spiffeId = runnerId;
         capabilities = {
           arch = pkgs.stdenv.hostPlatform.parsed.cpu.name;
           os = "linux";
@@ -93,15 +97,36 @@ pkgs.testers.runNixOSTest {
       # Short enough for `admin retention` to delete the first runs' logs within the test.
       ci.logRetention = "1m";
     };
-    systemd.tmpfiles.settings."10-kajiba-secret" = secretRule "kajiba-server";
-    # TLS front: gRPC (HTTP/2) to the server, long-lived streams kept open, request bodies
-    # (the runner's log stream) unbounded; one access-log line per request with its size.
+    # The reverse proxy: on 443, `runners.forge` is relayed as raw TCP to the runner listener
+    # (TLS end to end between runner and forge), any other name to the TLS front. The front:
+    # gRPC (HTTP/2) to the server, long-lived streams kept open, request bodies unbounded; one
+    # access-log line per request with its size.
     services.nginx = {
+      streamConfig = ''
+        map $ssl_preread_server_name $kajiba_upstream {
+          runners.forge 127.0.0.1:8443;
+          default 127.0.0.1:4443;
+        }
+        server {
+          listen 443;
+          listen [::]:443;
+          ssl_preread on;
+          proxy_pass $kajiba_upstream;
+          proxy_timeout 1h;
+        }
+      '';
       enable = true;
       commonHttpConfig = ''
         log_format kajiba '$remote_addr $request_uri $status $body_bytes_sent';
       '';
       virtualHosts.forge = {
+        listen = [
+          {
+            addr = "127.0.0.1";
+            port = 4443;
+            ssl = true;
+          }
+        ];
         onlySSL = true;
         http2 = true;
         sslCertificate = "${tls}/forge.pem";
@@ -118,6 +143,7 @@ pkgs.testers.runNixOSTest {
       };
     };
     networking.firewall.allowedTCPPorts = [ 443 ];
+    networking.hosts."127.0.0.1" = [ "runners.forge" ];
     security.pki.certificateFiles = [ "${tls}/ca.pem" ];
     environment.systemPackages = [
       kajibaCliPackage
@@ -129,38 +155,48 @@ pkgs.testers.runNixOSTest {
     ];
   };
 
-  nodes.runner = {
-    imports = [ ../nixosModules/runner.nix ];
-    virtualisation.memorySize = 2048;
-    services.kajiba-runner = {
-      enable = true;
-      package = kajibaRunnerPackage;
-      name = "build-1";
-      url = "https://forge";
-      tokenFile = "/run/secrets/kajiba-runner";
-      maxJobs = 2;
-      metrics.listen = "127.0.0.1:9432";
-    };
-    systemd.tmpfiles.settings."10-kajiba-secret" = secretRule "kajiba-runner";
-    security.pki.certificateFiles = [ "${tls}/ca.pem" ];
-    nix.settings = {
-      experimental-features = [
-        "nix-command"
-        "flakes"
+  nodes.runner =
+    { nodes, ... }:
+    {
+      imports = [
+        ../nixosModules/runner.nix
+        (svid.install "kajiba-runner" "runner")
       ];
-      # No network: never wait on a binary cache.
-      substituters = lib.mkForce [ ];
-      # The fixture's closure: /bin/sh (busybox, Nix's default) and coreutils for `sleep`,
-      # already in this system's store, so nothing is fetched.
-      extra-sandbox-paths = [ "/tools=${pkgs.coreutils}/bin" ];
+      virtualisation.memorySize = 2048;
+      services.kajiba-runner = {
+        enable = true;
+        package = kajibaRunnerPackage;
+        name = "build-1";
+        url = "https://runners.forge";
+        # The bundle only: the system store is not trusted (0124).
+        tls = {
+          trustDomain = "example.org";
+          inherit (svid) serverId;
+        }
+        // svid.files "kajiba-runner";
+        maxJobs = 2;
+        metrics.listen = "127.0.0.1:9432";
+      };
+      networking.hosts.${nodes.forge.networking.primaryIPAddress} = [ "runners.forge" ];
+      nix.settings = {
+        experimental-features = [
+          "nix-command"
+          "flakes"
+        ];
+        # No network: never wait on a binary cache.
+        substituters = lib.mkForce [ ];
+        # The fixture's closure: /bin/sh (busybox, Nix's default) and coreutils for `sleep`,
+        # already in this system's store, so nothing is fetched.
+        extra-sandbox-paths = [ "/tools=${pkgs.coreutils}/bin" ];
+      };
+      environment.systemPackages = [
+        kajibaRunnerPackage
+        pkgs.git
+      ];
     };
-    environment.systemPackages = [
-      kajibaRunnerPackage
-      pkgs.git
-    ];
-  };
 
   testScript = testLib + ''
+    ${svid.reissue}
     import base64
     import json
     import re
@@ -270,9 +306,11 @@ pkgs.testers.runNixOSTest {
         return reason in out or any(reason.encode() in base64.b64decode(value) for value in values)
 
 
-    def hello(token, hello_version, tags):
+    def hello(hello_version, tags):
+        # The runner's SVID through the relay. grpcurl would check a DNS name the SVID lacks,
+        # hence -insecure: what is tested is the forge checking the client.
         message = {"hello": {"name": "build-1", "version": hello_version, "hostname": "grpcurl", "capabilities": {"arch": "${pkgs.stdenv.hostPlatform.parsed.cpu.name}", "os": "linux", "backends": ["nix"], "tags": tags, "maxJobs": 1}}}
-        code, out = forge.execute(f"grpcurl -import-path {proto} -proto kajiba/runner/v1/runner.proto -H {shlex.quote('authorization: Bearer ' + token)} -d {shlex.quote(json.dumps(message))} forge:443 kajiba.runner.v1.RunnerService/Connect 2>&1")
+        code, out = forge.execute(f"grpcurl -insecure -cert ${svid.ca}/runner/svid.pem -key ${svid.ca}/runner/key.pem -import-path {proto} -proto kajiba/runner/v1/runner.proto -d {shlex.quote(json.dumps(message))} runners.forge:443 kajiba.runner.v1.RunnerService/Connect 2>&1")
         assert code != 0, out
         return out
 
@@ -283,8 +321,8 @@ pkgs.testers.runNixOSTest {
         return runner.execute(f"runuser -u kajiba-runner -- env PATH=/run/current-system/sw/bin HOME={manual} {env} timeout {seconds} kajiba-runner --config {manual}/runner.toml 2>&1")
 
 
-    def runner_toml(extra):
-        return f'name = "build-1"\nurl = "https://forge"\ntoken_file = "/run/secrets/kajiba-runner"\nstate_dir = "{manual}"\n{extra}'
+    def runner_toml(extra, files="/var/lib/hanko/kajiba-runner"):
+        return f'name = "build-1"\nurl = "https://runners.forge"\nstate_dir = "{manual}"\n{extra}[tls]\ntrust_domain = "example.org"\nserver_id = "${svid.serverId}"\nsvid_file = "{files}/svid.pem"\nkey_file = "{files}/key.pem"\nbundle_file = "{files}/bundle.pem"\n'
 
 
     start_all()
@@ -319,28 +357,50 @@ pkgs.testers.runNixOSTest {
         assert capabilities["max_jobs"] == 2, capabilities
         assert metric(forge, metrics_url, "kajiba_runners_connected") == 1
 
-    with subtest("wrong secret, extra capability and another 0.minor are refused"):
-        out = hello("wrong-secret", "${version}", [])
-        assert "Unauthenticated" in out and has_reason(out, "CREDENTIAL_INVALID"), out
-        out = hello("${secret}", "${otherVersion}", [])
+    with subtest("an undeclared ID, another CA, an extra capability and another 0.minor are refused"):
+        identity = 'kajiba_runner_refusals_total{reason="identity"}'
+        # The real runner with copies of other SVIDs: one of the trust domain that no runner
+        # declares, and the runner's own ID from another CA.
+        for name, identity_dir in [("stranger", "stranger"), ("foreign", "other-ca/runner")]:
+            runner.succeed(
+                f"install -d -o kajiba-runner -g kajiba-runner -m 0700 {manual}/{name}",
+                f"install -o kajiba-runner -g kajiba-runner -m 0600 ${svid.ca}/{identity_dir}/svid.pem ${svid.ca}/{identity_dir}/key.pem ${svid.ca}/bundle.pem {manual}/{name}/",
+            )
+        code, out = manual_runner(runner_toml("", files=f"{manual}/stranger"), 8)
+        assert code == 124 and "Unauthenticated" in out, out
+        assert metric(forge, metrics_url, identity) >= 1
+        refused = [line for line in unit_lines(forge, "kajiba-server.service") if line.get("event") == "runner-refused" and line.get("reason") == "identity"]
+        assert any(line.get("spiffe_id") == "${svid.id "stranger" "kajiba-runner"}" for line in refused), refused
+        # Another CA's certificate never reaches the service: the handshake fails, no refusal is counted.
+        before = metric(forge, metrics_url, identity)
+        code, out = manual_runner(runner_toml("", files=f"{manual}/foreign"), 8)
+        assert code == 124 and "server-disconnected" in out and "Unauthenticated" not in out, out
+        assert metric(forge, metrics_url, identity) == before
+        out = hello("${otherVersion}", [])
         assert "FailedPrecondition" in out and has_reason(out, "VERSION_INCOMPATIBLE"), out
-        out = hello("${secret}", "${version}", ["kvm"])
+        out = hello("${version}", ["kvm"])
         assert "InvalidArgument" in out and has_reason(out, "INVALID_FIELD"), out
         # The real runner, announcing a tag the server did not declare.
         code, out = manual_runner(runner_toml('tags = ["kvm"]\n'), 8)
         assert code == 124 and "InvalidArgument" in out, out
         refusals = [line.get("reason") for line in unit_lines(forge, "kajiba-server.service") if line.get("event") == "runner-refused"]
-        assert {"secret", "version", "capabilities"} <= set(refusals), refusals
-        for reason in ["secret", "version", "capabilities"]:
+        assert {"identity", "version", "capabilities"} <= set(refusals), refusals
+        for reason in ["identity", "version", "capabilities"]:
             assert metric(forge, metrics_url, f'kajiba_runner_refusals_total{{reason="{reason}"}}') >= 1
         # E11: an unauthenticated refusal is logged and counted, never journaled.
         journaled = [json.loads(p)["reason"] for p in sql("SELECT payload FROM event WHERE kind = 'runner-refused'").splitlines()]
-        assert "secret" not in journaled and {"version", "capabilities"} <= set(journaled), journaled
+        assert "identity" not in journaled and {"version", "capabilities"} <= set(journaled), journaled
         # The declared runner kept its connection.
         assert sql("SELECT connected FROM runner WHERE name = 'build-1'") == "1"
 
-    with subtest("plain http without development mode and a host without the sandbox refuse to start"):
-        plain = runner_toml("").replace("https://forge", "http://forge")
+    with subtest("the public port does not serve kajiba.runner.v1"):
+        # Directly and through the HTTP front the relay picks for any other name.
+        for flags, address in [("-plaintext", "127.0.0.1:8080"), ("", "forge:443")]:
+            code, out = forge.execute(f"grpcurl {flags} -import-path {proto} -proto kajiba/runner/v1/runner.proto -d '{{}}' {address} kajiba.runner.v1.RunnerService/FetchRunBundle 2>&1")
+            assert code != 0 and "Unimplemented" in out, (address, out)
+
+    with subtest("plain http and a host without the sandbox refuse to start"):
+        plain = runner_toml("").replace("https://", "http://")
         runner.succeed(f"printf %s {shlex.quote(plain)} > {manual}/http.toml")
         out = runner.fail(f"kajiba-runner config check {manual}/http.toml 2>&1")
         assert "url" in out, out
@@ -403,15 +463,17 @@ pkgs.testers.runNixOSTest {
         assert "pass-ok" in out, out
         assert sql(f"SELECT trigger, state FROM run WHERE sha = '{c3}'") == "manual|succeeded"
 
-    with subtest("sources travel only as bundles, incremental after the first"):
-        addresses = forge.succeed("getent ahosts runner | cut -d ' ' -f 1 | sort -u").split()
+    with subtest("runners pass the relay, not the HTTP front; sources travel only as bundles"):
+        # TLS is end to end: the front saw kajiba.runner.v1 only from the public-port probe.
         requests = [line.split() for line in forge.succeed("cat /var/log/nginx/kajiba.log").splitlines()]
-        from_runner = [r for r in requests if r[0] in addresses]
-        assert from_runner and all(r[1].startswith("/kajiba.runner.v1.RunnerService/") for r in from_runner), from_runner
-        bundles = [int(r[3]) for r in from_runner if r[1] == "/kajiba.runner.v1.RunnerService/FetchRunBundle"]
-        assert len(bundles) >= 3 and bundles[0] > 600000, bundles
-        assert all(size < 100000 for size in bundles[1:]), bundles
-        methods = {line.get("method") for line in unit_lines(forge, "kajiba-server.service") if line.get("event") == "request"}
+        probes = [r for r in requests if r[1].startswith("/kajiba.runner.v1.")]
+        assert len(probes) == 1 and probes[0][1] == "/kajiba.runner.v1.RunnerService/FetchRunBundle", probes
+        # shortcut: bundle sizes are no longer measured here (the relay sees one TCP session for
+        # all fetches); the runner's cache tests cover incremental bundles.
+        lines = [line for line in unit_lines(forge, "kajiba-server.service") if line.get("event") == "request"]
+        fetches = [line for line in lines if line.get("method") == "/kajiba.runner.v1.RunnerService/FetchRunBundle"]
+        assert len(fetches) >= 3, fetches
+        methods = {line.get("method") for line in lines}
         assert not {"git-info-refs", "git-upload-pack"} & methods, methods
 
     with subtest("a WatchRun stream outlives the 30 s request timeout; status says 75 meanwhile"):
@@ -467,6 +529,20 @@ pkgs.testers.runNixOSTest {
         kinds = sql(f"SELECT kind FROM event WHERE id > {mark}").splitlines()
         assert "attempt-lost" in kinds and "attempt-replayed" in kinds, kinds
         assert finishes(r6) == 1
+
+    with subtest("SVIDs reissued in place are used at the next handshake, without a restart"):
+        pids = [m.succeed(f"systemctl show -p MainPID --value {unit}").strip() for m, unit in [(runner, "kajiba-runner.service"), (forge, "kajiba-server.service")]]
+        connects = int(sql("SELECT COUNT(*) FROM event WHERE kind = 'runner-connected'"))
+        old = runner.succeed("${pkgs.openssl}/bin/openssl x509 -noout -serial -in /var/lib/hanko/kajiba-runner/svid.pem").strip()
+        assert reissue(runner, "kajiba-runner", "${runnerId}") != old
+        reissue(forge, "kajiba-server", "${svid.serverId}")
+        # Restarting the relay cuts the runner's connection; it reconnects with a new handshake.
+        forge.succeed("systemctl restart nginx.service")
+        forge.wait_until_succeeds(f"test $(sqlite3 {db} \"SELECT COUNT(*) FROM event WHERE kind = 'runner-connected'\") -gt {connects}")
+        for m, unit in [(runner, "kajiba-runner.service"), (forge, "kajiba-server.service")]:
+            m.wait_until_succeeds(f"journalctl --sync; journalctl _SYSTEMD_UNIT={unit} -o cat | grep -q svid-reloaded")
+        assert pids == [m.succeed(f"systemctl show -p MainPID --value {unit}").strip() for m, unit in [(runner, "kajiba-runner.service"), (forge, "kajiba-server.service")]]
+        assert sql("SELECT connected FROM runner WHERE name = 'build-1'") == "1"
 
     with subtest("no connected runner: the job waits with its reason; ci run --detach returns at once"):
         runner.succeed("systemctl stop kajiba-runner.service")

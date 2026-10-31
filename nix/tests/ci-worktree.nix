@@ -1,7 +1,8 @@
 # J6 task 27: `kajiba ci run --worktree` from a client clone, end to end behind the nginx TLS
 # front of `nixos-ci`: uncommitted changes run on the runner without a push, selected checks,
 # routing by `requiredSystemFeatures`, the refusals and the worktree retention (every
-# acceptance criterion of J6 marked worktree).
+# acceptance criterion of J6 marked worktree). Runner mTLS task 8: runners by SVID through the
+# SNI relay of `nixos-ci`, and a runner whose declaration is removed refused as disabled (0124).
 {
   pkgs,
   kajibaServerPackage,
@@ -18,8 +19,8 @@ let
   writerPat = "kjb_" + lib.concatStrings (lib.replicate 43 "W");
   noScopePat = "kjb_" + lib.concatStrings (lib.replicate 43 "N");
   readerPat = "kjb_" + lib.concatStrings (lib.replicate 43 "R");
-  secret = "runner-fixture-secret-not-a-secret";
-  # A test CA and the forge's certificate (SAN `forge`), built in the test (not development mode).
+  svid = import ./svid.nix { inherit pkgs; };
+  # The HTTP front's own test CA and certificate (SAN `forge`), for the CLI and git.
   tls = pkgs.runCommand "kajiba-test-tls" { nativeBuildInputs = [ pkgs.openssl ]; } ''
     mkdir "$out"
     cd "$out"
@@ -32,12 +33,13 @@ let
     openssl x509 -req -in forge.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 3650 \
       -extfile forge.ext -out forge.pem
   '';
-  secretRule = user: {
-    "/run/secrets/kajiba-runner".f = {
-      inherit user;
-      group = user;
-      mode = "0400";
-      argument = secret;
+  build-1 = {
+    spiffeId = svid.id "runner" "kajiba-runner";
+    capabilities = {
+      inherit arch;
+      os = "linux";
+      tags = [ "kvm" ];
+      maxJobs = 2;
     };
   };
   # Fixture flake without inputs: plain derivations built by /bin/sh in the sandbox. `salt`
@@ -84,7 +86,10 @@ pkgs.testers.runNixOSTest {
   name = "kajiba-ci-worktree";
 
   nodes.forge = {
-    imports = [ ../nixosModules/server.nix ];
+    imports = [
+      ../nixosModules/server.nix
+      (svid.install "kajiba-server" "forge")
+    ];
     virtualisation.memorySize = 2048;
     services.kajiba-git.package = kajibaGitPackage;
     services.kajiba-server = {
@@ -117,19 +122,16 @@ pkgs.testers.runNixOSTest {
           ];
         };
       };
+      runnerListener = {
+        listen = "127.0.0.1:8443";
+        trustDomain = "example.org";
+      }
+      // svid.files "kajiba-server";
       runners = {
-        build-1 = {
-          tokenFile = "/run/secrets/kajiba-runner";
-          capabilities = {
-            inherit arch;
-            os = "linux";
-            tags = [ "kvm" ];
-            maxJobs = 2;
-          };
-        };
+        inherit build-1;
         # Declared without `kvm`; connected only by the routing subtest.
         build-2 = {
-          tokenFile = "/run/secrets/kajiba-runner";
+          spiffeId = svid.id "runner-2" "kajiba-runner";
           capabilities = {
             inherit arch;
             os = "linux";
@@ -148,12 +150,36 @@ pkgs.testers.runNixOSTest {
       # Short enough for `admin retention` to purge the worktree runs within the test.
       ci.worktreeRetention = "1m";
     };
-    systemd.tmpfiles.settings."10-kajiba-secret" = secretRule "kajiba-server";
-    # TLS front as in nixos-ci: gRPC (HTTP/2) to the server, streams kept open, request bodies
-    # (bundle uploads, the runner's log stream) unbounded.
+    # build-2's declaration removed: its row stays, disabled (0026).
+    specialisation.retired.configuration.services.kajiba-server.runners = lib.mkForce {
+      inherit build-1;
+    };
+    # The reverse proxy as in nixos-ci: `runners.forge` relayed as raw TCP by SNI to the runner
+    # listener, any other name to the TLS front: gRPC (HTTP/2) to the server, streams kept
+    # open, request bodies (bundle uploads) unbounded.
     services.nginx = {
       enable = true;
+      streamConfig = ''
+        map $ssl_preread_server_name $kajiba_upstream {
+          runners.forge 127.0.0.1:8443;
+          default 127.0.0.1:4443;
+        }
+        server {
+          listen 443;
+          listen [::]:443;
+          ssl_preread on;
+          proxy_pass $kajiba_upstream;
+          proxy_timeout 1h;
+        }
+      '';
       virtualHosts.forge = {
+        listen = [
+          {
+            addr = "127.0.0.1";
+            port = 4443;
+            ssl = true;
+          }
+        ];
         onlySSL = true;
         http2 = true;
         sslCertificate = "${tls}/forge.pem";
@@ -177,33 +203,41 @@ pkgs.testers.runNixOSTest {
     ];
   };
 
-  nodes.runner = {
-    imports = [ ../nixosModules/runner.nix ];
-    virtualisation.memorySize = 2048;
-    services.kajiba-runner = {
-      enable = true;
-      package = kajibaRunnerPackage;
-      name = "build-1";
-      url = "https://forge";
-      tokenFile = "/run/secrets/kajiba-runner";
-      tags = [ "kvm" ];
-      maxJobs = 2;
-    };
-    systemd.tmpfiles.settings."10-kajiba-secret" = secretRule "kajiba-runner";
-    security.pki.certificateFiles = [ "${tls}/ca.pem" ];
-    nix.settings = nixSettings // {
-      system-features = [
-        "nixos-test"
-        "benchmark"
-        "big-parallel"
-        "kvm"
+  nodes.runner =
+    { nodes, ... }:
+    {
+      imports = [
+        ../nixosModules/runner.nix
+        (svid.install "kajiba-runner" "runner")
+      ];
+      virtualisation.memorySize = 2048;
+      services.kajiba-runner = {
+        enable = true;
+        package = kajibaRunnerPackage;
+        name = "build-1";
+        url = "https://runners.forge";
+        tls = {
+          trustDomain = "example.org";
+          inherit (svid) serverId;
+        }
+        // svid.files "kajiba-runner";
+        tags = [ "kvm" ];
+        maxJobs = 2;
+      };
+      networking.hosts.${nodes.forge.networking.primaryIPAddress} = [ "runners.forge" ];
+      nix.settings = nixSettings // {
+        system-features = [
+          "nixos-test"
+          "benchmark"
+          "big-parallel"
+          "kvm"
+        ];
+      };
+      environment.systemPackages = [
+        kajibaRunnerPackage
+        pkgs.git
       ];
     };
-    environment.systemPackages = [
-      kajibaRunnerPackage
-      pkgs.git
-    ];
-  };
 
   nodes.client = {
     virtualisation.memorySize = 2048;
@@ -227,6 +261,7 @@ pkgs.testers.runNixOSTest {
     reader_cli = f"cd {clone_dir} && kajiba --token-file /root/reader-token"
     ssh_command = "ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/known_hosts -o ConnectTimeout=5 -i /root/writer-key -p 2222"
     manual = "/var/lib/kajiba-runner-manual"
+    build_2 = f'name = "build-2"\nurl = "https://runners.forge"\nstate_dir = "{manual}"\n[tls]\ntrust_domain = "example.org"\nserver_id = "${svid.serverId}"\nsvid_file = "{manual}/svid.pem"\nkey_file = "{manual}/key.pem"\nbundle_file = "{manual}/bundle.pem"\n'
 
 
     def sql(query):
@@ -341,7 +376,8 @@ pkgs.testers.runNixOSTest {
         forge.wait_until_succeeds(f"test \"$(sqlite3 {db} \"SELECT connected FROM runner WHERE name = 'build-1'\")\" = 0")
         runner.succeed(
             f"install -d -o kajiba-runner -g kajiba-runner -m 0700 {manual}",
-            f"printf '%s\\n' 'name = \"build-2\"' 'url = \"https://forge\"' 'token_file = \"/run/secrets/kajiba-runner\"' 'state_dir = \"{manual}\"' > {manual}/runner.toml",
+            f"install -o kajiba-runner -g kajiba-runner -m 0600 ${svid.ca}/runner-2/svid.pem ${svid.ca}/runner-2/key.pem ${svid.ca}/bundle.pem {manual}/",
+            f"printf %s {shlex.quote(build_2)} > {manual}/runner.toml",
             # set +e: the subshell inherits errexit and timeout ends with 124.
             f"(set +e; runuser -u kajiba-runner -- env PATH=/run/current-system/sw/bin HOME={manual} timeout 120 kajiba-runner --config {manual}/runner.toml >{manual}/out 2>&1) >/dev/null 2>&1 &",
         )
@@ -385,6 +421,19 @@ pkgs.testers.runNixOSTest {
         forge.wait_until_succeeds(f"kajiba-server admin retention && test \"$(sqlite3 {db} \"SELECT COUNT(*) FROM run WHERE trigger = 'worktree'\")\" = 0", timeout=180)
         forge.succeed(f"test -z \"$(ls -A {bundles_dir})\"")
         assert sql("SELECT COUNT(*) FROM run WHERE trigger = 'push'") == "1"
+
+    with subtest("a runner whose declaration is removed is refused as disabled, by its own SVID"):
+        runner.execute(f"pkill -u kajiba-runner -f 'kajiba-runner --config {manual}/runner.toml'")
+        forge.succeed("/run/current-system/specialisation/retired/bin/switch-to-configuration test")
+        forge.wait_for_unit("kajiba-server.service")
+        assert sql("SELECT disabled_at IS NOT NULL FROM runner WHERE name = 'build-2'") == "1"
+        code, out = runner.execute(f"runuser -u kajiba-runner -- env PATH=/run/current-system/sw/bin HOME={manual} timeout 8 kajiba-runner --config {manual}/runner.toml 2>&1")
+        assert code == 124 and "Unauthenticated" in out, out
+        forge.succeed("journalctl --sync")
+        refused = [json.loads(line) for line in forge.succeed("journalctl _SYSTEMD_UNIT=kajiba-server.service -o cat --no-pager").splitlines()]
+        assert any(line.get("event") == "runner-refused" and line.get("reason") == "disabled" and line.get("runner") == "build-2" for line in refused), refused
+        # build-1, still declared, is connected again after the restart.
+        forge.wait_until_succeeds(f"test \"$(sqlite3 {db} \"SELECT connected FROM runner WHERE name = 'build-1'\")\" = 1")
 
     validate_logs(forge, "kajiba-server.service")
     validate_logs(runner, "kajiba-runner.service")
