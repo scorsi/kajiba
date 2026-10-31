@@ -1,8 +1,8 @@
 use super::*;
 use crate::db::attempts::{
-    BACKEND_UNAVAILABLE, Chunk, Finish, LEASE_MS, NO_CONNECTED_RUNNER, Offer, Outcome,
-    RUNNERS_BUSY, TAGS_UNMATCHED, accept, append_log, assign, expire, finish, heartbeat, resume,
-    step,
+    BACKEND_UNAVAILABLE, Chunk, Finish, LEASE_MS, MAX_LOG, NO_CONNECTED_RUNNER, Offer, Outcome,
+    RUNNERS_BUSY, TAGS_UNMATCHED, TRUNCATED, accept, append_log, assign, expire, finish, heartbeat,
+    resume, step,
 };
 use crate::db::runs::{AttemptState, NewRun, RunState, create_run};
 
@@ -294,7 +294,7 @@ async fn log(
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    ack
+    ack.map(|(highest, _)| highest)
 }
 
 #[tokio::test]
@@ -357,6 +357,76 @@ async fn log_chunks_are_appended_in_sequence_only() {
 }
 
 #[tokio::test]
+async fn a_log_past_its_bound_is_truncated_once_and_later_chunks_are_acknowledged() {
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    populate(&mut writer).await;
+    let (_, attempt) = running(&mut writer).await;
+    let logs = dir.0.clone();
+    // Three bytes short of the bound, stored as one sparse chunk.
+    assert_eq!(log(&mut writer, &logs, 1, &attempt, 1, b"a").await, Some(1));
+    let path = logs.join(format!("{attempt}.log"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(MAX_LOG as u64 - 3)
+        .unwrap();
+    sqlx::query("UPDATE log_chunk SET length = ?")
+        .bind(MAX_LOG - 3)
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let mut tx = writer.begin().await.unwrap();
+    let chunk = |sequence, data| Chunk {
+        attempt: &attempt,
+        sequence,
+        step: 0,
+        data,
+    };
+    // The chunk crossing the bound keeps what fits, then the marker line.
+    assert_eq!(
+        append_log(&mut tx, &logs, 1, &chunk(2, b"bcdefg"), 10)
+            .await
+            .unwrap(),
+        Some((2, true))
+    );
+    // Later chunks are acknowledged in sequence and stored nowhere.
+    for sequence in 3..6 {
+        assert_eq!(
+            append_log(&mut tx, &logs, 1, &chunk(sequence, b"more"), 10)
+                .await
+                .unwrap(),
+            Some((sequence, false))
+        );
+    }
+    assert_eq!(
+        append_log(&mut tx, &logs, 1, &chunk(4, b"replay"), 10)
+            .await
+            .unwrap(),
+        Some((5, false))
+    );
+    tx.commit().await.unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(bytes.len() as i64, MAX_LOG + TRUNCATED.len() as i64);
+    assert!(bytes.ends_with(&[b"bcd", TRUNCATED].concat()));
+    let index: Vec<(i64, i64, i64)> =
+        sqlx::query_as("SELECT seq, offset, length FROM log_chunk ORDER BY seq")
+            .fetch_all(&mut writer)
+            .await
+            .unwrap();
+    assert_eq!(
+        index,
+        [
+            (1, 0, MAX_LOG - 3),
+            (5, MAX_LOG - 3, 3 + TRUNCATED.len() as i64)
+        ]
+    );
+    readers.close().await;
+    writer.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn only_running_unexpired_attempts_accept_new_logs_and_steps() {
     for (state, deadline, writable) in [
         ("running", 20, true),  // The lease includes its last millisecond.
@@ -412,7 +482,8 @@ async fn only_running_unexpired_attempts_accept_new_logs_and_steps() {
                     20
                 )
                 .await
-                .unwrap(),
+                .unwrap()
+                .map(|(highest, _)| highest),
                 expected,
                 "{state}, lease {deadline}"
             );

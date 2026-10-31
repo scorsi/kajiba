@@ -630,6 +630,7 @@ impl Runners {
         let mut writer = writer.lock().await;
         let now = crate::db::runs::now();
         let mut tx = writer.begin().await.map_err(internal)?;
+        let mut truncated = false;
         let (attempt, outcome, acknowledgment) = match message {
             Message::Heartbeat(_) => {
                 attempts::heartbeat(&mut tx, runner.0, now)
@@ -652,7 +653,7 @@ impl Runners {
                         "must be at most 65536 bytes",
                     ));
                 }
-                let highest = attempts::append_log(
+                let appended = attempts::append_log(
                     &mut tx,
                     &self.health.state_dir.join("ci/logs"),
                     runner.0,
@@ -666,6 +667,8 @@ impl Runners {
                 )
                 .await
                 .map_err(internal)?;
+                truncated = appended.is_some_and(|(_, truncated)| truncated);
+                let highest = appended.map(|(highest, _)| highest);
                 let acknowledgment = highest.map(|sequence| {
                     connect_response::Message::LogAck(LogAck {
                         attempt_id: chunk.attempt_id.clone(),
@@ -730,6 +733,9 @@ impl Runners {
         };
         declared.bus.commit(tx).await.map_err(internal)?;
         drop(writer);
+        if truncated {
+            self.registry.log_truncated();
+        }
         self.health.ci_progress.send_replace(());
         Ok(match outcome {
             Outcome::Cancel => vec![cancel(&attempt)],

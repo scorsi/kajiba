@@ -113,6 +113,7 @@ pub struct Registry {
     auth_refusals: [Counter; 3],
     runners_connected: AtomicU64,
     jobs_pending: AtomicU64,
+    logs_truncated: Counter,
     runs: [Counter; 3],
     runner_refusals: [Counter; 5],
 }
@@ -144,6 +145,11 @@ impl Registry {
 
     pub fn set_jobs_pending(&self, count: u64) {
         self.jobs_pending.store(count, Relaxed);
+    }
+
+    /// Count one attempt whose log reached its bound (0121).
+    pub fn log_truncated(&self) {
+        self.logs_truncated.add(1);
     }
 
     /// Count admission decisions once per push, regardless of its number of refs.
@@ -250,6 +256,13 @@ impl Registry {
             out,
             "kajiba_jobs_pending {}",
             self.jobs_pending.load(Relaxed)
+        )
+        .unwrap();
+        out.push_str("# HELP kajiba_logs_truncated_total Attempts whose log reached its size bound.\n# TYPE kajiba_logs_truncated_total counter\n");
+        writeln!(
+            out,
+            "kajiba_logs_truncated_total {}",
+            self.logs_truncated.get()
         )
         .unwrap();
         out.push_str("# HELP kajiba_handler_lag_events Journal events after the handler checkpoint.\n# TYPE kajiba_handler_lag_events gauge\n");

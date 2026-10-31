@@ -218,6 +218,9 @@ kajiba_runs_total{result="cancelled"} 0
 # HELP kajiba_jobs_pending Jobs waiting for a runner.
 # TYPE kajiba_jobs_pending gauge
 kajiba_jobs_pending 3
+# HELP kajiba_logs_truncated_total Attempts whose log reached its size bound.
+# TYPE kajiba_logs_truncated_total counter
+kajiba_logs_truncated_total 1
 # HELP kajiba_handler_lag_events Journal events after the handler checkpoint.
 # TYPE kajiba_handler_lag_events gauge
 kajiba_handler_lag_events{handler="ci"} 2

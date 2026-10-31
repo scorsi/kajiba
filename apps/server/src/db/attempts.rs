@@ -336,18 +336,26 @@ pub struct Chunk<'a> {
     pub data: &'a [u8],
 }
 
+/// ADR 0121: an attempt stores at most 64 MiB of log, then this line.
+pub const MAX_LOG: i64 = 64 << 20;
+pub const TRUNCATED: &[u8] =
+    b"\n[kajiba: log truncated: an attempt stores at most 64 MiB of log]\n";
+
 /// Append the chunk when its sequence is the next one: bytes to
 /// `<logs>/<attempt public id>.log`, then its `log_chunk` row (offset, length). A
-/// duplicate or a gap changes nothing. Returns the highest contiguous sequence to
-/// acknowledge, or `None` (cancel) when the attempt is not this runner's current one
-/// or a new chunk targets a terminal or expired attempt. Duplicates remain acknowledged.
+/// duplicate or a gap changes nothing. Past [`MAX_LOG`] stored bytes, the chunk's
+/// remainder is replaced by [`TRUNCATED`], and later chunks are acknowledged without
+/// being stored (0121). Returns the highest contiguous sequence to acknowledge and
+/// whether this chunk truncated the log, or `None` (cancel) when the attempt is not this
+/// runner's current one or a new chunk targets a terminal or expired attempt. Duplicates
+/// remain acknowledged.
 pub async fn append_log(
     tx: &mut SqliteConnection,
     logs: &Path,
     runner_id: i64,
     chunk: &Chunk<'_>,
     now: i64,
-) -> Result<Option<u64>, sqlx::Error> {
+) -> Result<Option<(u64, bool)>, sqlx::Error> {
     let Some(attempt) = current(tx, runner_id, chunk.attempt).await? else {
         return Ok(None);
     };
@@ -358,14 +366,31 @@ pub async fn append_log(
     .fetch_one(&mut *tx)
     .await?;
     if chunk.sequence <= highest as u64 {
-        return Ok(Some(highest as u64));
+        return Ok(Some((highest as u64, false)));
     }
     if attempt.state != "running" || attempt.lease_expires_at < now {
         return Ok(None);
     }
     if i64::try_from(chunk.sequence) != Ok(highest + 1) {
-        return Ok(Some(highest as u64));
+        return Ok(Some((highest as u64, false)));
     }
+    if end > MAX_LOG {
+        // Already truncated: the last row takes the sequence, so no row is added.
+        sqlx::query("UPDATE log_chunk SET seq = ? WHERE attempt_id = ? AND seq = ?")
+            .bind(highest + 1)
+            .bind(attempt.id)
+            .bind(highest)
+            .execute(&mut *tx)
+            .await?;
+        return Ok(Some((chunk.sequence, false)));
+    }
+    let room = (MAX_LOG - end) as usize;
+    let truncated = chunk.data.len() > room;
+    let data = if truncated {
+        [&chunk.data[..room], TRUNCATED].concat()
+    } else {
+        chunk.data.to_vec()
+    };
     // Bytes past the index's end are a write whose row never committed: overwrite them.
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -374,7 +399,7 @@ pub async fn append_log(
         .open(logs.join(format!("{}.log", attempt.public_id)))?;
     file.set_len(end as u64)?;
     std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(end as u64))?;
-    file.write_all(chunk.data)?;
+    file.write_all(&data)?;
     sqlx::query(
         "INSERT INTO log_chunk (attempt_id, seq, step_idx, offset, length) VALUES (?, ?, ?, ?, ?)",
     )
@@ -382,10 +407,10 @@ pub async fn append_log(
     .bind(highest + 1)
     .bind(chunk.step)
     .bind(end)
-    .bind(chunk.data.len() as i64)
+    .bind(data.len() as i64)
     .execute(&mut *tx)
     .await?;
-    Ok(Some(chunk.sequence))
+    Ok(Some((chunk.sequence, truncated)))
 }
 
 /// Record a step's state (`running`, `succeeded`, `failed`, `skipped`); false when the
