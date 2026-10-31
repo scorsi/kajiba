@@ -417,6 +417,75 @@ async fn a_frozen_runner_does_not_consume_replays_with_a_healthy_alternative() {
 }
 
 #[tokio::test]
+async fn a_stream_ends_when_its_peer_svid_expires() {
+    let state = Forge::state().await;
+    let runners = Runners::new(state.health.clone(), Arc::default());
+    let in_an_hour = std::time::SystemTime::now() + Duration::from_secs(3600);
+    let expiring = Peer {
+        id: BUILD_1.into(),
+        not_after: in_an_hour,
+    };
+    // A full queue: the cut must not wait for the runner to read.
+    let (outbound, _unread) = mpsc::channel(1);
+    outbound.try_send(Ok(cancel("unknown"))).unwrap();
+    let (_, _, mut ended) = runners
+        .admit(Some(&expiring), &hello("build-1"), "test", outbound)
+        .await
+        .unwrap();
+    let (outbound, _received) = mpsc::channel(1);
+    let (_, _, mut unaffected) = runners
+        .admit(Some(&peer(BUILD_2)), &hello("build-2"), "test", outbound)
+        .await
+        .unwrap();
+    let at = |time: std::time::SystemTime| {
+        time.duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    };
+    runners.pass(at(in_an_hour) - 1).await;
+    assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+
+    tokio::time::timeout(Duration::from_secs(1), runners.pass(at(in_an_hour)))
+        .await
+        .expect("the cut blocked on an unread response queue");
+    assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+    assert_eq!(
+        unaffected.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    );
+    assert!(!runners.live.lock().unwrap().1.contains_key("build-1"));
+    let mut writer = state.health.writer.get().unwrap().lock().await;
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT connected FROM runner WHERE name = 'build-1'")
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM event WHERE kind = 'runner-disconnected'"
+        )
+        .fetch_one(&mut *writer)
+        .await
+        .unwrap(),
+        1
+    );
+    drop(writer);
+
+    // A request on a connection whose SVID expired since its handshake is no runner's.
+    let expired = Peer {
+        id: BUILD_1.into(),
+        not_after: std::time::SystemTime::now() - Duration::from_secs(1),
+    };
+    let (outbound, _received) = mpsc::channel(1);
+    let status = runners
+        .admit(Some(&expired), &hello("build-1"), "test", outbound)
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unauthenticated);
+}
+
+#[tokio::test]
 async fn each_refusal_has_its_code_reason_metric_and_journal_entry() {
     let forge = Forge::start().await;
     let capabilities = |change: fn(&mut Announced)| {

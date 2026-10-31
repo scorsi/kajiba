@@ -67,6 +67,8 @@ type Outbound = mpsc::Sender<Result<ConnectResponse, Status>>;
 
 struct Live {
     generation: u64,
+    /// The peer SVID's `NotAfter`, in milliseconds: the stream ends then (0124).
+    not_after: i64,
     replaced: oneshot::Sender<()>,
     outbound: Outbound,
     offer: Offer,
@@ -155,12 +157,13 @@ impl Reason {
     }
 }
 
-/// The declared runner whose `spiffe_id` is the verified peer's ID (0124).
+/// The declared runner whose `spiffe_id` is the verified peer's ID (0124); a peer whose SVID
+/// has expired since its handshake is none.
 fn declared_by<'a>(
     runners: &'a BTreeMap<String, RunnerDeclaration>,
     peer: Option<&Peer>,
 ) -> Option<(&'a str, &'a RunnerDeclaration)> {
-    let peer = peer?;
+    let peer = peer.filter(|peer| peer.not_after > std::time::SystemTime::now())?;
     runners
         .iter()
         .find(|(_, declaration)| declaration.spiffe_id == peer.id)
@@ -368,6 +371,11 @@ impl Runners {
                 name.to_owned(),
                 Live {
                     generation,
+                    not_after: peer.map_or(0, |peer| {
+                        peer.not_after
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |since| since.as_millis() as i64)
+                    }),
                     replaced,
                     outbound,
                     offer,
@@ -479,6 +487,20 @@ impl Runners {
             return;
         };
         let bus = &declared.bus;
+        // A stream ends with its certificate, stalled ones included; the runner reconnects
+        // with its renewed SVID (0124).
+        let expired: Vec<_> = self
+            .live
+            .lock()
+            .unwrap()
+            .1
+            .iter()
+            .filter(|(_, live)| live.not_after <= now)
+            .map(|(name, live)| (name.clone(), live.generation, live.offer.runner_id))
+            .collect();
+        for (name, generation, id) in expired {
+            self.disconnected(id, &name, generation, "").await;
+        }
         let mut writer = writer.lock().await;
         let result = async {
             let mut tx = writer.begin().await?;
