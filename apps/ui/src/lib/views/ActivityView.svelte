@@ -205,7 +205,7 @@
 			</div>
 		</figure>
 		<ul class="mt-3 space-y-0.5 text-[0.8125rem]">
-			{#each inWindow.slice(0, 4) as { c, r } (c.id)}
+			{#each inWindow.slice(0, 4) as { c, r } (`${r.key}/${c.id}`)}
 				{@const run = runByCommit.get(c.id)}
 				<li>
 					<a
@@ -248,7 +248,7 @@
 							<RunBadge state={r.state} label />
 							<span class="font-mono text-xs text-fg-muted">{r.repo} #{r.short}</span>
 							<span class="ml-auto flex w-32 gap-0.5" aria-hidden="true"
-								>{#each r.steps as s (s.name)}<span
+								>{#each r.steps as s, si (si)}<span
 										class="h-1 flex-1 rounded-full {s.state === RunState.SUCCEEDED
 											? 'bg-ok'
 											: s.state === RunState.RUNNING

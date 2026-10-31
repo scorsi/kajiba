@@ -14,6 +14,7 @@
 	history, files, kind (History filter).
 -->
 <script lang="ts">
+	import { uniqueCommits } from '#lib/data/forge.ts';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { tick, type Snippet } from 'svelte';
@@ -111,7 +112,7 @@
 		if (!head || empty) return [] as Commit[];
 		const res = await listCommits({ repo: repoKey, revision: head, path, want: 400 });
 		logMore = !!res.nextPageToken;
-		return res.commits;
+		return uniqueCommits(res.commits);
 	});
 
 	const tagsAt = $derived.by(() => {
@@ -144,7 +145,7 @@
 			if (t) flags.set(k, [...(flags.get(k) ?? []), ...t]);
 		}
 		return Array.from({ length: DAYS }, (_, i) => {
-			const dt = new Date(today.getTime() - (DAYS - 1 - i) * 86400000);
+			const dt = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (DAYS - 1 - i), 12);
 			const k = dayKey(dt);
 			const commits = byDay.get(k) ?? [];
 			const states = commits
@@ -380,7 +381,7 @@
 
 {#snippet stepsBar(r: Run, labels: boolean)}
 	<div class="flex gap-0.5" aria-label="Steps">
-		{#each r.steps as s (s.name)}
+		{#each r.steps as s, si (si)}
 			<div
 				class="min-w-0 flex-1"
 				title="{s.name}: {RUN_LABEL[s.state]}{s.durationSeconds
@@ -886,7 +887,7 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 								{preview.data.changes.length} files changed
 							</h3>
 							<ul class="divide-y divide-border border-y border-border">
-								{#each preview.data.changes as ch (ch.path)}
+								{#each preview.data.changes as ch (`${ch.kind}:${ch.path}`)}
 									{@const k = CHANGE[ch.kind]}
 									<li>
 										<a

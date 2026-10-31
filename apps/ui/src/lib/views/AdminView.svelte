@@ -292,7 +292,7 @@
 												class="mt-1.5 flex gap-0.5"
 												role="img"
 												aria-label="Steps of run #{run.short}"
-												>{#each run.steps as st (st.name)}<span
+												>{#each run.steps as st, si (si)}<span
 														class="h-1 flex-1 rounded-full {stepClass(st.state)}"
 														title="{st.name} · {RUN_LABEL[st.state]}"
 													></span>{/each}</span

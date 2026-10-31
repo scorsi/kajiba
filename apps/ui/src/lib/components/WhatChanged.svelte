@@ -62,7 +62,7 @@
 			{data.changes.length} file{data.changes.length === 1 ? '' : 's'} changed
 		</p>
 		<ul class="mt-2 space-y-0.5">
-			{#each data.changes as c (c.path)}
+			{#each data.changes as c (`${c.kind}:${c.path}`)}
 				<li class="flex items-center gap-3">
 					<span class="w-16 shrink-0 text-xs text-fg-subtle">{CHANGE_LABEL[c.kind]}</span>
 					<a

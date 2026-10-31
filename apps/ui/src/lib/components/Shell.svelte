@@ -7,6 +7,7 @@
 	Where you are is derived from the route; `location` overrides it.
 -->
 <script lang="ts">
+	import { uniqueCommits } from '#lib/data/forge.ts';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import type { Snippet } from 'svelte';
@@ -101,7 +102,7 @@
 			Promise.all(
 				list.map((r) =>
 					listCommits({ repo: `${r.owner}/${r.name}`, revision: r.defaultBranch, want: 120 })
-						.then((l) => l.commits)
+						.then((l) => uniqueCommits(l.commits))
 						.catch(() => [])
 				)
 			)

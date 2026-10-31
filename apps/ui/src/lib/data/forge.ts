@@ -51,7 +51,7 @@ export async function loadForge(): Promise<Forge> {
       const key = `${repo.owner}/${repo.name}`;
       const [commits, refs] = await Promise.all([
         listCommits({ repo: key, revision: repo.defaultBranch, want: 300 })
-          .then((l) => l.commits)
+          .then((l) => uniqueCommits(l.commits))
           .catch(() => [] as Commit[]),
         listRefs({ repo: key }).then((r) => r.refs),
       ]);
@@ -82,10 +82,22 @@ export const dayKey = (dt: Date) =>
 /** The last `n` days, oldest first. */
 export function lastDays(n: number, now = new Date()) {
   return Array.from({ length: n }, (_, i) => {
-    const dt = new Date(now.getTime() - (n - 1 - i) * 86400000);
+    // calendar days: 24 h steps repeat a day across a 25 h (DST) day
+    const dt = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - (n - 1 - i),
+      12,
+    );
     return { k: dayKey(dt), dt };
   });
 }
+
+/** A history list never holds one commit twice (overlapping pages, merged lists). */
+export const uniqueCommits = (commits: Commit[]): Commit[] => {
+  const seen = new Set<string>();
+  return commits.filter((c) => !seen.has(c.id) && !!seen.add(c.id));
+};
 
 export const commitDay = (c: Commit) => dayKey(toDate(c.commitTime)!);
 

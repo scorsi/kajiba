@@ -183,10 +183,12 @@ writeShellApplication {
     printf 'More.\n' >> "$fixture/docs/guide/intro.md"
     git -C "$fixture" commit --quiet -am "Extend the guide"
     git -C "$fixture" switch --quiet main
+    # a tag named like a branch, on the commit main points at (duplicate-key regression)
+    git -C "$fixture" tag feature
     git clone --quiet --bare "$fixture" "$dir/fixture.git"
     kajiba-server admin --socket "$dir/run/local.sock" import alice/demo "$dir/fixture.git" >/dev/null
-    main_sha="$(git -C "$fixture" rev-parse main)"
-    KAJIBA_E2E_FEATURE_SHA="$(git -C "$fixture" rev-parse feature)"
+    main_sha="$(git -C "$fixture" rev-parse refs/heads/main)"
+    KAJIBA_E2E_FEATURE_SHA="$(git -C "$fixture" rev-parse refs/heads/feature)"
     KAJIBA_E2E_MAIN_SHA="$main_sha"
     export KAJIBA_E2E_FEATURE_SHA KAJIBA_E2E_MAIN_SHA
 

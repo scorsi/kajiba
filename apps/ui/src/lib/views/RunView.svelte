@@ -120,7 +120,7 @@
 		<figure class="mt-5">
 			<figcaption class="sr-only">Steps, width proportional to duration</figcaption>
 			<div class="flex gap-1">
-				{#each run.steps as s, i (s.name)}
+				{#each run.steps as s, i (i)}
 					{@const e = elapsedOf(i)}
 					<a
 						href={stepHref(i)}
@@ -205,7 +205,7 @@
 
 	<!-- steps, side by side -->
 	<BandStrip label="Steps" open={stepsOpen} href={hrefFor({ steps: stepsOpen ? '0' : null })}>
-		{#each run.steps as st, i (st.name)}<span class="flex items-center gap-1.5"
+		{#each run.steps as st, i (i)}<span class="flex items-center gap-1.5"
 				><RunBadge state={st.state} size={10} />{st.name}{#if st.state !== RunState.QUEUED}<span
 						class="tabular text-fg-subtle">{clock(elapsedOf(i))}</span
 					>{/if}</span

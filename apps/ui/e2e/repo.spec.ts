@@ -21,7 +21,12 @@ test("alice/demo: README, refs, clone URLs and read-only declared access", async
 
   // The ref switcher lists both branches and the tag.
   const refs = page.getByLabel("Branch or tag");
-  await expect(refs.locator("option")).toHaveText(["feature", "main", "v1"]);
+  await expect(refs.locator("option")).toHaveText([
+    "feature",
+    "main",
+    "feature",
+    "v1",
+  ]);
 
   // Clone shows the server's URLs, not the page's origin.
   await page.locator("summary", { hasText: "Clone" }).click();

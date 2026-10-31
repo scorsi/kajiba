@@ -105,7 +105,7 @@
 	});
 	const hm = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hour12: false });
 	const todayKey = dayKey(new Date());
-	const yesterdayKey = dayKey(new Date(Date.now() - 86400000));
+	const yesterdayKey = dayKey(new Date(new Date().setDate(new Date().getDate() - 1)));
 	const dayLabel = (k: string, dt: Date) =>
 		k === todayKey ? 'Today' : k === yesterdayKey ? 'Yesterday' : dayFmt.format(dt);
 	const failedStep = (r: Run) => r.steps.find((s) => s.state === RunState.FAILED)?.name;

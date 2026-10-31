@@ -189,7 +189,7 @@
 	class="flex flex-col border-b border-border sm:h-[min(72vh,46rem)] sm:min-h-[26rem] sm:flex-row"
 	id="steps"
 >
-	{#each run.steps as st, i (st.name)}
+	{#each run.steps as st, i (i)}
 		{#if i !== step}
 			{@render stepSpine(i)}
 		{:else}
@@ -241,7 +241,7 @@
 						</div>
 					{/if}
 					<div class="flex min-h-0 flex-1 flex-col sm:flex-row">
-						{#each checks as c (c.name)}
+						{#each checks as c, ci (ci)}
 							{#if c.name === check && c.seg}
 								<section
 									class="flex min-h-0 min-w-0 flex-1 flex-col border-b border-border/60 sm:border-r sm:border-b-0"

@@ -16,7 +16,7 @@ import {
   type Run,
   type Runner,
 } from "#lib/api.ts";
-import { dayKey, type Forge } from "#lib/data/forge.ts";
+import { dayKey, uniqueCommits, type Forge } from "#lib/data/forge.ts";
 import { refShortName } from "#lib/format.ts";
 
 export type HistoryEvent =
@@ -61,7 +61,8 @@ export function buildEvents(
 ): HistoryEvent[] {
   const since = opts.since ?? 0;
   const out: HistoryEvent[] = [];
-  for (const s of sources) {
+  for (const src of sources) {
+    const s = { ...src, commits: uniqueCommits(src.commits) };
     const groups = new Map<string, Commit[]>();
     const listed = new Set<string>();
     for (const c of s.commits) {
