@@ -228,6 +228,9 @@ impl Source {
             .with_client_cert_verifier(Arc::new(Verifier(self.clone(), None)))
             .with_cert_resolver(Arc::new(Resolver(self.clone())));
         config.alpn_protocols = vec![b"h2".to_vec()];
+        // Every connection must verify the current SVIDs and bundle (0124, 0125).
+        config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+        config.send_tls13_tickets = 0;
         config
     }
 
@@ -244,6 +247,7 @@ impl Source {
             )))
             .with_client_cert_resolver(Arc::new(Resolver(self.clone())));
         config.alpn_protocols = vec![b"h2".to_vec()];
+        config.resumption = rustls::client::Resumption::disabled();
         config
     }
 }

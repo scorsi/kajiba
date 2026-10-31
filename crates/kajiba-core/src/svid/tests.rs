@@ -90,6 +90,58 @@ fn ids_follow_the_spiffe_rules() {
 }
 
 #[test]
+fn reconnects_verify_current_svids_and_bundles_without_resumption() {
+    // Exercise each side's policy even when its peer permits resumption.
+    for server_policy in [true, false] {
+        for revoke_on_server in [true, false] {
+            let dir = std::env::temp_dir().join(format!("kj-svid-{}", crate::new_id().unwrap()));
+            std::fs::create_dir(&dir).unwrap();
+            let put = |from: &str, to: &str| {
+                let staged = dir.join("staged");
+                std::fs::copy(fixture(from), &staged).unwrap();
+                std::fs::rename(&staged, dir.join(to)).unwrap();
+            };
+            for name in ["runner.pem", "runner.key", "forge.pem", "forge.key"] {
+                put(name, name);
+            }
+            put("ca.pem", "runner-bundle.pem");
+            put("ca.pem", "forge-bundle.pem");
+            let runner = Source::load(files(&dir, "runner", "runner-bundle.pem")).unwrap();
+            let forge = Source::load(files(&dir, "forge", "forge-bundle.pem")).unwrap();
+            let mut client = runner.client_config(FORGE);
+            let mut server = forge.server_config();
+            if server_policy {
+                client.resumption = rustls::client::Resumption::default();
+            } else {
+                server.session_storage = rustls::server::ServerSessionMemoryCache::new(256);
+                server.send_tls13_tickets = 2;
+            }
+            handshake(client.clone(), server.clone()).unwrap();
+
+            put("renewed.pem", "runner.pem");
+            put("renewed.key", "runner.key");
+            let reconnected = handshake(client.clone(), server.clone()).unwrap();
+            assert_eq!(
+                reconnected.handshake_kind(),
+                Some(rustls::HandshakeKind::Full)
+            );
+            assert_eq!(reconnected.peer_certificates().unwrap()[0], leaf("renewed"));
+
+            put(
+                "other-ca.pem",
+                if revoke_on_server {
+                    "forge-bundle.pem"
+                } else {
+                    "runner-bundle.pem"
+                },
+            );
+            assert!(handshake(client, server).is_err());
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+}
+
+#[test]
 fn mutual_handshake_yields_the_runner_identity() {
     let forge = source("forge");
     let runner = source("runner");
