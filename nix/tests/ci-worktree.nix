@@ -376,8 +376,10 @@ pkgs.testers.runNixOSTest {
         forge.succeed("test -z \"$(ls -A /var/lib/kajiba-server/tmp)\"")
         assert sql("SELECT COUNT(*) FROM run WHERE trigger = 'worktree'") == "4"
 
-    with subtest("worktree runs and their bundles are gone after ci.worktree_retention"):
-        assert int(forge.succeed(f"ls {bundles_dir} | wc -l")) == 4
+    with subtest("finished worktree runs lose their bundle at once, the runs go after ci.worktree_retention"):
+        # All four runs are terminal: their bundles are gone, runs and logs stay (ADR 0122).
+        forge.wait_until_succeeds(f"test -z \"$(ls -A {bundles_dir})\"")
+        assert sql("SELECT COUNT(*) FROM run WHERE trigger = 'worktree' AND state IN ('queued', 'running')") == "0"
         forge.wait_until_succeeds(f"kajiba-server admin retention && test \"$(sqlite3 {db} \"SELECT COUNT(*) FROM run WHERE trigger = 'worktree'\")\" = 0", timeout=180)
         forge.succeed(f"test -z \"$(ls -A {bundles_dir})\"")
         assert sql("SELECT COUNT(*) FROM run WHERE trigger = 'push'") == "1"

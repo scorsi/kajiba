@@ -531,6 +531,19 @@ impl Runners {
         }
         .await;
         drop(writer);
+        // A finished worktree run's bundle goes at once, its run at retention (0122).
+        if let Some(database) = self.health.database.get() {
+            let bundles = self.health.state_dir.join("ci/bundles");
+            let dropped = match database.acquire().await {
+                Ok(mut connection) => {
+                    crate::db::retention::drop_finished_bundles(&mut connection, &bundles).await
+                }
+                Err(err) => Err(err.to_string()),
+            };
+            if let Err(err) = dropped {
+                tracing::warn!(event = "bundle-cleanup-failed", err);
+            }
+        }
         let assigned = match result {
             Ok((changes, (assigned, pending))) => {
                 if !changes.is_empty() || !assigned.is_empty() {

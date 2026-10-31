@@ -38,6 +38,12 @@ impl<K: Ord + Clone> Slots<K> {
             key,
         })
     }
+
+    /// Slots `key` holds now.
+    pub fn held(&self, key: &K) -> usize {
+        let held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        held.get(key).copied().unwrap_or(0)
+    }
 }
 
 impl<K: Ord> Drop for Slot<K> {
@@ -64,7 +70,9 @@ mod tests {
         assert!(slots.take("a", 2).is_none());
         let _b = slots.take("b", 2).unwrap();
         assert!(slots.take("c", 2).is_none(), "total reached");
+        assert_eq!(slots.held(&"a"), 2);
         drop(a1);
+        assert_eq!(slots.held(&"a"), 1);
         let _c = slots.take("c", 2).unwrap();
         assert!(slots.take("a", 0).is_none());
     }

@@ -286,8 +286,8 @@ async fn readable_run(
     Ok(row)
 }
 
-/// ADR 0097: at most this many non-terminal worktree runs per user.
-pub const WORKTREE_RUNS: i64 = 4;
+/// ADR 0122: at most this many non-terminal worktree runs per user, uploads included.
+pub const WORKTREE_RUNS: usize = 16;
 
 /// A worktree run that passed the creation checks (ADR 0118).
 #[derive(Debug)]
@@ -397,7 +397,10 @@ impl Runs {
                 ),
             ));
         }
-        active_worktree_runs(self.readers()?, user).await?;
+        let active = active_worktree_runs(self.readers()?, user).await?;
+        if active + self.0.uploads.held(&user) >= WORKTREE_RUNS {
+            return Err(worktree_runs_limit());
+        }
         Ok(Admitted {
             repo_id,
             repo,
@@ -407,11 +410,11 @@ impl Runs {
     }
 }
 
-/// WORKTREE_RUNS_LIMIT when `user` already has [`WORKTREE_RUNS`] non-terminal worktree runs.
+/// The non-terminal worktree runs of `user`.
 pub async fn active_worktree_runs<'e>(
     executor: impl sqlx::SqliteExecutor<'e>,
     user: i64,
-) -> Result<(), Status> {
+) -> Result<usize, Status> {
     let active: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM run WHERE trigger = 'worktree' AND triggered_by = ?
            AND state IN ('queued', 'running')",
@@ -420,14 +423,15 @@ pub async fn active_worktree_runs<'e>(
     .fetch_one(executor)
     .await
     .map_err(internal)?;
-    if active >= WORKTREE_RUNS {
-        return Err(refused(
-            tonic::Code::ResourceExhausted,
-            "WORKTREE_RUNS_LIMIT",
-            format!("at most {WORKTREE_RUNS} worktree runs may be active at once"),
-        ));
-    }
-    Ok(())
+    Ok(active as usize)
+}
+
+fn worktree_runs_limit() -> Status {
+    refused(
+        tonic::Code::ResourceExhausted,
+        "WORKTREE_RUNS_LIMIT",
+        format!("at most {WORKTREE_RUNS} worktree runs, uploads included, may be active at once"),
+    )
 }
 
 /// ADR 0097: a worktree run's bundle holds at most 64 MiB.
@@ -786,6 +790,15 @@ impl RunService for Runs {
             (Some(writer), Some(declared)) => (writer, declared),
             _ => return Err(Status::unavailable("starting")),
         };
+        // An upload holds a place among the caller's active runs until it ends (0122).
+        let _upload_slot = {
+            let mut writer = writer.lock().await;
+            let active = active_worktree_runs(&mut *writer, user).await?;
+            self.0
+                .uploads
+                .take(user, WORKTREE_RUNS.saturating_sub(active))
+                .ok_or_else(worktree_runs_limit)?
+        };
         let io = |err: std::io::Error| Status::internal(format!("bundle: {err}"));
         // tmp/ is emptied at startup (0032): an interrupted upload leaves nothing.
         let path = self.0.state_dir.join(format!(
@@ -841,8 +854,11 @@ impl RunService for Runs {
         let mut tx = sqlx::Connection::begin(&mut *writer)
             .await
             .map_err(internal)?;
-        // Again under the write lock: concurrent uploads cannot pass the limit together.
-        active_worktree_runs(&mut *tx, user).await?;
+        // Again under the write lock; this upload's own place is among those held.
+        if active_worktree_runs(&mut *tx, user).await? + self.0.uploads.held(&user) > WORKTREE_RUNS
+        {
+            return Err(worktree_runs_limit());
+        }
         let public_id = crate::db::runs::create_run(
             &mut tx,
             &crate::db::runs::NewRun {

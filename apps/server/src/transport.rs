@@ -48,6 +48,8 @@ pub struct Health {
     webauthn_requests: Arc<Semaphore>,
     /// `WatchRun` streams per principal (0120).
     watchers: Arc<slots::Slots<i64>>,
+    /// Worktree bundle uploads in progress per user (0122).
+    uploads: Arc<slots::Slots<i64>>,
     gate_serving: Arc<local::Serving>,
     git_side: Arc<git_side::Link>,
     ssh_probe: Option<SocketAddr>,
@@ -72,6 +74,7 @@ impl Health {
             public_reads: Arc::new(Semaphore::new(PUBLIC_READS)),
             webauthn_requests: Arc::new(Semaphore::new(webauthn::MAX_REQUESTS)),
             watchers: slots::Slots::new(runs::MAX_WATCHERS),
+            uploads: slots::Slots::new(usize::MAX),
             gate_serving: Arc::default(),
             git_side: Arc::default(),
             ssh_probe,

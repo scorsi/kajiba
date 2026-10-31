@@ -143,6 +143,41 @@ pub async fn purge_worktree_runs(
     Ok(runs.len() as u64)
 }
 
+/// Delete the bundle of every terminal worktree run (0122): runs and logs stay until
+/// retention. A bundle whose run row is absent is left alone: it may belong to a run
+/// whose creation has not committed yet. Returns how many bundles were deleted.
+pub async fn drop_finished_bundles(
+    connection: &mut SqliteConnection,
+    bundles: &Path,
+) -> Result<u64, String> {
+    let entries =
+        std::fs::read_dir(bundles).map_err(|err| format!("{}: {err}", bundles.display()))?;
+    let mut dropped = 0;
+    for entry in entries {
+        let path = entry.map_err(|err| err.to_string())?.path();
+        let Some(run) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".bundle"))
+        else {
+            continue;
+        };
+        let state: Option<String> = sqlx::query_scalar("SELECT state FROM run WHERE public_id = ?")
+            .bind(run)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(|err| err.to_string())?;
+        if state
+            .and_then(|state| RunState::parse(&state))
+            .is_some_and(RunState::is_terminal)
+        {
+            remove(&path)?;
+            dropped += 1;
+        }
+    }
+    Ok(dropped)
+}
+
 /// At startup: fail with reason `bundle-missing` every unfinished worktree run whose
 /// bundle is gone, as after a restore from a dump, which skips `ci/bundles/` (0097).
 /// Returns the failed runs' public ids.
@@ -284,6 +319,7 @@ impl Pass {
         )
         .await?;
         let logs = purge_logs(writer, &self.logs, self.log_retention, now).await?;
+        drop_finished_bundles(writer, &self.bundles).await?;
         Ok((logs, runs))
     }
 }

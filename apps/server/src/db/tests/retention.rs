@@ -1,5 +1,7 @@
 use super::*;
-use crate::db::retention::{fail_missing_bundles, next_run, purge_logs, purge_worktree_runs};
+use crate::db::retention::{
+    drop_finished_bundles, fail_missing_bundles, next_run, purge_logs, purge_worktree_runs,
+};
 use std::path::Path;
 
 const DAY: i64 = 86_400_000;
@@ -248,4 +250,43 @@ async fn an_unfinished_worktree_run_without_its_bundle_fails_at_startup() {
     .await
     .unwrap();
     assert_eq!(run3, ("failed".into(), "cancelled".into()));
+}
+
+#[tokio::test]
+async fn a_finished_worktree_runs_bundle_goes_at_once_its_run_and_logs_stay() {
+    let dir = TempDir::new();
+    let (logs, bundles) = (dir.0.join("logs"), dir.0.join("bundles"));
+    let (mut writer, _) = open(&dir.database()).await.unwrap();
+    worktree_runs(&mut writer, &logs, &bundles).await;
+    // A bundle renamed before its run's row commits is not touched.
+    fs::write(bundles.join("00000000000000000000000009.bundle"), "b").unwrap();
+    assert_eq!(
+        drop_finished_bundles(&mut writer, &bundles).await.unwrap(),
+        1
+    );
+    let mut left: Vec<_> = fs::read_dir(&bundles)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            "00000000000000000000000002.bundle",
+            "00000000000000000000000003.bundle",
+            "00000000000000000000000009.bundle"
+        ]
+    );
+    assert_eq!(run_ids(&mut writer).await, [1, 2, 3, 4]);
+    // The running run fails: its bundle goes on the next pass, its log stays.
+    sqlx::query("UPDATE run SET state = 'failed' WHERE id = 2")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    assert_eq!(
+        drop_finished_bundles(&mut writer, &bundles).await.unwrap(),
+        1
+    );
+    assert!(!bundles.join("00000000000000000000000002.bundle").exists());
+    assert!(logs.join("00000000000000000000000004.log").exists());
 }

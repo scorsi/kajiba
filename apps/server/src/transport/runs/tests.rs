@@ -437,39 +437,37 @@ async fn worktree_admission_refuses_in_order() {
     });
     assert_eq!(base(&runs, BOB, accepted.clone()).await.unwrap().len(), 1);
 
-    // Four active worktree runs of bob's are the limit; terminal ones and others' don't count.
+    // Sixteen active worktree runs of bob's, uploads included, are the limit; terminal
+    // ones and others' don't count.
     let tip = head(&fixture.bare("alice/ci").await);
-    {
-        let mut writer = fixture.writer.lock().await;
-        for (index, (user, trigger, state)) in [
-            (BOB, "worktree", "queued"),
-            (BOB, "worktree", "running"),
-            (BOB, "worktree", "running"),
-            (BOB, "worktree", "succeeded"),
-            (BOB, "manual", "queued"),
-            (ALICE, "worktree", "queued"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            sqlx::query("INSERT INTO run (public_id, repo_id, sha, trigger, triggered_by, state, created_at) VALUES (?, 1, ?, ?, ?, ?, 0)")
-                .bind(format!("{:026}", index + 1))
-                .bind(&tip)
-                .bind(trigger)
-                .bind(user)
-                .bind(state)
-                .execute(&mut *writer)
-                .await
-                .unwrap();
-        }
+    let insert = async |index: usize, user: i64, trigger: &str, state: &str| {
+        sqlx::query("INSERT INTO run (public_id, repo_id, sha, trigger, triggered_by, state, created_at) VALUES (?, 1, ?, ?, ?, ?, 0)")
+            .bind(format!("{index:026}"))
+            .bind(&tip)
+            .bind(trigger)
+            .bind(user)
+            .bind(state)
+            .execute(&mut *fixture.writer.lock().await)
+            .await
+            .unwrap();
+    };
+    insert(1, BOB, "worktree", "succeeded").await;
+    insert(2, BOB, "manual", "queued").await;
+    insert(3, ALICE, "worktree", "queued").await;
+    for index in 0..WORKTREE_RUNS - 1 {
+        let state = if index % 2 == 0 { "queued" } else { "running" };
+        insert(10 + index, BOB, "worktree", state).await;
     }
     assert!(base(&runs, BOB, accepted.clone()).await.is_ok());
-    sqlx::query("INSERT INTO run (public_id, repo_id, sha, trigger, triggered_by, state, created_at) VALUES ('00000000000000000000000010', 1, ?, 'worktree', ?, 'queued', 0)")
-        .bind(&tip)
-        .bind(BOB)
-        .execute(&mut *fixture.writer.lock().await)
-        .await
-        .unwrap();
+    let uploading = runs.0.uploads.take(BOB, 1).unwrap();
+    let status = base(&runs, BOB, accepted.clone()).await.unwrap_err();
+    assert_eq!(
+        refusal(status),
+        (Code::ResourceExhausted, "WORKTREE_RUNS_LIMIT".into())
+    );
+    drop(uploading);
+    assert!(base(&runs, BOB, accepted.clone()).await.is_ok());
+    insert(99, BOB, "worktree", "queued").await;
     let status = base(&runs, BOB, accepted.clone()).await.unwrap_err();
     assert_eq!(
         refusal(status),
