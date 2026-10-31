@@ -32,6 +32,19 @@ fn leaf(name: &str) -> CertificateDer<'static> {
     CertificateDer::from_pem_file(fixture(&format!("{name}.pem"))).unwrap()
 }
 
+fn pump(from: &mut Connection, to: &mut Connection) -> Result<bool, rustls::Error> {
+    let mut bytes = Vec::new();
+    while from.wants_write() {
+        from.write_tls(&mut bytes).unwrap();
+    }
+    let mut rest = &bytes[..];
+    while !rest.is_empty() {
+        to.read_tls(&mut rest).unwrap();
+        to.process_new_packets()?;
+    }
+    Ok(!bytes.is_empty())
+}
+
 /// Runs a handshake in memory (no socket); the first error of either side ends it.
 fn handshake(
     client: ClientConfig,
@@ -40,18 +53,6 @@ fn handshake(
     let name = ServerName::try_from("runners.example.org").unwrap();
     let mut client = Connection::Client(ClientConnection::new(Arc::new(client), name)?);
     let mut server = Connection::Server(ServerConnection::new(Arc::new(server))?);
-    fn pump(from: &mut Connection, to: &mut Connection) -> Result<bool, rustls::Error> {
-        let mut bytes = Vec::new();
-        while from.wants_write() {
-            from.write_tls(&mut bytes).unwrap();
-        }
-        let mut rest = &bytes[..];
-        while !rest.is_empty() {
-            to.read_tls(&mut rest).unwrap();
-            to.process_new_packets()?;
-        }
-        Ok(!bytes.is_empty())
-    }
     while client.is_handshaking() || server.is_handshaking() {
         let sent = pump(&mut client, &mut server)?;
         if !pump(&mut server, &mut client)? && !sent {
@@ -109,19 +110,28 @@ fn reconnects_verify_current_svids_and_bundles_without_resumption() {
             put("ca.pem", "forge-bundle.pem");
             let runner = Source::load(files(&dir, "runner", "runner-bundle.pem")).unwrap();
             let forge = Source::load(files(&dir, "forge", "forge-bundle.pem")).unwrap();
-            let mut client = runner.client_config(FORGE);
-            let mut server = forge.server_config();
-            if server_policy {
-                client.resumption = rustls::client::Resumption::default();
-            } else {
-                server.session_storage = rustls::server::ServerSessionMemoryCache::new(256);
-                server.send_tls13_tickets = 2;
-            }
+            let configs = || {
+                let mut client = runner.client_config(FORGE);
+                let mut server = forge.server_config();
+                if server_policy {
+                    client.resumption = rustls::client::Resumption::default();
+                } else {
+                    server.session_storage = rustls::server::ServerSessionMemoryCache::new(256);
+                    server.send_tls13_tickets = 2;
+                }
+                (client, server)
+            };
+            let (client, server) = configs();
             handshake(client.clone(), server.clone()).unwrap();
+            assert_eq!(
+                handshake(client, server).unwrap().handshake_kind(),
+                Some(rustls::HandshakeKind::Full)
+            );
 
             put("renewed.pem", "runner.pem");
             put("renewed.key", "runner.key");
-            let reconnected = handshake(client.clone(), server.clone()).unwrap();
+            let (client, server) = configs();
+            let reconnected = handshake(client, server).unwrap();
             assert_eq!(
                 reconnected.handshake_kind(),
                 Some(rustls::HandshakeKind::Full)
@@ -136,9 +146,57 @@ fn reconnects_verify_current_svids_and_bundles_without_resumption() {
                     "runner-bundle.pem"
                 },
             );
+            let (client, server) = configs();
             assert!(handshake(client, server).is_err());
             std::fs::remove_dir_all(&dir).unwrap();
         }
+    }
+}
+
+#[test]
+fn rotation_between_handshake_phases_keeps_one_material_snapshot() {
+    for rotate_server in [true, false] {
+        let dir = std::env::temp_dir().join(format!("kj-svid-{}", crate::new_id().unwrap()));
+        std::fs::create_dir(&dir).unwrap();
+        let put = |from: &str, to: &str| {
+            let staged = dir.join("staged");
+            std::fs::copy(fixture(from), &staged).unwrap();
+            std::fs::rename(&staged, dir.join(to)).unwrap();
+        };
+        let own = if rotate_server { "forge" } else { "runner" };
+        put(&format!("{own}.pem"), "svid.pem");
+        put(&format!("{own}.key"), "svid.key");
+        let mut bundle = std::fs::read(fixture("ca.pem")).unwrap();
+        bundle.extend(std::fs::read(fixture("other-ca.pem")).unwrap());
+        std::fs::write(dir.join("bundle.pem"), bundle).unwrap();
+        let rotating = Source::load(files(&dir, "svid", "bundle.pem")).unwrap();
+        let (runner, forge) = if rotate_server {
+            (source("runner"), rotating.clone())
+        } else {
+            (rotating.clone(), source("forge"))
+        };
+        let name = ServerName::try_from("runners.example.org").unwrap();
+        let mut client = Connection::Client(
+            ClientConnection::new(Arc::new(runner.client_config(FORGE)), name).unwrap(),
+        );
+        let mut server =
+            Connection::Server(ServerConnection::new(Arc::new(forge.server_config())).unwrap());
+        // The server has resolved its SVID; neither side has verified its peer yet.
+        pump(&mut client, &mut server).unwrap();
+        put("foreign.pem", "svid.pem");
+        put("foreign.key", "svid.key");
+        put("other-ca.pem", "bundle.pem");
+        // Another connection can reload the source while this handshake is in flight.
+        assert_eq!(rotating.refresh().key.cert[0], leaf("foreign"));
+        while client.is_handshaking() || server.is_handshaking() {
+            let sent = pump(&mut server, &mut client).unwrap();
+            assert!(pump(&mut client, &mut server).unwrap() || sent);
+        }
+        assert_eq!(client.peer_certificates().unwrap()[0], leaf("forge"));
+        assert_eq!(server.peer_certificates().unwrap()[0], leaf("runner"));
+        // The next handshake uses the new bundle, which no longer trusts the old peer.
+        assert!(handshake(runner.client_config(FORGE), forge.server_config()).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 
@@ -184,7 +242,7 @@ fn handshakes_refuse_the_wrong_peer() {
 
 #[test]
 fn runner_certificates_are_verified_against_the_bundle_and_the_spiffe_rules() {
-    let verifier = Verifier(source("forge"), None);
+    let verifier = Verifier::new(source("forge"), None);
     let verify = |name: &str, now: UnixTime| verifier.verify_client_cert(&leaf(name), &[], now);
     assert!(verify("runner", UnixTime::now()).is_ok());
     for bad in ["foreign", "ca-leaf", "two-uris", "other-domain"] {
@@ -196,7 +254,7 @@ fn runner_certificates_are_verified_against_the_bundle_and_the_spiffe_rules() {
 
 #[test]
 fn the_forge_certificate_must_carry_server_auth_and_the_expected_id() {
-    let verifier = Verifier(source("runner"), Some(FORGE.into()));
+    let verifier = Verifier::new(source("runner"), Some(FORGE.into()));
     let name = ServerName::try_from("runners.example.org").unwrap();
     let verify = |leaf_name: &str| {
         verifier.verify_server_cert(&leaf(leaf_name), &[], &name, &[], UnixTime::now())
@@ -217,7 +275,7 @@ fn the_forge_certificate_must_carry_server_auth_and_the_expected_id() {
 fn runner_without_extended_key_usage_is_refused() {
     let forge = Source::load(files(&fixture(""), "forge", "no-eku-ca.pem")).unwrap();
     assert!(
-        Verifier(forge, None)
+        Verifier::new(forge, None)
             .verify_client_cert(&leaf("no-eku-runner"), &[], UnixTime::now())
             .is_err()
     );
@@ -228,7 +286,7 @@ fn forge_without_extended_key_usage_is_refused() {
     let runner = Source::load(files(&fixture(""), "runner", "no-eku-ca.pem")).unwrap();
     let name = ServerName::try_from("runners.example.org").unwrap();
     assert!(
-        Verifier(runner, Some(FORGE.into()))
+        Verifier::new(runner, Some(FORGE.into()))
             .verify_server_cert(&leaf("no-eku-forge"), &[], &name, &[], UnixTime::now())
             .is_err()
     );
@@ -281,7 +339,7 @@ fn renewed_files_are_picked_up_and_a_broken_pair_keeps_the_previous_one() {
     // The new bundle verifies new handshakes: the forge's SVID no longer does.
     let name = ServerName::try_from("runners.example.org").unwrap();
     assert!(
-        Verifier(source.clone(), Some(FORGE.into()))
+        Verifier::new(source.clone(), Some(FORGE.into()))
             .verify_server_cert(&leaf("forge"), &[], &name, &[], UnixTime::now())
             .is_err()
     );

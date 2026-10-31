@@ -1,6 +1,6 @@
 //! X.509-SVIDs of the runner channel (0124): loads the SVID, key and bundle files, reloads them
-//! when they change (0125) and verifies SPIFFE peers on both sides, as rustls resolvers and
-//! verifiers backed by one loader.
+//! when they change (0125) and verifies SPIFFE peers on both sides, using one immutable
+//! material snapshot per handshake.
 
 use std::fmt;
 use std::os::unix::fs::MetadataExt;
@@ -130,6 +130,7 @@ pub fn peer(leaf: &CertificateDer<'_>, trust_domain: &str) -> Result<Peer, Error
 }
 
 /// Material in use: the own SVID and key, the bundle, and a client verifier built from it.
+#[derive(Debug)]
 struct Material {
     key: Arc<CertifiedKey>,
     roots: Arc<RootCertStore>,
@@ -221,12 +222,15 @@ impl Source {
 
     /// TLS 1.3, ALPN `h2`, the current SVID served, a client SVID required and verified
     /// against the current bundle (`clientAuth`); the caller maps the peer's ID to a runner.
+    /// Build a fresh configuration before each handshake to reload the files (0125).
     pub fn server_config(self: &Arc<Self>) -> ServerConfig {
+        let verifier = Verifier::new(self.clone(), None);
+        let resolver = Resolver(verifier.material.key.clone());
         let mut config = ServerConfig::builder_with_provider(self.provider.clone())
             .with_protocol_versions(&[&rustls::version::TLS13])
             .expect("ring supports TLS 1.3")
-            .with_client_cert_verifier(Arc::new(Verifier(self.clone(), None)))
-            .with_cert_resolver(Arc::new(Resolver(self.clone())));
+            .with_client_cert_verifier(Arc::new(verifier))
+            .with_cert_resolver(Arc::new(resolver));
         config.alpn_protocols = vec![b"h2".to_vec()];
         // Every connection must verify the current SVIDs and bundle (0124, 0125).
         config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
@@ -236,16 +240,16 @@ impl Source {
 
     /// TLS 1.3, ALPN `h2`, the current SVID presented, the server verified against the current
     /// bundle (`serverAuth`) and its ID required to equal `server_id`; no DNS name is checked.
+    /// Build a fresh configuration before each handshake to reload the files (0125).
     pub fn client_config(self: &Arc<Self>, server_id: &str) -> ClientConfig {
+        let verifier = Verifier::new(self.clone(), Some(server_id.to_owned()));
+        let resolver = Resolver(verifier.material.key.clone());
         let mut config = ClientConfig::builder_with_provider(self.provider.clone())
             .with_protocol_versions(&[&rustls::version::TLS13])
             .expect("ring supports TLS 1.3")
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(Verifier(
-                self.clone(),
-                Some(server_id.to_owned()),
-            )))
-            .with_client_cert_resolver(Arc::new(Resolver(self.clone())));
+            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_client_cert_resolver(Arc::new(resolver));
         config.alpn_protocols = vec![b"h2".to_vec()];
         config.resumption = rustls::client::Resumption::disabled();
         config
@@ -317,17 +321,17 @@ fn refused(e: Error) -> rustls::Error {
 
 /// Serves and presents the current SVID.
 #[derive(Debug)]
-struct Resolver(Arc<Source>);
+struct Resolver(Arc<CertifiedKey>);
 
 impl ResolvesServerCert for Resolver {
     fn resolve(&self, _: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        Some(self.0.refresh().key.clone())
+        Some(self.0.clone())
     }
 }
 
 impl ResolvesClientCert for Resolver {
     fn resolve(&self, _: &[&[u8]], _: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
-        Some(self.0.refresh().key.clone())
+        Some(self.0.clone())
     }
 
     fn has_certs(&self) -> bool {
@@ -337,9 +341,21 @@ impl ResolvesClientCert for Resolver {
 
 /// Verifies a runner (server side, no expected ID) or the forge (client side, its expected ID).
 #[derive(Debug)]
-struct Verifier(Arc<Source>, Option<String>);
+struct Verifier {
+    source: Arc<Source>,
+    material: Arc<Material>,
+    server_id: Option<String>,
+}
 
 impl Verifier {
+    fn new(source: Arc<Source>, server_id: Option<String>) -> Self {
+        Self {
+            material: source.refresh(),
+            source,
+            server_id,
+        }
+    }
+
     fn peer(&self, leaf: &CertificateDer<'_>) -> Result<Peer, Error> {
         let (_, cert) = x509_parser::parse_x509_certificate(leaf)
             .map_err(|e| err(format!("certificate does not parse: {e}")))?;
@@ -347,7 +363,7 @@ impl Verifier {
             .extended_key_usage()
             .map_err(|e| err(format!("extendedKeyUsage: {e}")))?
             .ok_or_else(|| err("certificate has no extendedKeyUsage"))?;
-        let allowed = if self.1.is_some() {
+        let allowed = if self.server_id.is_some() {
             eku.value.server_auth
         } else {
             eku.value.client_auth
@@ -355,7 +371,7 @@ impl Verifier {
         if !allowed {
             return Err(err("certificate lacks the peer role's extendedKeyUsage"));
         }
-        peer(leaf, self.0.trust_domain())
+        peer(leaf, self.source.trust_domain())
     }
 
     fn signature(
@@ -368,7 +384,7 @@ impl Verifier {
             message,
             cert,
             dss,
-            &self.0.provider.signature_verification_algorithms,
+            &self.source.provider.signature_verification_algorithms,
         )
     }
 }
@@ -384,7 +400,7 @@ impl ClientCertVerifier for Verifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        let material = self.0.refresh();
+        let material = &self.material;
         let verified = material
             .clients
             .verify_client_cert(end_entity, intermediates, now)?;
@@ -413,7 +429,7 @@ impl ClientCertVerifier for Verifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.0
+        self.source
             .provider
             .signature_verification_algorithms
             .supported_schemes()
@@ -429,16 +445,16 @@ impl ServerCertVerifier for Verifier {
         _: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        let material = self.0.refresh();
+        let material = &self.material;
         verify_server_cert_signed_by_trust_anchor(
             &ParsedCertificate::try_from(end_entity)?,
             &material.roots,
             intermediates,
             now,
-            self.0.provider.signature_verification_algorithms.all,
+            self.source.provider.signature_verification_algorithms.all,
         )?;
         let id = self.peer(end_entity).map_err(refused)?.id;
-        let expected = self.1.as_deref().unwrap_or_default();
+        let expected = self.server_id.as_deref().unwrap_or_default();
         if id != expected {
             return Err(refused(err(format!("server is {id}, want {expected}"))));
         }
@@ -466,7 +482,7 @@ impl ServerCertVerifier for Verifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.0
+        self.source
             .provider
             .signature_verification_algorithms
             .supported_schemes()

@@ -26,15 +26,12 @@ pub fn endpoint(url: &str, tls: &RunnerTlsConfig) -> Result<(Endpoint, Tls), Str
         bundle_file: tls.bundle_file.clone(),
     })
     .map_err(|err| format!("tls: {err}"))?;
-    Ok((
-        endpoint,
-        Tls(Arc::new(source.client_config(&tls.server_id))),
-    ))
+    Ok((endpoint, Tls(source, tls.server_id.clone())))
 }
 
 /// TCP to the URI's host and port (443 when absent), then TLS with SNI that host.
 #[derive(Clone)]
-pub struct Tls(Arc<tokio_rustls::rustls::ClientConfig>);
+pub struct Tls(Arc<svid::Source>, String);
 
 impl tonic::codegen::Service<Uri> for Tls {
     type Response = TokioIo<TlsStream<TcpStream>>;
@@ -49,7 +46,7 @@ impl tonic::codegen::Service<Uri> for Tls {
     }
 
     fn call(&mut self, uri: Uri) -> Self::Future {
-        let config = self.0.clone();
+        let (source, server_id) = (self.0.clone(), self.1.clone());
         let host = uri
             .host()
             .unwrap_or_default()
@@ -61,6 +58,7 @@ impl tonic::codegen::Service<Uri> for Tls {
             let name = ServerName::try_from(host.clone())
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
             let tcp = TcpStream::connect((host.as_str(), port)).await?;
+            let config = Arc::new(source.client_config(&server_id));
             let tls = TlsConnector::from(config).connect(name, tcp).await?;
             Ok(TokioIo::new(tls))
         })

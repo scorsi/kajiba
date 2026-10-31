@@ -441,7 +441,6 @@ async fn serve_runners(
     app: Router,
     stopped: watch::Receiver<bool>,
 ) -> io::Result<()> {
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(source.server_config()));
     let mut builder = Builder::new(TokioExecutor::new()).http2_only();
     builder
         .http2()
@@ -453,8 +452,9 @@ async fn serve_runners(
         builder,
         stopped,
         move |stream| {
-            let (acceptor, app, source) = (acceptor.clone(), app.clone(), source.clone());
+            let (app, source) = (app.clone(), source.clone());
             async move {
+                let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(source.server_config()));
                 let tls = tokio::time::timeout(RUNNER_HANDSHAKE, acceptor.accept(stream))
                     .await
                     .ok()?
