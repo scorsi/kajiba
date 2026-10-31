@@ -513,7 +513,7 @@ impl Runs {
     /// stream ends or the watcher is gone (`Ok`), or on an error to send.
     async fn watch(
         &self,
-        run_id: i64,
+        run: &str,
         mut position: u64,
         follow: bool,
         mut progress: watch::Receiver<()>,
@@ -530,14 +530,15 @@ impl Runs {
             // Marked seen before the snapshot: a commit after it wakes the next wait.
             progress.borrow_and_update();
             let mut connection = self.readers()?.begin().await.map_err(internal)?;
-            let row: Row = sqlx::query_as(&format!("{SELECT} WHERE run.id = ?"))
-                .bind(run_id)
-                .fetch_one(&mut *connection)
+            let row: Row = sqlx::query_as(&format!("{SELECT} WHERE run.public_id = ?"))
+                .bind(run)
+                .fetch_optional(&mut *connection)
                 .await
-                .map_err(internal)?;
+                .map_err(internal)?
+                .ok_or_else(run_not_found)?;
             let job: Option<i64> =
                 sqlx::query_scalar("SELECT id FROM job WHERE run_id = ? ORDER BY id LIMIT 1")
-                    .bind(run_id)
+                    .bind(row.0)
                     .fetch_optional(&mut *connection)
                     .await
                     .map_err(internal)?;
@@ -626,7 +627,7 @@ impl RunService for Runs {
         let user = caller(&request)?;
         let request = request.into_inner();
         let mut connection = self.readers()?.begin().await.map_err(internal)?;
-        let run = readable_run(&mut connection, user, &request.run).await?.0;
+        let run = readable_run(&mut connection, user, &request.run).await?.1;
         drop(connection);
         // Subscribed before the first snapshot: nothing stored after it is missed.
         let progress = self.0.ci_progress.subscribe();
@@ -634,7 +635,7 @@ impl RunService for Runs {
         let runs = self.clone();
         tokio::spawn(async move {
             if let Err(status) = runs
-                .watch(run, request.offset, request.follow, progress, &watcher)
+                .watch(&run, request.offset, request.follow, progress, &watcher)
                 .await
             {
                 let _ = watcher.send(Err(status)).await;

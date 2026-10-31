@@ -896,6 +896,50 @@ async fn followers_get_stored_then_live_bytes_then_the_terminal_run() {
 }
 
 #[tokio::test]
+async fn a_watcher_cannot_follow_a_reused_run_id_into_another_repository() {
+    use tokio_stream::StreamExt;
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, ALICE, "alice/ci", &tip)
+        .await
+        .unwrap()
+        .public_id;
+    let progress = Progress::new(&fixture, &runs, &run).await;
+    let attempt = progress.attempt(1).await;
+    progress.log(&attempt, "public\n").await;
+    let mut events = watch(&runs, ALICE, &run, 0, true).await.unwrap();
+    assert_eq!(read(&mut events, 0, 7).await.1, "public\n");
+
+    let id: i64 = sqlx::query_scalar("DELETE FROM run WHERE public_id = ? RETURNING id")
+        .bind(&run)
+        .fetch_one(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    let tip = head(&fixture.bare("bob/zeta").await);
+    let replacement = trigger(&runs, BOB, "bob/zeta", &tip)
+        .await
+        .unwrap()
+        .public_id;
+    let reused: i64 = sqlx::query_scalar("SELECT id FROM run WHERE public_id = ?")
+        .bind(&replacement)
+        .fetch_one(runs.readers().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(reused, id, "SQLite reuses the deleted integer key");
+    let progress = Progress::new(&fixture, &runs, &replacement).await;
+    let attempt = progress.attempt(2).await;
+    progress.log(&attempt, "replacement build output\n").await;
+
+    let status = tokio::time::timeout(Duration::from_secs(5), events.next())
+        .await
+        .expect("the deleted run ends the watch")
+        .unwrap()
+        .expect_err("no event from the replacement run");
+    assert_eq!(refusal(status), (Code::NotFound, "RUN_NOT_FOUND".into()));
+    assert!(next(&mut events).await.is_none());
+}
+
+#[tokio::test]
 async fn a_one_shot_read_of_a_running_run_ends_after_the_stored_bytes() {
     let (fixture, runs) = fixture("").await;
     let tip = head(&fixture.bare("alice/ci").await);
