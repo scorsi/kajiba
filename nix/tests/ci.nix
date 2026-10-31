@@ -428,7 +428,8 @@ pkgs.testers.runNixOSTest {
         out = forge.succeed("cat /tmp/r4.out")
         assert "long-start" in out and "long-end" in out, out
         new = watch_requests()[before:]
-        assert len(new) == 1 and new[0].get("grpc_code") == "OK" and new[0]["dur_us"] > 30000000, new
+        # The CLI hangs up once it has the finished run, before the trailers: CANCELLED, never DEADLINE_EXCEEDED.
+        assert len(new) == 1 and new[0].get("grpc_code") in ("OK", "CANCELLED") and new[0]["dur_us"] > 30000000, new
 
     with subtest("a server restart during a job: the runner reconnects, nothing lost or doubled"):
         c5 = commit(LONG, "fifth")
