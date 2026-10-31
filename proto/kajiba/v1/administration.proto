@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package kajiba.v1;
+
+import "google/protobuf/timestamp.proto";
+import "kajiba/v1/options.proto";
+
+// What forge administrators see of the forge's machinery (0139, 0144): runners, mirrors
+// and the server itself. Every method needs the `admin` scope and a user who is a forge
+// administrator (as `GetViewerResponse.admin`); PERMISSION_DENIED otherwise. Not
+// `kajiba.admin.v1.AdminService`, the host-local one (0022).
+service AdministrationService {
+  // The declared runners, ordered by name; a runner removed from the configuration is
+  // listed as disabled while its row stays.
+  rpc ListRunners(ListRunnersRequest) returns (ListRunnersResponse) {
+    option (kajiba.v1.scope) = SCOPE_ADMIN;
+  }
+  // Every declared mirror, ordered by repository then remote URL.
+  rpc ListMirrors(ListMirrorsRequest) returns (ListMirrorsResponse) {
+    option (kajiba.v1.scope) = SCOPE_ADMIN;
+  }
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse) {
+    option (kajiba.v1.scope) = SCOPE_ADMIN;
+  }
+}
+
+message ListRunnersRequest {}
+
+message ListRunnersResponse {
+  repeated Runner runners = 1;
+}
+
+message ListMirrorsRequest {}
+
+message ListMirrorsResponse {
+  repeated MirrorStatus mirrors = 1;
+}
+
+message GetServerInfoRequest {}
+
+message GetServerInfoResponse {
+  ServerInfo server = 1;
+}
+
+message Runner {
+  // The declared name.
+  string name = 1;
+  string arch = 2;
+  string os = 3;
+  // Execution backends, as declared.
+  repeated string backends = 4;
+  repeated string tags = 5;
+  uint32 max_jobs = 6;
+  bool connected = 7;
+  // Removed from the configuration.
+  bool disabled = 8;
+  // As announced at the last connection; empty before the first.
+  string version = 9;
+  // As reported at the last connection; informational only (0107).
+  string hostname = 10;
+  google.protobuf.Timestamp last_contact_at = 11;
+  // The attempts running now, oldest first; none while idle.
+  repeated RunnerAttempt current = 12;
+}
+
+message RunnerAttempt {
+  // Public id of the run.
+  string run_id = 1;
+  // `<owner>/<name>` of the run's repository.
+  string repo = 2;
+  // Full ref of the run; empty for a worktree run.
+  string ref = 3;
+  google.protobuf.Timestamp started_at = 4;
+}
+
+message MirrorStatus {
+  // `<owner>/<name>`.
+  string repo = 1;
+  string remote_url = 2;
+  // The declared credential's name, never its secret.
+  string credential = 3;
+  bool enabled = 4;
+  MirrorStatusState state = 5;
+  // Consecutive failed attempts.
+  int64 attempts = 6;
+  // Unset until a push succeeded: "never pushed".
+  google.protobuf.Timestamp last_success_at = 7;
+  string last_error = 8;
+  google.protobuf.Timestamp last_error_at = 9;
+  google.protobuf.Timestamp next_attempt_at = 10;
+}
+
+enum MirrorStatusState {
+  MIRROR_STATUS_STATE_UNSPECIFIED = 0;
+  MIRROR_STATUS_STATE_IDLE = 1;
+  MIRROR_STATUS_STATE_QUEUED = 2;
+  MIRROR_STATUS_STATE_RUNNING = 3;
+}
+
+message ServerInfo {
+  string version = 1;
+  google.protobuf.Timestamp started_at = 2;
+  repeated ServerUser users = 3;
+  // Tokens declared in the configuration, revoked ones excluded.
+  int64 declared_tokens = 4;
+  // Size of the SQLite file.
+  int64 database_bytes = 5;
+  // Size of the repositories' directory.
+  int64 storage_bytes = 6;
+  // 1 at startup, plus one per applied reload (0141).
+  uint64 config_generation = 7;
+}
+
+message ServerUser {
+  string name = 1;
+  bool admin = 2;
+  bool disabled = 3;
+}

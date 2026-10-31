@@ -19,7 +19,7 @@
 					: [];
 			}),
 			mirrors: forge.mirrors.filter((m) => m.state === MirrorState.FAILING),
-			runners: forge.runners.filter((r) => r.state === RunnerState.OFFLINE)
+			runners: forge.runners.filter((r) => r.state === RunnerState.OFFLINE && !r.disabled)
 		};
 	}
 </script>

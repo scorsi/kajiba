@@ -58,7 +58,7 @@ type Row = (
 const SELECT: &str = "SELECT id, public_id, name, scopes, source, created_at, expires_at,
     last_used_at, revoked_at FROM api_token";
 
-fn timestamp(millis: i64) -> Timestamp {
+pub(super) fn timestamp(millis: i64) -> Timestamp {
     Timestamp {
         seconds: millis.div_euclid(1000),
         nanos: (millis.rem_euclid(1000) * 1_000_000) as i32,

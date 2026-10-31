@@ -2,8 +2,8 @@
 import { execFileSync } from "node:child_process";
 import { expect, type Page } from "@playwright/test";
 
-/** A new link for alice, as printed by `kajiba-server admin enroll` (0028). */
-export function enrollLink(): string {
+/** A new link for `user`, as printed by `kajiba-server admin enroll` (0028). */
+export function enrollLink(user = "alice"): string {
   const socket = process.env.KAJIBA_E2E_ADMIN_SOCKET;
   if (!socket)
     throw new Error(
@@ -11,7 +11,7 @@ export function enrollLink(): string {
     );
   const out = execFileSync(
     "kajiba-server",
-    ["admin", "--socket", socket, "enroll", "alice"],
+    ["admin", "--socket", socket, "enroll", user],
     {
       encoding: "utf8",
     },
@@ -44,12 +44,12 @@ export async function authenticator(page: Page) {
   return { cdp, authenticatorId };
 }
 
-export async function enroll(page: Page, link: string) {
+export async function enroll(page: Page, link: string, user = "alice") {
   // From another document: a link differing only by its fragment would not reload the page.
   await page.goto("about:blank");
   await page.goto(link);
   await expect(
-    page.getByRole("heading", { name: "Welcome, alice" }),
+    page.getByRole("heading", { name: `Welcome, ${user}` }),
   ).toBeVisible();
   await expect(page).toHaveURL(/\/-\/enroll$/);
   await page.getByLabel("Passkey name").fill("virtual");

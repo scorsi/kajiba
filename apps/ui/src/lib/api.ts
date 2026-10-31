@@ -15,6 +15,7 @@
 
 import { createClient } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
+import { AdministrationService } from "./gen/kajiba/v1/administration_pb.ts";
 import { AuthService, SshKeyUsage } from "./gen/kajiba/v1/auth_pb.ts";
 import { PasskeyService } from "./gen/kajiba/v1/passkey_pb.ts";
 import { Scope } from "./gen/kajiba/v1/options_pb.ts";
@@ -34,14 +35,7 @@ import {
   TokenSource,
   type Token as TokenMessage,
 } from "./gen/kajiba/v1/token_pb.ts";
-import {
-  MOCK_MIRROR_STATUS,
-  MOCK_TOKENS,
-  MOCK_REPOS,
-  MOCK_SERVER,
-  MOCK_RUNNERS,
-  MOCK_DISK_BYTES,
-} from "./mock";
+import { MOCK_TOKENS } from "./mock";
 import { RunLog } from "./runlog.ts";
 
 // ── Types (shape of protobuf-es generated messages) ─────────────────────
@@ -375,44 +369,58 @@ export enum RunnerState {
 export interface Runner {
   /** Declared runner name (infra config). */
   name: string;
+  /** Hostname the runner reported at its last connection; empty before the first. */
   host: string;
-  /** Execution backend: `nix`, `nspawn`, `microvm`. */
+  /** Execution backends, e.g. `nix · process`. */
   backend: string;
+  /** `<arch>-<os>` then the declared tags. */
   labels: string[];
   state: RunnerState;
+  /** Removed from the configuration; its row stays for its attempts. */
+  disabled: boolean;
+  version: string;
   lastSeenTime?: Timestamp;
+  /** The oldest attempt running now. */
   currentRun?: {
     id: string;
+    short: string;
     repo: RepoRef;
     ref: string;
     startTime?: Timestamp;
   };
 }
 
-/** ASSUMED `ListRunners` (runner service) — declared runners and their live state. */
+const administration = createClient(AdministrationService, transport);
+
+/** `AdministrationService.ListRunners` — administrators only (ADR 0139). */
 export async function listRunners() {
-  await mockGate();
-  const STATE = {
-    idle: RunnerState.IDLE,
-    busy: RunnerState.BUSY,
-    offline: RunnerState.OFFLINE,
+  const { runners } = await administration.listRunners({});
+  return {
+    runners: runners.map<Runner>((r) => {
+      const now = r.current[0];
+      return {
+        name: r.name,
+        host: r.hostname,
+        backend: r.backends.join(" · "),
+        labels: [`${r.arch}-${r.os}`, ...r.tags],
+        state: !r.connected
+          ? RunnerState.OFFLINE
+          : now
+            ? RunnerState.BUSY
+            : RunnerState.IDLE,
+        disabled: r.disabled,
+        version: r.version,
+        lastSeenTime: r.lastContactAt,
+        currentRun: now && {
+          id: now.runId,
+          short: shortRunId(now.runId),
+          repo: now.repo,
+          ref: now.ref,
+          startTime: now.startedAt,
+        },
+      };
+    }),
   };
-  const ts = (s: number): Timestamp => ({ seconds: BigInt(s), nanos: 0 });
-  const runners: Runner[] = MOCK_RUNNERS.map((r) => ({
-    name: r.name,
-    host: r.host,
-    backend: r.backend,
-    labels: [...r.labels],
-    state: STATE[r.state],
-    lastSeenTime: ts(r.lastSeen),
-    currentRun: r.currentRun && {
-      id: r.currentRun.id,
-      repo: r.currentRun.repo,
-      ref: r.currentRun.ref,
-      startTime: ts(r.currentRun.startedAt),
-    },
-  }));
-  return { runners };
 }
 
 export enum MirrorState {
@@ -426,7 +434,9 @@ export interface MirrorStatus {
   repo: RepoRef;
   remoteUrl: string;
   state: MirrorState;
+  /** The last failure or success, whichever is later. */
   lastAttemptTime?: Timestamp;
+  /** Unset until a push succeeded: "never pushed". */
   lastSuccessTime?: Timestamp;
   lastError: string;
   /** Consecutive failed attempts (retries with backoff). */
@@ -434,61 +444,66 @@ export interface MirrorStatus {
   nextAttemptTime?: Timestamp;
 }
 
-/** ASSUMED `ListMirrorStatus` — push-mirror outcomes (ADR: retry with alerting). */
+const epoch = (t?: Timestamp) => Number(t?.seconds ?? 0n);
+
+/** `AdministrationService.ListMirrors` — administrators only (ADR 0139). */
 export async function listMirrorStatus() {
-  await mockGate();
-  const STATE = {
-    ok: MirrorState.OK,
-    failing: MirrorState.FAILING,
-    disabled: MirrorState.DISABLED,
-  };
-  const ts = (s?: number): Timestamp | undefined =>
-    s === undefined ? undefined : { seconds: BigInt(s), nanos: 0 };
-  const mirrors: MirrorStatus[] = MOCK_REPOS.flatMap((r) =>
-    r.mirrors.map((m) => {
-      const key = `${r.owner}/${r.name}`;
-      const st = MOCK_MIRROR_STATUS[`${key} ${m.remoteUrl}`] ?? {
-        state: "disabled" as const,
-      };
+  const { mirrors } = await administration.listMirrors({});
+  return {
+    mirrors: mirrors.map<MirrorStatus>((m) => {
+      const failing =
+        m.lastError !== "" && epoch(m.lastErrorAt) >= epoch(m.lastSuccessAt);
       return {
-        repo: key,
+        repo: m.repo,
         remoteUrl: m.remoteUrl,
-        state: STATE[st.state],
-        lastAttemptTime: ts(st.lastAttempt),
-        lastSuccessTime: ts(st.lastSuccess),
-        lastError: st.error ?? "",
-        attempts: st.attempts ?? 0,
-        nextAttemptTime: ts(st.nextAttempt),
+        state: !m.enabled
+          ? MirrorState.DISABLED
+          : failing
+            ? MirrorState.FAILING
+            : MirrorState.OK,
+        lastAttemptTime: failing ? m.lastErrorAt : m.lastSuccessAt,
+        lastSuccessTime: m.lastSuccessAt,
+        lastError: m.lastError,
+        attempts: Number(m.attempts),
+        nextAttemptTime: m.nextAttemptAt,
       };
     }),
-  );
-  return { mirrors };
+  };
+}
+
+export interface ServerUser {
+  name: string;
+  admin: boolean;
+  disabled: boolean;
 }
 
 export interface ServerInfo {
   version: string;
-  commit: string;
   startTime?: Timestamp;
-  /** Identifier of the Nix configuration generation that produced the running config. */
-  configGeneration: string;
+  /** 1 at startup, plus one per applied configuration reload (ADR 0141). */
+  configGeneration: number;
   databaseBytes: number;
   storageBytes: number;
   declaredTokens: number;
-  users: string[];
+  users: ServerUser[];
 }
 
-/** ASSUMED `GetServerInfo` — admin-only overview. */
+/** `AdministrationService.GetServerInfo` — administrators only (ADR 0139). */
 export async function getServerInfo(): Promise<ServerInfo> {
-  await mockGate();
+  const { server } = await administration.getServerInfo({});
+  if (!server) throw new ApiError(Code.Unknown, "empty server information");
   return {
-    version: MOCK_SERVER.version,
-    commit: MOCK_SERVER.commit,
-    startTime: { seconds: BigInt(MOCK_SERVER.startedAt), nanos: 0 },
-    configGeneration: MOCK_SERVER.configGeneration,
-    databaseBytes: MOCK_SERVER.databaseBytes,
-    storageBytes: MOCK_DISK_BYTES,
-    declaredTokens: MOCK_SERVER.declaredTokens,
-    users: [...MOCK_SERVER.users],
+    version: server.version,
+    startTime: server.startedAt,
+    configGeneration: Number(server.configGeneration),
+    databaseBytes: Number(server.databaseBytes),
+    storageBytes: Number(server.storageBytes),
+    declaredTokens: Number(server.declaredTokens),
+    users: server.users.map(({ name, admin, disabled }) => ({
+      name,
+      admin,
+      disabled,
+    })),
   };
 }
 

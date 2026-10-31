@@ -27,6 +27,7 @@
 		getBlob,
 		getCommitDiff,
 		getTree,
+		getViewer,
 		listCommits,
 		listMirrorStatus,
 		listRefs,
@@ -95,8 +96,11 @@
 	);
 	const empty = $derived(!!refs.data && !refs.data.some((r) => r.name === repo?.defaultBranch));
 	const revision = $derived(at || head);
-	const mirrors = resource(() =>
-		listMirrorStatus().then((m) => m.mirrors.filter((x) => x.repo === repoKey))
+	// Mirror state is for administrators (ADR 0139); the declared mirrors show for everyone.
+	const mirrors = resource(async () =>
+		(await getViewer()).admin
+			? (await listMirrorStatus()).mirrors.filter((x) => x.repo === repoKey)
+			: []
 	);
 	const runs = resource(() => listRuns({ repo: repoKey, pageSize: 60 }).then((r) => r.runs));
 	const runByCommit = $derived(new Map((runs.data ?? []).map((r) => [r.commitId, r])));
@@ -321,7 +325,12 @@
 		const m = mirrors.data?.[0];
 		if (!m) return undefined;
 		if (m.state === MirrorState.OK)
-			return { ok: true, t: `mirror ok · ${relativeTime(toDate(m.lastSuccessTime))}` };
+			return {
+				ok: true,
+				t: m.lastSuccessTime
+					? `mirror ok · ${relativeTime(toDate(m.lastSuccessTime))}`
+					: 'mirror never pushed'
+			};
 		if (m.state === MirrorState.FAILING)
 			return { ok: false, t: `mirror failing · ${m.attempts} attempts` };
 		return { ok: true, t: 'mirror off' };

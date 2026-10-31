@@ -20,6 +20,7 @@ impl Reload {
     /// coalesced into one more reload.
     pub async fn run(mut self, mut hangup: tokio::signal::unix::Signal) {
         self.registry.set_config_generation(self.generation);
+        self.health.set_config_generation(self.generation);
         while hangup.recv().await.is_some() {
             let _ = self.reload().await;
         }
@@ -58,6 +59,7 @@ impl Reload {
         self.running = applied;
         self.generation += 1;
         self.registry.set_config_generation(self.generation);
+        self.health.set_config_generation(self.generation);
         Ok(restart)
     }
 }

@@ -187,7 +187,8 @@ writeShellApplication {
     kajiba-server admin --socket "$dir/run/local.sock" import alice/demo "$dir/fixture.git" >/dev/null
     main_sha="$(git -C "$fixture" rev-parse main)"
     KAJIBA_E2E_FEATURE_SHA="$(git -C "$fixture" rev-parse feature)"
-    export KAJIBA_E2E_FEATURE_SHA
+    KAJIBA_E2E_MAIN_SHA="$main_sha"
+    export KAJIBA_E2E_FEATURE_SHA KAJIBA_E2E_MAIN_SHA
 
     # CI without a Nix sandbox: a fake `nix` first on the runner's PATH answers the host check
     # and `flake check` with scripted, timed output; the feature branch's tip fails.

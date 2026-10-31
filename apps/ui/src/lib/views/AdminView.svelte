@@ -95,7 +95,7 @@
 
 	// ── users ──────────────────────────────────────────────────────────
 	const users = $derived(
-		server.users.map((user) => {
+		server.users.map(({ name: user, admin: isAdmin, disabled }) => {
 			const roles = { admin: 0, write: 0, read: 0 };
 			for (const { repo } of forge.repos) {
 				const p = repo.permissions.find((p) => p.user === user);
@@ -103,7 +103,13 @@
 				else if (p?.role === Role.WRITE) roles.write++;
 				else if (p?.role === Role.READ) roles.read++;
 			}
-			return { user, ...roles, owned: forge.repos.filter((r) => r.repo.owner === user).length };
+			return {
+				user,
+				isAdmin,
+				disabled,
+				...roles,
+				owned: forge.repos.filter((r) => r.repo.owner === user).length
+			};
 		})
 	);
 
@@ -150,7 +156,7 @@
 				<p class="mt-1 text-xs text-fg-subtle">
 					<Icon name="lock" size={12} class="mr-1 inline-block align-[-2px]" />Read-only. Runners,
 					mirrors, users and tokens are declared in
-					<span class="font-mono text-fg-muted">{server.configGeneration}</span>
+					<span class="font-mono text-fg-muted">generation {server.configGeneration}</span>
 				</p>
 				<p class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-fg-subtle">
 					<span class="flex items-center gap-1.5"
@@ -191,16 +197,13 @@
 				<h2 class="mb-2 text-xs tracking-wide text-fg-subtle uppercase">Server</h2>
 				<dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-[0.8125rem]">
 					<dt class="text-fg-subtle">Version</dt>
-					<dd>
-						{server.version}
-						<span class="font-mono text-xs text-fg-subtle">{shortId(server.commit)}</span>
-					</dd>
+					<dd>{server.version}</dd>
 					<dt class="text-fg-subtle">Up since</dt>
 					<dd title={absoluteTime(toDate(server.startTime))}>
 						{relativeTime(toDate(server.startTime))}
 					</dd>
 					<dt class="text-fg-subtle">Config</dt>
-					<dd class="truncate font-mono text-xs leading-5">{server.configGeneration}</dd>
+					<dd class="tabular">generation {server.configGeneration}</dd>
 					<dt class="text-fg-subtle">Repositories</dt>
 					<dd class="tabular">
 						{forge.repos.length}
@@ -218,7 +221,7 @@
 		<span class="tabular">{online.length}/{forge.runners.length} online</span>
 		{#each busy as r (r.name)}{#if r.currentRun}<span class="flex items-center gap-1.5"
 					><RunBadge state={RunState.RUNNING} size={10} /><span class="font-mono">{r.name}</span>
-					#{r.currentRun.id}</span
+					#{r.currentRun.short}</span
 				>{/if}{/each}
 	</BandStrip>
 	{#if runnersOpen}
@@ -237,7 +240,7 @@
 						class="flex items-baseline gap-2 bg-surface/60 px-4 pt-2.5 pb-1 text-xs text-fg-subtle sm:px-6"
 					>
 						<Icon name="server" size={12} class="self-center" /><span
-							class="font-mono text-[0.8125rem] text-fg">{h.host}</span
+							class="font-mono text-[0.8125rem] text-fg">{h.host || 'not connected yet'}</span
 						>
 						{h.runners.length} runner{h.runners.length > 1 ? 's' : ''} · {h.systems.join(', ')}
 					</h3>
@@ -259,7 +262,9 @@
 												? 'text-fg-muted'
 												: 'font-medium'}">{r.name}</span
 										>
-										<span class="block text-xs text-fg-subtle">{r.backend}</span>
+										<span class="block text-xs text-fg-subtle"
+											>{r.backend}{#if r.disabled}{' · '}removed from the configuration{/if}</span
+										>
 									</span>
 								</span>
 								<span class="flex flex-wrap gap-1">
@@ -276,7 +281,7 @@
 											href="/-/runs/{r.currentRun.id}"
 											class="flex items-center gap-1.5 hover:underline"
 											><RunBadge state={RunState.RUNNING} size={10} /><span class="font-mono"
-												>#{r.currentRun.id}</span
+												>#{r.currentRun.short}</span
 											><span class="truncate font-mono text-fg-muted">{r.currentRun.repo}</span
 											><span class="tabular ml-auto text-fg-subtle"
 												>{relativeTime(toDate(r.currentRun.startTime))}</span
@@ -373,7 +378,7 @@
 
 	<!-- Users -->
 	<BandStrip label="Users" open={usersOpen} href={toggle('users', usersOpen, false)}>
-		<span class="font-mono">{server.users.join(' · ')}</span>
+		<span class="font-mono">{server.users.map((u) => u.name).join(' · ')}</span>
 		<span class="tabular">{server.declaredTokens} declared tokens</span>
 	</BandStrip>
 	{#if usersOpen}
@@ -393,7 +398,13 @@
 					<tbody class="tabular">
 						{#each users as u (u.user)}
 							<tr class="border-t border-border/60">
-								<td class="px-4 py-1.5 font-mono sm:px-6">{u.user}</td>
+								<td class="px-4 py-1.5 font-mono sm:px-6"
+									>{u.user}{#if u.isAdmin}<span class="ml-2 font-sans text-xs text-fg-subtle"
+											>administrator</span
+										>{/if}{#if u.disabled}<span class="ml-2 font-sans text-xs text-fg-subtle"
+											>disabled</span
+										>{/if}</td
+								>
 								<td class="px-2 py-1.5 text-right text-fg-muted">{u.owned}</td>
 								<td class="px-2 py-1.5 text-right text-fg-muted">{u.admin}</td>
 								<td class="px-2 py-1.5 text-right text-fg-muted">{u.write}</td>

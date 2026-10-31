@@ -105,7 +105,7 @@ export function buildEvents(
         mirror: m,
       });
   for (const r of opts.runners ?? [])
-    if (r.state === RunnerState.OFFLINE)
+    if (r.state === RunnerState.OFFLINE && !r.disabled)
       out.push({ t: secs(r.lastSeenTime), kind: "runner", runner: r });
   return out.sort((a, b) => b.t - a.t);
 }

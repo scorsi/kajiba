@@ -19,6 +19,7 @@ use kajiba_core::{config::ServerConfig, svid};
 use kajiba_proto::runner::v1::runner_service_server::RunnerServiceServer;
 use kajiba_proto::v1::{
     CheckRequest, CheckResponse,
+    administration_service_server::AdministrationServiceServer,
     auth_service_server::AuthServiceServer,
     check_response::ServingStatus,
     health_service_server::{HealthService, HealthServiceServer},
@@ -32,7 +33,10 @@ use std::{
     io,
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::{Mutex, Semaphore, watch};
@@ -52,6 +56,9 @@ pub struct Health {
     stop: Arc<watch::Sender<bool>>,
     state_dir: PathBuf,
     git_state_dir: PathBuf,
+    started_at: SystemTime,
+    /// The configuration generation in effect (0141), for the server information.
+    config_generation: Arc<AtomicU64>,
     local_serving: Arc<local::Serving>,
     public_reads: Arc<Semaphore>,
     webauthn_requests: Arc<Semaphore>,
@@ -81,6 +88,8 @@ impl Health {
             stop: Arc::new(watch::Sender::new(false)),
             git_state_dir,
             state_dir,
+            started_at: SystemTime::now(),
+            config_generation: Arc::default(),
             local_serving: Arc::default(),
             public_reads: Arc::new(Semaphore::new(PUBLIC_READS)),
             webauthn_requests: Arc::new(Semaphore::new(webauthn::MAX_REQUESTS)),
@@ -91,6 +100,10 @@ impl Health {
             ssh_probe,
             ssh_status: Arc::default(),
         }
+    }
+
+    pub fn set_config_generation(&self, generation: u64) {
+        self.config_generation.store(generation, Ordering::Relaxed);
     }
 
     // Called only after migrations, reconciliation and event bus initialization.
@@ -212,6 +225,9 @@ fn router(
     public_url: &str,
 ) -> Result<Router, String> {
     let api = Routes::new(HealthServiceServer::new(health.clone()))
+        .add_service(AdministrationServiceServer::new(
+            administration::Administration(health.clone()),
+        ))
         .add_service(AuthServiceServer::new(auth::Sessions(health.clone())))
         .add_service(TokenServiceServer::new(tokens::Tokens(health.clone())))
         .add_service(PasskeyServiceServer::new(passkeys::Passkeys(
@@ -737,6 +753,7 @@ fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
     })
 }
 
+mod administration;
 pub mod auth;
 pub mod correlation;
 pub mod cursor;

@@ -6,6 +6,7 @@
  */
 
 import {
+  getViewer,
   listCommits,
   listMirrorStatus,
   listRefs,
@@ -37,11 +38,13 @@ export interface Forge {
 }
 
 export async function loadForge(): Promise<Forge> {
+  // Runners and mirrors are for administrators (ADR 0139).
+  const { admin } = await getViewer();
   const [repos, runs, runners, mirrors] = await Promise.all([
     allRepos(),
     recentRuns(50),
-    listRunners().then((r) => r.runners),
-    listMirrorStatus().then((m) => m.mirrors),
+    admin ? listRunners().then((r) => r.runners) : [],
+    admin ? listMirrorStatus().then((m) => m.mirrors) : [],
   ]);
   const per = await Promise.all(
     repos.map(async (repo) => {

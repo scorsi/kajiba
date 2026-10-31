@@ -38,7 +38,10 @@
 			'code' in viewer.error &&
 			viewer.error.code === Code.Unauthenticated
 	);
-	const runners = resource(() => listRunners().then((r) => r.runners));
+	// Runners are for administrators (ADR 0139).
+	const runners = resource(async () =>
+		(await getViewer()).admin ? (await listRunners()).runners : undefined
+	);
 	const online = $derived(
 		(runners.data ?? []).filter((r) => r.state !== RunnerState.OFFLINE).length
 	);
@@ -217,13 +220,14 @@
 							</li>{/each}
 					</ul>
 				</nav>
+				{#if runners.data}
 				<section aria-label="Runners">
 					<h2 class="mb-2 text-xs tracking-wide text-fg-subtle uppercase">
 						<a href="/-/admin#runners" class="hover:text-fg">Runners</a>
-						<span class="normal-case">· {online}/{runners.data?.length ?? 0} online</span>
+						<span class="normal-case">· {online}/{runners.data.length} online</span>
 					</h2>
 					<ul class="space-y-1.5 text-xs">
-						{#each runners.data ?? [] as r (r.name)}
+						{#each runners.data as r (r.name)}
 							<li class="flex items-center gap-2">
 								<RunnerStateDot state={r.state} />
 								<a href="/-/admin#runner-{r.name}" class="font-mono text-fg-muted hover:text-fg"
@@ -232,13 +236,14 @@
 								<span class="ml-auto text-fg-subtle"
 									>{#if r.currentRun}<a
 											href="/-/runs/{r.currentRun.id}"
-											class="text-accent hover:underline">#{r.currentRun.id}</a
+											class="text-accent hover:underline">#{r.currentRun.short}</a
 										>{:else}{r.state === RunnerState.OFFLINE ? 'offline' : 'idle'}{/if}</span
 								>
 							</li>
 						{/each}
 					</ul>
 				</section>
+				{/if}
 			</div>
 		</section>
 	{:else}

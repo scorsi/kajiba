@@ -10,6 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compile_protos(
             &[
                 "../../proto/kajiba/v1/options.proto",
+                "../../proto/kajiba/v1/administration.proto",
                 "../../proto/kajiba/v1/auth.proto",
                 "../../proto/kajiba/v1/health.proto",
                 "../../proto/kajiba/v1/repo.proto",
