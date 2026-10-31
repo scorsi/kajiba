@@ -205,6 +205,11 @@ writeShellApplication {
       echo "error: build of '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-fmt.drv' failed"
       exit 1
     fi
+    # the other checks take their time, so that the log can be watched while it grows
+    echo "building 'clippy'"
+    sleep 2
+    echo "building 'tests'"
+    sleep 2
     echo "all checks passed"
     EOF
     chmod +x "$dir/bin/nix"

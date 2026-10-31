@@ -42,6 +42,7 @@ import {
   MOCK_RUNNERS,
   MOCK_DISK_BYTES,
 } from "./mock";
+import { RunLog } from "./runlog.ts";
 
 // ── Types (shape of protobuf-es generated messages) ─────────────────────
 
@@ -870,29 +871,84 @@ export interface RunLogLine {
   group?: string;
 }
 
-/** The stored log of a run, cut into its attempts (the live stream is task 5). */
-export async function getRunLog(req: { id: string }) {
-  const decoder = new TextDecoder();
-  const attempts: { step: RunStep; text: string }[] = [];
-  for await (const m of runs.watchRun({ run: req.id, follow: false })) {
-    if (m.event.case === "section" && m.event.value.attempt)
-      attempts.push({ step: toStep(m.event.value.attempt), text: "" });
-    else if (m.event.case === "log")
-      attempts.at(-1)!.text += decoder.decode(m.event.value.data, {
-        stream: true,
-      });
+/** Gives up a stream after this many consecutive failures; any message resets the count. */
+const WATCH_RETRIES = 5;
+
+const pause = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((done) => {
+    const t = setTimeout(done, ms);
+    signal?.addEventListener("abort", () => (clearTimeout(t), done()), {
+      once: true,
+    });
+  });
+
+/** An empty log to feed with `watchRun`. */
+export const newRunLog = () => new RunLog<RunStep>();
+
+/**
+ * Reads a run's log into `log` from `log.offset` (ADR 0142): the stored bytes,
+ * then, with `follow`, the live ones until the run is terminal, whose final
+ * state it returns. Keepalives are ignored; a broken stream is resumed from the
+ * received offset; `signal` aborts it (a tab holds one of 16 watches, ADR 0120).
+ * `onChange` is called at most every 100 ms and once at the end.
+ */
+export async function watchRun(req: {
+  id: string;
+  repo: RepoRef;
+  log: RunLog<RunStep>;
+  follow: boolean;
+  signal?: AbortSignal;
+  onChange?: () => void;
+}): Promise<Run | undefined> {
+  const { log, signal } = req;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const changed = () => {
+    timer ??= setTimeout(() => {
+      timer = undefined;
+      req.onChange?.();
+    }, 100);
+  };
+  try {
+    for (let failures = 0; ; ) {
+      try {
+        for await (const m of runs.watchRun(
+          { run: req.id, offset: BigInt(log.offset), follow: req.follow },
+          { signal },
+        )) {
+          failures = 0;
+          const e = m.event;
+          if (e.case === "section" && e.value.attempt)
+            log.section(e.value.attempt.publicId, toStep(e.value.attempt));
+          else if (e.case === "log")
+            log.bytes(Number(e.value.offset), e.value.data);
+          else if (e.case === "finished") return toRun(e.value, req.repo);
+          else continue;
+          changed();
+        }
+        // A following stream ending without the final state (server stopping): resume.
+        if (!req.follow || signal?.aborted) return undefined;
+        throw new ApiError(Code.Unavailable, "log stream ended");
+      } catch (err) {
+        const code = (err as { code?: number }).code;
+        if (
+          signal?.aborted ||
+          code === Code.NotFound ||
+          code === Code.PermissionDenied ||
+          code === Code.Unauthenticated ||
+          code === Code.ResourceExhausted ||
+          ++failures > WATCH_RETRIES
+        ) {
+          if (signal?.aborted) return undefined;
+          throw err;
+        }
+        await pause(Math.min(500 * 2 ** failures, 8000), signal);
+        if (signal?.aborted) return undefined;
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    req.onChange?.();
   }
-  return attempts.map(({ step, text }) => ({
-    step,
-    lines: text
-      .split("\n")
-      .filter((l, i, all) => l || i < all.length - 1)
-      .map<RunLogLine>((l) => ({
-        offsetSeconds: 0,
-        text: l,
-        stream: /^error\b/.test(l) ? "err" : "out",
-      })),
-  }));
 }
 
 // ── mock internals

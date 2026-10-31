@@ -9,7 +9,8 @@ import {
   RunState,
   getCommitDiff,
   getRun,
-  getRunLog,
+  newRunLog,
+  watchRun,
   listCommits,
   listRuns,
   type Change,
@@ -17,7 +18,9 @@ import {
   type Repo,
   type Run,
   type RunLogLine,
+  type RunStep,
 } from "#lib/api.ts";
+import type { RunLog } from "#lib/runlog.ts";
 import { allRepos } from "#lib/loaders.ts";
 
 export interface StepLog {
@@ -40,6 +43,67 @@ export interface RunPage {
   /** Median duration per step over recent succeeded runs (seconds). */
   usual: number[];
   logs: StepLog[];
+  /** The log read so far; `followRun` continues it. */
+  log: RunLog<RunStep>;
+}
+
+export const terminal = (s: RunState) =>
+  s === RunState.SUCCEEDED || s === RunState.FAILED || s === RunState.CANCELLED;
+
+/** The page with its steps and logs rebuilt from `log`; one step per attempt (a replay is a new column). */
+function withLog(
+  p: Omit<RunPage, "logs" | "log">,
+  log: RunLog<RunStep>,
+  run: Run,
+): RunPage {
+  const steps = log.attempts.length
+    ? log.attempts.map((a) => a.meta)
+    : run.steps;
+  const live = !terminal(run.state);
+  return {
+    ...p,
+    run: { ...run, steps },
+    log,
+    usual: steps.map(() => p.usual[0] ?? 0),
+    logs: steps.map((_, i) => ({
+      lines: log.attempts.length ? log.lines(i) : [],
+      complete: !live || i < steps.length - 1,
+    })),
+  };
+}
+
+/**
+ * Follows an unfinished run (ADR 0142): `update` gets the page as log bytes and
+ * attempts arrive; resolves with the final run once terminal. Abort `signal`
+ * when the page is left.
+ */
+export async function followRun(
+  p: RunPage,
+  signal: AbortSignal,
+  update: (p: RunPage) => void,
+): Promise<Run | undefined> {
+  let run = p.run;
+  const done = await watchRun({
+    id: run.id,
+    repo: run.repo,
+    log: p.log,
+    follow: true,
+    signal,
+    onChange: () => {
+      // The first attempt's log means a runner took the job.
+      if (run.state === RunState.QUEUED && p.log.attempts.length)
+        run = { ...run, state: RunState.RUNNING };
+      update(withLog(p, p.log, run));
+    },
+  });
+  // The final state also settles the last attempt's step.
+  if (done) {
+    const last = done.steps[0];
+    const steps = p.log.attempts.map((a) => a.meta);
+    if (last && steps.length) p.log.attempts.at(-1)!.meta = last;
+    update(withLog(p, p.log, done));
+  }
+  return done;
 }
 
 const median = (xs: number[]) => {
@@ -51,7 +115,7 @@ const median = (xs: number[]) => {
 export async function loadRun(id: string): Promise<RunPage> {
   const run = await getRun({ id });
   const worktree = run.trigger === "worktree";
-  const [repos, history, commits, diff, attempts] = await Promise.all([
+  const [repos, history, commits, diff, log] = await Promise.all([
     allRepos(),
     listRuns({ repo: run.repo, ref: run.ref, pageSize: 40 }).then(
       (r) => r.runs,
@@ -67,10 +131,8 @@ export async function loadRun(id: string): Promise<RunPage> {
       : getCommitDiff({ repo: run.repo, revision: run.commitId })
           .then((d) => d.changes)
           .catch(() => [] as Change[]),
-    getRunLog({ id }),
+    readRunLog(run.id, run.repo),
   ]);
-  // One step per attempt in the stored log (a replayed attempt is a new column).
-  if (attempts.length) run.steps = attempts.map((a) => a.step);
   const created = (r: Run) => Number(r.createTime?.seconds ?? 0n);
   const lastGreen = history.find(
     (r) =>
@@ -96,21 +158,27 @@ export async function loadRun(id: string): Promise<RunPage> {
   const green = history
     .filter((r) => r.state === RunState.SUCCEEDED && r.id !== run.id)
     .slice(0, 10);
-  return {
+  return withLog(
+    {
+      run,
+      repo: repos.find((r) => `${r.owner}/${r.name}` === run.repo),
+      commit: commits[0],
+      changes: [...changes.values()],
+      history,
+      lastGreen,
+      since,
+      // The browser's median of the ref's recent succeeded runs, for every attempt.
+      usual: [median(green.map((r) => r.durationSeconds))],
+    },
+    log,
     run,
-    repo: repos.find((r) => `${r.owner}/${r.name}` === run.repo),
-    commit: commits[0],
-    changes: [...changes.values()],
-    history,
-    lastGreen,
-    since,
-    // The browser's median of the ref's recent succeeded runs, for every attempt.
-    usual: run.steps.map(() => median(green.map((r) => r.durationSeconds))),
-    logs: run.steps.map((_, i) => ({
-      lines: attempts[i]?.lines ?? [],
-      complete: run.state !== RunState.RUNNING || i < run.steps.length - 1,
-    })),
-  };
+  );
+}
+
+async function readRunLog(id: string, repo: string) {
+  const log = newRunLog();
+  await watchRun({ id, repo, log, follow: false });
+  return log;
 }
 
 /** A step's log cut into segments: consecutive lines of the same group. */

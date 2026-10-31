@@ -52,11 +52,45 @@ test.describe.serial("CI runs", () => {
     ).toBeVisible();
     await expect(pulse(page)).toContainText("started manually by alice");
 
+    // The page stays open: the log arrives live, then the terminal state, with no reload.
+    // Count the WatchRun calls the page opens and aborts (the browser reports no failure for them).
+    await page.addInitScript(() => {
+      const w = window as unknown as {
+        streams: { opened: number; closed: number };
+      };
+      w.streams = { opened: 0, closed: 0 };
+      const fetch = window.fetch;
+      window.fetch = (input, init) => {
+        if (
+          String(input instanceof Request ? input.url : input).endsWith(
+            "RunService/WatchRun",
+          )
+        ) {
+          w.streams.opened++;
+          init?.signal?.addEventListener("abort", () => w.streams.closed++);
+        }
+        return fetch(input, init);
+      };
+    });
+    const streams = () =>
+      page.evaluate(
+        () =>
+          (window as unknown as { streams: { opened: number; closed: number } })
+            .streams,
+      );
+    await page.reload();
     writeFileSync(env("KAJIBA_E2E_START_RUNNER"), "");
-    await expect(async () => {
-      await page.reload();
-      await expect(pulse(page)).toContainText("passed", { timeout: 2_000 });
-    }).toPass({ timeout: 60_000 });
+    const log = page.getByRole("log");
+    await expect(log).toContainText("building 'fmt'", { timeout: 30_000 });
+    await expect(pulse(page)).not.toContainText("passed");
+
+    // Leaving the page closes its stream; a new page still opens one and the run still ends.
+    await expect.poll(async () => (await streams()).opened).toBeGreaterThan(0);
+    await page.getByRole("link", { name: "alice/demo" }).first().click();
+    await expect.poll(async () => (await streams()).closed).toBeGreaterThan(0);
+    await page.goto(`/-/runs/${id}`);
+    await expect(log).toContainText("building 'fmt'");
+    await expect(pulse(page)).toContainText("passed", { timeout: 30_000 });
     await expect(pulse(page)).toContainText("e2e-host");
   });
 

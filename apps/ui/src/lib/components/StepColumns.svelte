@@ -90,15 +90,27 @@
 	});
 	const errors = $derived(log?.lines.filter((l) => l.stream === 'err').length ?? 0);
 
-	// Land on what matters: the first error, or the end of a running log.
+	// Land on what matters: a linked line, else the first error, else follow the
+	// end of a running log (unless the reader scrolled up).
 	let pane = $state<HTMLElement>();
+	let stick = true;
+	const onscroll = (e: Event) => {
+		const el = e.currentTarget as HTMLElement;
+		stick = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+	};
 	$effect(() => {
 		void step;
 		void check;
+		void log?.lines.length;
 		if (!pane) return;
+		const to = (el: HTMLElement) =>
+			(pane!.scrollTop = Math.max(0, el.offsetTop - pane!.offsetTop - 48));
+		const linked = page.url.hash && document.getElementById(page.url.hash.slice(1));
 		const err = pane.querySelector<HTMLElement>('[data-err]');
-		if (err) pane.scrollTop = Math.max(0, err.offsetTop - pane.offsetTop - 48);
-		else if (!log?.complete) pane.scrollTop = pane.scrollHeight;
+		if (log?.complete) {
+			if (linked && pane.contains(linked)) to(linked);
+			else if (err) to(err);
+		} else if (stick) pane.scrollTop = pane.scrollHeight;
 	});
 </script>
 
@@ -251,6 +263,7 @@
 									<!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable: must be focusable) -->
 									<div
 										bind:this={pane}
+						{onscroll}
 										tabindex="0"
 										class="relative min-h-0 flex-1 overflow-y-auto py-1 max-sm:max-h-[60vh]"
 									>
@@ -288,6 +301,7 @@
 					<!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable: must be focusable) -->
 					<div
 						bind:this={pane}
+						{onscroll}
 						tabindex="0"
 						class="relative min-h-0 flex-1 overflow-y-auto py-1 max-sm:max-h-[60vh]"
 					>
