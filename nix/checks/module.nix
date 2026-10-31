@@ -8,6 +8,7 @@
   kajibaServerPackage,
   kajibaGitPackage,
   kajibaRunnerPackage,
+  kajibaUiPackage,
 }:
 let
   inherit (pkgs) lib;
@@ -54,6 +55,7 @@ let
           services.kajiba-server = {
             enable = true;
             package = if native then kajibaServerPackage else inputs.self.packages.${linux}.kajiba-server;
+            ui.package = if native then kajibaUiPackage else inputs.self.packages.${linux}.kajiba-ui;
             http.publicUrl = lib.mkDefault "https://forge.example.org";
           };
         }
@@ -861,8 +863,15 @@ in
     assert
       (evaluate false { services.kajiba-server.dump.dir = lib.mkForce "/var/lib/kajiba-dumps"; })
       .config.systemd.services.kajiba-server.serviceConfig.StateDirectory == [ "kajiba-dumps" ];
+    # The bundle is served by default (0128), and the flag is gone once disabled.
     assert
       (evaluate false { }).config.systemd.services.kajiba-server.serviceConfig.ExecStart
+      == "${lib.getExe inputs.self.packages.${linux}.kajiba-server} serve --config ${
+        (evaluate false { }).config.environment.etc."kajiba/server.toml".source
+      } --ui-dir ${inputs.self.packages.${linux}.kajiba-ui}";
+    assert
+      (evaluate false { services.kajiba-server.ui.enable = false; })
+      .config.systemd.services.kajiba-server.serviceConfig.ExecStart
       == "${lib.getExe inputs.self.packages.${linux}.kajiba-server} serve --config ${
         (evaluate false { }).config.environment.etc."kajiba/server.toml".source
       }";

@@ -1,10 +1,11 @@
 # J1 task 28: the server becomes ready through the module, reconciles a declared user and key,
 # keeps its rows across a reboot, re-migrates a wiped stateDir, and refuses a second instance
-# on the same stateDir (0012, 0014, 0015, 0023).
+# on the same stateDir (0012, 0014, 0015, 0023); it serves the web application by default (0094, 0128).
 {
   pkgs,
   kajibaServerPackage,
   kajibaGitPackage,
+  kajibaUiPackage,
   testLib,
 }:
 let
@@ -25,6 +26,7 @@ pkgs.testers.runNixOSTest {
     services.kajiba-server = {
       enable = true;
       package = kajibaServerPackage;
+      ui.package = kajibaUiPackage;
       inherit stateDir;
       http.publicUrl = "https://forge.example.org";
       users.alice = {
@@ -93,6 +95,13 @@ pkgs.testers.runNixOSTest {
         events = invocation_events()
         assert applied(events) == migrations, f"applied {applied(events)} != {migrations}: {events}"
         assert "ready" in {event["event"] for event in events}, f"no ready line: {events}"
+
+    with subtest("the server itself serves the web application, with the SPA fallback"):
+        for path in ["/", "/-/login"]:
+            out = machine.succeed(f"curl -sS --max-time 5 -o /tmp/page.html -w '%{{http_code}} %{{content_type}}' http://127.0.0.1:8080{path}")
+            code, content_type = out.split(" ", 1)
+            assert code == "200" and content_type.startswith("text/html"), f"GET {path}: {out!r}"
+            machine.succeed("grep -qi '<!doctype html>' /tmp/page.html")
 
     with subtest("both units use the split identities, directories and socket ownership"):
         machine.wait_for_unit("kajiba-git.service")

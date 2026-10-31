@@ -45,6 +45,7 @@ pkgs.testers.runNixOSTest {
     services.kajiba-server = {
       enable = true;
       package = kajibaServerPackage;
+      ui.enable = false;
       http.publicUrl = "https://forge.example.org";
       users = {
         alice.signingKeys = [ (builtins.readFile ./fixtures/ssh-signing-key.pub) ];

@@ -316,6 +316,14 @@ in
     enable = lib.mkEnableOption "the kajiba forge server";
     package = lib.mkPackageOption pkgs "kajiba-server" { };
 
+    # The web application bundle, served by the server itself with `serve --ui-dir` (0094, 0128).
+    ui = {
+      enable = lib.mkEnableOption "serving the web application with `serve --ui-dir`" // {
+        default = true;
+      };
+      package = lib.mkPackageOption pkgs "kajiba-ui" { };
+    };
+
     stateDir = mkOption {
       type = types.strMatching "/.+";
       default = "/var/lib/kajiba-server";
@@ -720,7 +728,9 @@ in
       # Smart HTTP upload-pack and mirror pushes read repositories (0052).
       path = [ pkgs.git ];
       serviceConfig = hardening // {
-        ExecStart = "${lib.getExe cfg.package} serve --config ${configFile}";
+        ExecStart =
+          "${lib.getExe cfg.package} serve --config ${configFile}"
+          + lib.optionalString cfg.ui.enable " --ui-dir ${cfg.ui.package}";
         # The unit is active only once /readyz answers 200 (0022); TimeoutStartSec bounds it.
         ExecStartPost = "${readyProbe} http://${probe}/readyz";
         Restart = "on-failure";

@@ -33,6 +33,7 @@ pkgs.testers.runNixOSTest {
     services.kajiba-server = {
       enable = true;
       package = kajibaServerPackage;
+      ui.enable = false;
       http.listen = "0.0.0.0:8080";
       http.publicUrl = "https://forge.example.org";
       users.alice = {
