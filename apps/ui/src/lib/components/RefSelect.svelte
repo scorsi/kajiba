@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { Ref } from '#lib/api.ts';
 	import { refKind, refShortName } from '#lib/format.ts';
-	import Icon from './Icon.svelte';
+	import Icon from '#lib/components/Icon.svelte';
 
 	let {
 		refs,

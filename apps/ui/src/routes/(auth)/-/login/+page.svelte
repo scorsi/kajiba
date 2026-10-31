@@ -21,7 +21,7 @@
 		error = '';
 		try {
 			await signInWithPasskey();
-			await goto(next, { replaceState: true });
+			await goto(next, { replace: true });
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -32,27 +32,41 @@
 
 <svelte:head><title>Sign in · kajiba</title></svelte:head>
 
-<div class="rounded-md border border-border bg-surface p-6">
-	<h1 class="text-lg font-semibold tracking-tight">Sign in</h1>
-	<p class="mt-1 text-[0.8125rem] text-fg-muted">Use the passkey enrolled for your account.</p>
-
-	<button
-		type="button"
-		onclick={signIn}
-		disabled={pending}
-		class="mt-5 inline-flex h-10 w-full items-center justify-center gap-2 rounded-sm bg-accent font-medium text-accent-fg hover:opacity-90 disabled:opacity-70"
-	>
-		<Icon name="key" size={16} />
-		{pending ? 'Waiting for your passkey…' : 'Sign in with a passkey'}
-	</button>
-
-	{#if error}
-		<p class="mt-3 rounded-sm bg-danger-soft px-3 py-2 text-[0.8125rem] text-danger" role="alert">
-			{error}
+<section class="border-b border-border bg-surface px-4 py-8 sm:px-6 sm:py-12" aria-label="Sign in">
+	<div class="max-w-md">
+		<p class="text-xs tracking-wide text-fg-subtle uppercase">▾ Sign in</p>
+		<h1 class="mt-1 text-2xl font-semibold tracking-tight">Welcome back</h1>
+		<p class="mt-1 text-[0.8125rem] text-fg-muted">
+			Use the passkey enrolled for your account. No password, no user name: the key says who you
+			are.
 		</p>
-	{/if}
-</div>
 
-<p class="mt-4 px-1 text-xs text-fg-subtle">
-	No account yet? Accounts are declared by the administrator, who sends a one-time enrolment link.
+		<button
+			type="button"
+			onclick={signIn}
+			disabled={pending}
+			class="mt-6 inline-flex h-10 items-center justify-center gap-2 rounded-sm bg-accent px-5 font-medium text-accent-fg hover:opacity-90 disabled:opacity-70"
+		>
+			<Icon name="key" size={16} />
+			{pending ? 'Waiting for your passkey…' : 'Sign in with a passkey'}
+		</button>
+
+		{#if error}
+			<p class="mt-3 rounded-sm bg-danger-soft px-3 py-2 text-[0.8125rem] text-danger" role="alert">
+				{error}
+			</p>
+		{/if}
+		{#if next !== '/'}
+			<p class="mt-3 text-xs text-fg-subtle">
+				Then back to <span class="font-mono text-fg-muted">{next}</span>
+			</p>
+		{/if}
+	</div>
+</section>
+
+<p
+	class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-4 py-2 text-xs text-fg-muted sm:px-6"
+>
+	<span class="tracking-wide text-fg-subtle uppercase">No account yet</span>
+	<span>Accounts are declared by the administrator, who sends you a one-time enrolment link.</span>
 </p>

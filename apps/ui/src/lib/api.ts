@@ -1,35 +1,40 @@
 /**
  * Data access for the whole UI — the ONLY module views use to get data.
  *
- * Mirrors `kajiba.v1.RepoService` with protobuf-es naming (camelCase fields,
- * `{ … }` request objects, numeric enums). Sign-in, enrollment, logout and
- * `getViewer` and token management talk to kajiba-server (the WebAuthn ceremonies
- * and the committed connect-web client); repository and admin data are still MOCKS
- * reading `./mock.ts`, replaced in J5 keeping the exported names and types.
+ * Mirrors `kajiba.v1` with protobuf-es naming (camelCase fields, `{ … }` request
+ * objects, numeric enums). Sign-in, enrollment, logout, `getViewer` and token
+ * management talk to kajiba-server (the WebAuthn ceremonies and the committed
+ * connect-web client); everything else is still a MOCK reading `./mock.ts`, replaced
+ * slice by slice in J5 keeping the exported names and types.
  *
  * Everything under "ASSUMED" does not exist in the API yet: each item is a
  * question for the integrator (see DESIGN.md → "Mock assumptions").
  *
- * Dev switch: `?mock=slow|error|unauth|empty` on any URL forces a state.
+ * Dev switch: `?mock=slow|error|unauth|empty|member|broken` forces a state on the mocked calls.
  */
 
 import { createClient } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
+import { AuthService } from "./gen/kajiba/v1/auth_pb.ts";
 import { Scope } from "./gen/kajiba/v1/options_pb.ts";
 import {
   TokenService,
   TokenSource,
   type Token as TokenMessage,
 } from "./gen/kajiba/v1/token_pb.ts";
-import { AuthService } from "./gen/kajiba/v1/auth_pb.ts";
 import {
   MOCK_MIRROR_STATUS,
+  MOCK_PASSKEYS,
+  MOCK_TOKENS,
   MOCK_REPOS,
   MOCK_SERVER,
   MOCK_RUNNERS,
-  MOCK_STATS,
+  MOCK_RUNS,
+  MOCK_DISK_BYTES,
   ZERO_ID,
+  CHECKS,
   fakeId,
+  mockRunLog,
   type MockNode,
   type MockRepo,
 } from "./mock";
@@ -38,6 +43,7 @@ import {
 
 /** Connect/gRPC status codes used by the UI (same numbers as `@connectrpc/connect` `Code`). */
 export enum Code {
+  Unknown = 2,
   NotFound = 5,
   PermissionDenied = 7,
   FailedPrecondition = 9,
@@ -195,13 +201,15 @@ export async function getBlob(req: {
   if (node?.kind !== "blob")
     throw new ApiError(Code.NotFound, `no file '${req.path}'`);
   const c = node.content;
-  const content =
-    typeof c === "string"
-      ? new TextEncoder().encode(c)
-      : c instanceof Uint8Array
-        ? c
-        : c();
-  return { commitId, content };
+  if (typeof c === "string") {
+    return {
+      commitId,
+      content: new TextEncoder().encode(
+        olderVersion(repo, commitId, req.path, c),
+      ),
+    };
+  }
+  return { commitId, content: c instanceof Uint8Array ? c : c() };
 }
 
 export async function listCommits(req: {
@@ -209,12 +217,24 @@ export async function listCommits(req: {
   revision: string;
   pageSize?: number;
   pageToken?: string;
+  /** ASSUMED: only commits touching this file or directory (like `git log -- <path>`). */
+  path?: string;
 }) {
   await mockGate();
   const repo = findMock(req.repo);
   const head = resolve(repo, req.revision);
   const start = repo.commits.findIndex((c) => c.id === head);
-  const history = repo.commits.slice(start).map(toCommit);
+  const p = req.path?.replace(/\/$/, "");
+  const history = repo.commits
+    .slice(start)
+    .filter(
+      (c) =>
+        !p ||
+        changesFor(repo, c.id).some(
+          (ch) => ch.path === p || ch.path.startsWith(p + "/"),
+        ),
+    )
+    .map(toCommit);
   const { items, nextPageToken } = paginate(
     history,
     req.pageSize ?? 50,
@@ -226,28 +246,7 @@ export async function listCommits(req: {
 export async function getCommitDiff(req: { repo: RepoRef; revision: string }) {
   await mockGate();
   const repo = findMock(req.repo);
-  const id = resolve(repo, req.revision);
-  const files = listFiles(repo.tree);
-  const seed = parseInt(id.slice(0, 8), 16);
-  const count = 1 + (seed % 6);
-  const changes: Change[] = [];
-  for (let i = 0; i < count && i < files.length; i++) {
-    const path = files[(seed + i * 7) % files.length];
-    if (changes.some((c) => c.path === path)) continue;
-    const kind = [
-      ChangeKind.MODIFIED,
-      ChangeKind.MODIFIED,
-      ChangeKind.ADDED,
-      ChangeKind.DELETED,
-    ][(seed >> (i + 1)) % 4];
-    changes.push({
-      path,
-      kind,
-      oldId: kind === ChangeKind.ADDED ? ZERO_ID : fakeId(id + path + "old"),
-      newId: kind === ChangeKind.DELETED ? ZERO_ID : fakeId(id + path + "new"),
-    });
-  }
-  return { changes };
+  return { changes: changesFor(repo, resolve(repo, req.revision)) };
 }
 
 // ── ASSUMED: not in the API yet ─────────────────────────────────────────
@@ -276,12 +275,10 @@ export interface Viewer {
 }
 
 // Same origin: the session cookie (HttpOnly) rides along; CORS admits only the forge origin.
-const auth = createClient(
-  AuthService,
-  createGrpcWebTransport({
-    baseUrl: typeof location === "undefined" ? "/" : location.origin,
-  }),
-);
+const transport = createGrpcWebTransport({
+  baseUrl: typeof location === "undefined" ? "/" : location.origin,
+});
+const auth = createClient(AuthService, transport);
 
 /** `AuthService.GetViewer` — who is signed in. Throws `Unauthenticated` otherwise (ADR 0087). */
 export async function getViewer(): Promise<Viewer> {
@@ -342,69 +339,6 @@ export async function listRunners() {
     },
   }));
   return { runners };
-}
-
-/** ASSUMED `GetStats` — forge-wide figures. Which ones is an open question (DESIGN.md). */
-export async function getStats() {
-  await mockGate();
-  return structuredClone(MOCK_STATS);
-}
-
-export interface ActivityCommit {
-  repo: RepoRef;
-  id: string;
-  subject: string;
-  authorName: string;
-  commitTime?: Timestamp;
-}
-
-export interface Activity {
-  days: number;
-  /** Commits per UTC day, oldest first, `days` entries. Default branches only. */
-  perDay: number[];
-  perRepo: { repo: RepoRef; commits: number }[];
-  perAuthor: { authorName: string; commits: number }[];
-  recent: ActivityCommit[];
-}
-
-/** ASSUMED `GetActivity` — git activity across visible repositories (default branches). */
-export async function getActivity(req: { days: number }): Promise<Activity> {
-  await mockGate();
-  const now = Math.floor(Date.now() / 1000);
-  const today = Math.floor(now / 86400);
-  const since = (today - req.days + 1) * 86400;
-  const perDay = new Array<number>(req.days).fill(0);
-  const perRepo = new Map<string, number>();
-  const perAuthor = new Map<string, number>();
-  const recent: ActivityCommit[] = [];
-  for (const r of MOCK_REPOS) {
-    const key = `${r.owner}/${r.name}`;
-    for (const c of r.commits) {
-      if (c.time < since) break;
-      perDay[Math.floor(c.time / 86400) - (today - req.days + 1)]++;
-      perRepo.set(key, (perRepo.get(key) ?? 0) + 1);
-      perAuthor.set(c.authorName, (perAuthor.get(c.authorName) ?? 0) + 1);
-      recent.push({
-        repo: key,
-        id: c.id,
-        subject: c.message.split("\n", 1)[0],
-        authorName: c.authorName,
-        commitTime: { seconds: BigInt(c.time), nanos: 0 },
-      });
-    }
-  }
-  recent.sort((a, b) => Number(b.commitTime!.seconds - a.commitTime!.seconds));
-  const desc = <K>(m: Map<K, number>) => [...m].sort((a, b) => b[1] - a[1]);
-  return {
-    days: req.days,
-    perDay,
-    perRepo: desc(perRepo).map(([repo, commits]) => ({ repo, commits })),
-    perAuthor: desc(perAuthor).map(([authorName, commits]) => ({
-      authorName,
-      commits,
-    })),
-    recent: recent.slice(0, 12),
-  };
 }
 
 export enum MirrorState {
@@ -478,13 +412,21 @@ export async function getServerInfo(): Promise<ServerInfo> {
     startTime: { seconds: BigInt(MOCK_SERVER.startedAt), nanos: 0 },
     configGeneration: MOCK_SERVER.configGeneration,
     databaseBytes: MOCK_SERVER.databaseBytes,
-    storageBytes: MOCK_STATS.diskBytes,
+    storageBytes: MOCK_DISK_BYTES,
     declaredTokens: MOCK_SERVER.declaredTokens,
     users: [...MOCK_SERVER.users],
   };
 }
 
-// ── Account tokens (ADR 0081) ──────────────────────────────────────────
+// ── ASSUMED: auth / account service ─────────────────────────────────────
+
+export interface Passkey {
+  id: string;
+  /** Label chosen at enrolment (authenticator name). */
+  name: string;
+  createTime?: Timestamp;
+  lastUsedTime?: Timestamp;
+}
 
 /** Token scopes, as `kajiba.v1.Scope` and the server configuration name them (ADR 0014). */
 export const TOKEN_SCOPES = [
@@ -507,12 +449,50 @@ export interface Token {
   revokedTime?: Timestamp;
 }
 
-const tokens = createClient(
-  TokenService,
-  createGrpcWebTransport({
-    baseUrl: typeof location === "undefined" ? "/" : location.origin,
-  }),
-);
+const ts = (s?: number): Timestamp | undefined =>
+  s === undefined ? undefined : { seconds: BigInt(s), nanos: 0 };
+const nowSec = () => Math.floor(Date.now() / 1000);
+
+/** ASSUMED `ListPasskeys`. */
+export async function listPasskeys() {
+  await mockGate();
+  const passkeys: Passkey[] = MOCK_PASSKEYS.map((p) => ({
+    id: p.id,
+    name: p.name,
+    createTime: ts(p.created),
+    lastUsedTime: ts(p.lastUsed),
+  }));
+  return { passkeys };
+}
+
+/**
+ * ASSUMED `BeginPasskeyEnrollment` + `navigator.credentials.create` +
+ * `FinishPasskeyEnrollment`. `replaceId` re-enrols (replaces) an existing one.
+ */
+export async function enrollPasskey(req: {
+  name: string;
+  replaceId?: string;
+}): Promise<Passkey> {
+  await mockGate();
+  await new Promise((r) => setTimeout(r, 900)); // the authenticator prompt
+  const pk = {
+    id: `pk_${Date.now()}`,
+    name: req.name,
+    created: nowSec(),
+    lastUsed: nowSec(),
+  };
+  const i = MOCK_PASSKEYS.findIndex((p) => p.id === req.replaceId);
+  if (i >= 0) MOCK_PASSKEYS.splice(i, 1, pk);
+  else MOCK_PASSKEYS.push(pk);
+  return {
+    id: pk.id,
+    name: pk.name,
+    createTime: ts(pk.created),
+    lastUsedTime: ts(pk.lastUsed),
+  };
+}
+
+const tokens = createClient(TokenService, transport);
 
 function toToken(t: TokenMessage): Token {
   return {
@@ -671,9 +651,194 @@ export async function completeEnrollment(req: {
   return getViewer();
 }
 
-// ── mock internals ──────────────────────────────────────────────────────
+// ── ASSUMED: CI runs ────────────────────────────────────────────────────
 
-type Scenario = "slow" | "error" | "unauth" | "empty" | null;
+export enum RunState {
+  UNSPECIFIED = 0,
+  QUEUED = 1,
+  RUNNING = 2,
+  SUCCEEDED = 3,
+  FAILED = 4,
+  CANCELLED = 5,
+}
+
+export interface RunStep {
+  name: string;
+  state: RunState;
+  durationSeconds: number;
+  /** ASSUMED: sub-steps known in advance (the flake checks a `nix flake check` step builds, from evaluation). */
+  checks?: string[];
+}
+
+export interface Run {
+  id: string;
+  repo: RepoRef;
+  /** Full ref the run was triggered for. */
+  ref: string;
+  commitId: string;
+  state: RunState;
+  createTime?: Timestamp;
+  /** Elapsed so far while running. */
+  durationSeconds: number;
+  runner: string;
+  trigger: "push" | "manual";
+  steps: RunStep[];
+}
+
+const RUN_STATE = {
+  queued: RunState.QUEUED,
+  running: RunState.RUNNING,
+  succeeded: RunState.SUCCEEDED,
+  failed: RunState.FAILED,
+  cancelled: RunState.CANCELLED,
+} as const;
+
+function toRun(r: (typeof MOCK_RUNS)[number]): Run {
+  return {
+    id: r.id,
+    repo: r.repo,
+    ref: r.ref,
+    commitId: r.commitId,
+    state: RUN_STATE[r.state],
+    createTime: { seconds: BigInt(r.created), nanos: 0 },
+    durationSeconds: r.duration,
+    runner: r.runner,
+    trigger: r.trigger,
+    steps: r.steps.map((s, i) => ({
+      name: s.name,
+      state: RUN_STATE[s.state],
+      durationSeconds: s.duration,
+      checks:
+        i === 2 && r.steps[1].state === "succeeded" ? [...CHECKS] : undefined,
+    })),
+  };
+}
+
+/** ASSUMED `ListRuns` — newest first, optionally for one repository and ref. */
+export async function listRuns(
+  req: { repo?: RepoRef; ref?: string; pageSize?: number } = {},
+) {
+  await mockGate();
+  const runs: Run[] = MOCK_RUNS.filter(
+    (r) =>
+      (!req.repo || r.repo === req.repo) && (!req.ref || r.ref === req.ref),
+  )
+    .sort((a, b) => b.created - a.created)
+    .slice(0, req.pageSize ?? 50)
+    .map(toRun);
+  return { runs };
+}
+
+/** ASSUMED `GetRun` — one run by id. NotFound if unknown or not visible. */
+export async function getRun(req: { id: string }): Promise<Run> {
+  await mockGate();
+  const r = MOCK_RUNS.find((x) => x.id === req.id);
+  if (!r) throw new ApiError(Code.NotFound, `run #${req.id} not found`);
+  return toRun(r);
+}
+
+export interface RunLogLine {
+  /** Seconds since the step started. */
+  offsetSeconds: number;
+  text: string;
+  /** `cmd` = a command the runner echoed before running it. */
+  stream: "out" | "err" | "cmd";
+  /** Flake check (derivation) this line belongs to, when known. */
+  group?: string;
+}
+
+/**
+ * ASSUMED `GetRunLog` — the log of one step. A running step returns what is
+ * there so far (`complete: false`); a real client would stream it
+ * (server-streaming RPC) and append.
+ */
+export async function getRunLog(req: { id: string; step: number }) {
+  await mockGate();
+  const r = MOCK_RUNS.find((x) => x.id === req.id);
+  if (!r) throw new ApiError(Code.NotFound, `run #${req.id} not found`);
+  const { lines, complete } = mockRunLog(r, req.step);
+  return {
+    lines: lines.map<RunLogLine>((l) => ({
+      offsetSeconds: l.t,
+      text: l.text,
+      stream: l.stream,
+      group: l.group,
+    })),
+    complete,
+  };
+}
+
+// ── mock internals
+
+/** Deterministic changed files of a commit (memoised). */
+const changeCache = new Map<string, Change[]>();
+function changesFor(repo: MockRepo, id: string): Change[] {
+  const key = repo.name + id;
+  const hit = changeCache.get(key);
+  if (hit) return hit;
+  const files = listFiles(repo.tree);
+  const seed = parseInt(id.slice(0, 8), 16);
+  const count = 1 + (seed % 6);
+  const changes: Change[] = [];
+  for (let i = 0; i < count && i < files.length; i++) {
+    const path = files[(seed + i * 7) % files.length];
+    if (changes.some((c) => c.path === path)) continue;
+    const kind = [
+      ChangeKind.MODIFIED,
+      ChangeKind.MODIFIED,
+      ChangeKind.ADDED,
+      ChangeKind.DELETED,
+    ][(seed >>> (i + 1)) % 4];
+    changes.push({
+      path,
+      kind,
+      oldId: kind === ChangeKind.ADDED ? ZERO_ID : fakeId(id + path + "old"),
+      newId: kind === ChangeKind.DELETED ? ZERO_ID : fakeId(id + path + "new"),
+    });
+  }
+  changeCache.set(key, changes);
+  return changes;
+}
+
+/**
+ * Text of `path` as of commit `id`: the current text minus one deterministic
+ * edit per later commit that touched the file, so consecutive revisions differ
+ * exactly where getCommitDiff says they do.
+ */
+function olderVersion(
+  repo: MockRepo,
+  id: string,
+  path: string,
+  text: string,
+): string {
+  const k = repo.commits.findIndex((c) => c.id === id);
+  if (k <= 0) return text;
+  const lines = text.split("\n");
+  for (let j = 0; j < k; j++) {
+    if (!changesFor(repo, repo.commits[j].id).some((c) => c.path === path))
+      continue;
+    const h = parseInt(repo.commits[j].id.slice(8, 16), 16);
+    const at = h % Math.max(1, lines.length - 1);
+    if (h % 3 === 0 && lines.length > 2) lines.splice(at, 1);
+    else if (h % 3 === 1) lines[at] = (lines[at] ?? "") + "  // revised later";
+    else
+      lines.splice(
+        at,
+        0,
+        `// (older) ${repo.commits[j].message.split("\n")[0]}`,
+      );
+  }
+  return lines.join("\n");
+}
+
+type Scenario =
+  | "slow"
+  | "error"
+  | "unauth"
+  | "empty"
+  | "member"
+  | "broken"
+  | null;
 
 function scenario(): Scenario {
   if (typeof location === "undefined") return null;
@@ -687,6 +852,11 @@ async function mockGate() {
     throw new ApiError(Code.Unavailable, "kajiba-server is unreachable");
   if (s === "unauth")
     throw new ApiError(Code.Unauthenticated, "sign in required");
+  if (s === "broken")
+    throw new ApiError(
+      Code.Unknown,
+      "internal: database is locked (SQLITE_BUSY)",
+    );
 }
 
 const KIND: Record<MockNode["kind"], EntryKind> = {

@@ -63,7 +63,7 @@ function largeNdjson(): Uint8Array {
         ref: "refs/heads/main",
         old: fakeId("o" + i),
         new: fakeId("n" + i),
-        pusher: i % 7 === 0 ? "mika" : "alice",
+        pusher: i % 7 === 0 ? "mika" : "scorsi",
         at: 1767225600 + i * 613,
       }),
     );
@@ -98,10 +98,10 @@ Add the flake input and enable the module:
 
 \`\`\`nix
 {
-  inputs.kajiba.url = "git+https://git.example.org/alice/kajiba";
+  inputs.kajiba.url = "git+https://git.example.org/scorsi/kajiba";
 
   outputs = { kajiba, ... }: {
-    nixosConfigurations.forge = {
+    nixosConfigurations.builder = {
       modules = [
         kajiba.nixosModules.default
         { services.kajiba.enable = true; }
@@ -114,7 +114,7 @@ Add the flake input and enable the module:
 Then clone a repository:
 
 \`\`\`sh
-git clone ssh://kajiba-git@git.example.org:2222/alice/kajiba.git
+git clone ssh://kajiba-git@git.example.org:2222/scorsi/kajiba.git
 \`\`\`
 
 ## Components
@@ -160,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
 `;
 
 const kajibaTree = t({
-  ".github": t({ CODEOWNERS: b("* @alice\n") }),
+  ".github": t({ CODEOWNERS: b("* @scorsi\n") }),
   crates: t({
     "kajiba-server": t({
       "Cargo.toml": b(
@@ -203,7 +203,7 @@ const kajibaTree = t({
   }),
   frontend: {
     kind: "submodule",
-    url: "https://git.example.org/alice/kajiba-frontend.git",
+    url: "https://git.example.org/scorsi/kajiba-frontend.git",
   },
   proto: t({
     kajiba: t({
@@ -234,12 +234,10 @@ const kajibaTree = t({
 
 const infraTree = t({
   hosts: t({
-    workstation: t({
-      "default.nix": b(
-        '{ ... }: {\n  networking.hostName = "workstation";\n}\n',
-      ),
+    laptop: t({
+      "default.nix": b('{ ... }: {\n  networking.hostName = "laptop";\n}\n'),
     }),
-    forge: t({
+    builder: t({
       "default.nix": b("{ ... }: {\n  services.kajiba.enable = true;\n}\n"),
     }),
   }),
@@ -248,7 +246,7 @@ const infraTree = t({
     '{\n  description = "infra — my homelab";\n  outputs = { ... }: { };\n}\n',
   ),
   "README.md": b(
-    "# infra\n\nthe blueprint of my homelab: a Mac Mini host and its NixOS guests.\n\n```sh\nnix flake check\n```\n",
+    "# infra\n\n設計図 — the blueprint of my homelab: a Mac Mini host and its NixOS guests.\n\n```sh\nnix flake check\n```\n",
   ),
 });
 
@@ -343,7 +341,7 @@ function makeHistory(
   return commits;
 }
 
-const ALICE: [string, string] = ["Alice", "alice@kajiba.invalid"];
+const SCORSI: [string, string] = ["Scorsi", "scorsi@kajiba.invalid"];
 const MIKA: [string, string] = ["Mika Arai", "mika@kajiba.invalid"];
 const NOW = Math.floor(Date.now() / 1000);
 
@@ -369,20 +367,20 @@ export interface MockRepo {
 export const MOCK_REPOS: MockRepo[] = [
   {
     publicId: "r_7k2m9q",
-    owner: "alice",
+    owner: "scorsi",
     name: "kajiba",
     description: "A small, declarative, self-hosted git forge.",
     defaultBranch: "refs/heads/main",
     ci: "push",
     previousNames: ["forge"],
     permissions: [
-      { user: "alice", role: "admin" },
+      { user: "scorsi", role: "admin" },
       { user: "mika", role: "write" },
       { user: "ren", role: "read" },
     ],
     mirrors: [
       {
-        remoteUrl: "git@github.com:alice/kajiba.git",
+        remoteUrl: "git@github.com:scorsi/kajiba.git",
         credential: "github-deploy-key",
         enabled: true,
       },
@@ -390,9 +388,9 @@ export const MOCK_REPOS: MockRepo[] = [
     archived: false,
     tree: kajibaTree,
     commits: makeHistory("kajiba", 420, NOW - 3 * 3600, [
-      ALICE,
-      ALICE,
-      ALICE,
+      SCORSI,
+      SCORSI,
+      SCORSI,
       MIKA,
     ]),
     refs: {
@@ -407,55 +405,55 @@ export const MOCK_REPOS: MockRepo[] = [
   },
   {
     publicId: "r_3fh81c",
-    owner: "alice",
+    owner: "scorsi",
     name: "infra",
     description: "My homelab: nix-darwin host and NixOS guests.",
     defaultBranch: "refs/heads/main",
     ci: "push",
     previousNames: [],
-    permissions: [{ user: "alice", role: "admin" }],
+    permissions: [{ user: "scorsi", role: "admin" }],
     mirrors: [
       {
-        remoteUrl: "git@github.com:alice/infra.git",
+        remoteUrl: "git@github.com:scorsi/infra.git",
         credential: "github-deploy-key",
         enabled: true,
       },
     ],
     archived: false,
     tree: infraTree,
-    commits: makeHistory("infra", 64, NOW - 26 * 3600, [ALICE]),
+    commits: makeHistory("infra", 64, NOW - 26 * 3600, [SCORSI]),
     refs: { "refs/heads/main": 0 },
   },
   {
     publicId: "r_9xq2la",
-    owner: "alice",
+    owner: "scorsi",
     name: "hikouki",
     description: "Starship-like toolkit for Claude Code.",
     defaultBranch: "refs/heads/main",
     ci: "off",
     previousNames: [],
-    permissions: [{ user: "alice", role: "admin" }],
+    permissions: [{ user: "scorsi", role: "admin" }],
     mirrors: [
       {
-        remoteUrl: "git@github.com:alice/hikouki.git",
+        remoteUrl: "git@github.com:scorsi/hikouki.git",
         credential: "github-deploy-key",
         enabled: true,
       },
     ],
     archived: false,
     tree: hikoukiTree,
-    commits: makeHistory("hikouki", 9, NOW - 9 * 86400, [ALICE]),
+    commits: makeHistory("hikouki", 9, NOW - 9 * 86400, [SCORSI]),
     refs: { "refs/heads/main": 0, "refs/tags/v0.1.0": 2 },
   },
   {
     publicId: "r_44pd0z",
-    owner: "alice",
+    owner: "scorsi",
     name: "scratch",
     description: "",
     defaultBranch: "refs/heads/main",
     ci: "off",
     previousNames: [],
-    permissions: [{ user: "alice", role: "admin" }],
+    permissions: [{ user: "scorsi", role: "admin" }],
     mirrors: [],
     archived: false,
     tree: t({}),
@@ -464,23 +462,23 @@ export const MOCK_REPOS: MockRepo[] = [
   },
   {
     publicId: "r_0c1dot",
-    owner: "alice",
+    owner: "scorsi",
     name: "dotfiles",
     description: "Old dotfiles, superseded by infra.",
     defaultBranch: "refs/heads/master",
     ci: "off",
     previousNames: [],
-    permissions: [{ user: "alice", role: "admin" }],
+    permissions: [{ user: "scorsi", role: "admin" }],
     mirrors: [
       {
-        remoteUrl: "git@github.com:alice/dotfiles.git",
+        remoteUrl: "git@github.com:scorsi/dotfiles.git",
         credential: "github-deploy-key",
         enabled: false,
       },
     ],
     archived: true,
     tree: dotfilesTree,
-    commits: makeHistory("dotfiles", 40, NOW - 400 * 86400, [ALICE]),
+    commits: makeHistory("dotfiles", 40, NOW - 400 * 86400, [SCORSI]),
     refs: { "refs/heads/master": 0 },
   },
   {
@@ -493,7 +491,7 @@ export const MOCK_REPOS: MockRepo[] = [
     previousNames: [],
     permissions: [
       { user: "mika", role: "admin" },
-      { user: "alice", role: "read" },
+      { user: "scorsi", role: "read" },
     ],
     mirrors: [],
     archived: false,
@@ -504,44 +502,43 @@ export const MOCK_REPOS: MockRepo[] = [
 ];
 
 /** Signed-in user of the mock session. */
-export const MOCK_VIEWER = { user: "alice", admin: true };
 
 // ── runners & stats (ASSUMED services, see api.ts) ──────────────────────
 
 export const MOCK_RUNNERS = [
   {
-    name: "forge-1",
-    host: "forge",
+    name: "builder-1",
+    host: "builder",
     backend: "nix",
     labels: ["nix", "x86_64-linux"],
     state: "busy" as const,
     lastSeen: NOW - 4,
     currentRun: {
       id: "1287",
-      repo: "alice/kajiba",
+      repo: "scorsi/kajiba",
       ref: "refs/heads/main",
       startedAt: NOW - 140,
     },
   },
   {
-    name: "forge-2",
-    host: "forge",
+    name: "builder-2",
+    host: "builder",
     backend: "nspawn",
     labels: ["nix", "x86_64-linux", "nspawn"],
     state: "idle" as const,
     lastSeen: NOW - 9,
   },
   {
-    name: "workstation-1",
-    host: "workstation",
+    name: "laptop-1",
+    host: "laptop",
     backend: "nix",
     labels: ["nix", "aarch64-darwin"],
     state: "idle" as const,
     lastSeen: NOW - 21,
   },
   {
-    name: "workstation-vm",
-    host: "workstation",
+    name: "laptop-vm",
+    host: "laptop",
     backend: "microvm",
     labels: ["nix", "aarch64-linux", "microvm"],
     state: "offline" as const,
@@ -549,22 +546,8 @@ export const MOCK_RUNNERS = [
   },
 ];
 
-/** Commits per day over the last 30 days, oldest first. */
-const activity = Array.from({ length: 30 }, (_, i) => {
-  const d = new Date((NOW - (29 - i) * 86400) * 1000).getUTCDay();
-  return d === 0 || d === 6 ? 1 + (hash32("a" + i) % 9) : hash32("a" + i) % 5;
-});
-
-export const MOCK_STATS = {
-  repositories: MOCK_REPOS.length,
-  archived: MOCK_REPOS.filter((r) => r.archived).length,
-  commits30d: activity.reduce((a, b) => a + b, 0),
-  activity30d: activity,
-  runs7d: { succeeded: 38, failed: 4, cancelled: 1 },
-  runMedianSeconds: 212,
-  mirrors: { ok: 2, failing: 0, disabled: 1 },
-  diskBytes: 1_842_000_000,
-};
+/** Repository storage on disk (GetServerInfo). */
+export const MOCK_DISK_BYTES = 1_842_000_000;
 
 /** Push-mirror outcome per (repo, remote). */
 export const MOCK_MIRROR_STATUS: Record<
@@ -578,25 +561,25 @@ export const MOCK_MIRROR_STATUS: Record<
     nextAttempt?: number;
   }
 > = {
-  "alice/kajiba git@github.com:alice/kajiba.git": {
+  "scorsi/kajiba git@github.com:scorsi/kajiba.git": {
     state: "ok",
     lastAttempt: NOW - 3 * 3600,
     lastSuccess: NOW - 3 * 3600,
   },
-  "alice/infra git@github.com:alice/infra.git": {
+  "scorsi/infra git@github.com:scorsi/infra.git": {
     state: "ok",
     lastAttempt: NOW - 26 * 3600,
     lastSuccess: NOW - 26 * 3600,
   },
-  "alice/hikouki git@github.com:alice/hikouki.git": {
+  "scorsi/hikouki git@github.com:scorsi/hikouki.git": {
     state: "failing",
     lastAttempt: NOW - 600,
     lastSuccess: NOW - 9 * 86400,
-    error: "remote: Permission to alice/hikouki.git denied to deploy key.",
+    error: "remote: Permission to scorsi/hikouki.git denied to deploy key.",
     attempts: 7,
     nextAttempt: NOW + 1800,
   },
-  "alice/dotfiles git@github.com:alice/dotfiles.git": {
+  "scorsi/dotfiles git@github.com:scorsi/dotfiles.git": {
     state: "disabled",
     lastSuccess: NOW - 400 * 86400,
   },
@@ -609,5 +592,394 @@ export const MOCK_SERVER = {
   configGeneration: "infra@" + fakeId("gen").slice(0, 7),
   databaseBytes: 18_400_000,
   declaredTokens: 2,
-  users: ["alice", "mika", "ren"],
+  users: ["scorsi", "mika", "ren"],
 };
+
+// ── account (ASSUMED auth service) — mutable, in memory ─────────────────
+
+export const MOCK_PASSKEYS = [
+  {
+    id: "pk_1",
+    name: "YubiKey 5C NFC",
+    created: NOW - 40 * 86400,
+    lastUsed: NOW - 3 * 3600,
+  },
+  {
+    id: "pk_2",
+    name: "YubiKey 5C (backup)",
+    created: NOW - 40 * 86400,
+    lastUsed: NOW - 31 * 86400,
+  },
+];
+
+export const MOCK_TOKENS = [
+  {
+    id: "tok_ci",
+    name: "kajiba-cli on laptop",
+    scopes: ["repo:read", "ci:trigger"],
+    created: NOW - 12 * 86400,
+    expires: NOW + 78 * 86400,
+    lastUsed: NOW - 2 * 3600,
+    declared: false,
+  },
+  {
+    id: "tok_old",
+    name: "laptop scripts",
+    scopes: ["repo:read"],
+    created: NOW - 85 * 86400,
+    expires: NOW + 5 * 86400,
+    lastUsed: NOW - 20 * 86400,
+    declared: false,
+  },
+  {
+    id: "tok_backup",
+    name: "backup-pull",
+    scopes: ["repo:read"],
+    created: NOW - 200 * 86400,
+    expires: undefined,
+    lastUsed: NOW - 9 * 3600,
+    declared: true,
+  },
+  {
+    id: "tok_infra",
+    name: "infra-deploy",
+    scopes: ["repo:read"],
+    created: NOW - 200 * 86400,
+    expires: NOW + 165 * 86400,
+    lastUsed: NOW - 26 * 3600,
+    declared: true,
+  },
+];
+
+// ── CI runs (ASSUMED run service) ───────────────────────────────────────
+
+export interface MockRun {
+  id: string;
+  repo: string;
+  ref: string;
+  commitId: string;
+  state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  created: number;
+  duration: number; // seconds (elapsed so far when running)
+  runner: string;
+  trigger: "push" | "manual";
+  steps: { name: string; state: MockRun["state"]; duration: number }[];
+}
+
+const STEP_NAMES = ["Fetch", "Evaluate flake", "nix flake check", "Report"];
+
+function makeRuns(repo: MockRepo, firstId: number, count: number): MockRun[] {
+  const runners = ["builder-1", "builder-2", "laptop-1"];
+  return repo.commits.slice(0, count).map((c, i) => {
+    const h = hash32(c.id);
+    const state: MockRun["state"] =
+      i === 0 && repo.name === "kajiba"
+        ? "running"
+        : h % 7 === 0
+          ? "failed"
+          : h % 29 === 0
+            ? "cancelled"
+            : "succeeded";
+    const total = 120 + (h % 280);
+    const failAt = state === "failed" ? 1 + (h % 3) : -1;
+    const steps = STEP_NAMES.map((name, s) => {
+      const d = Math.round(total * [0.08, 0.17, 0.7, 0.05][s]);
+      let st: MockRun["state"] = "succeeded";
+      if (state === "running")
+        st = s < 2 ? "succeeded" : s === 2 ? "running" : "queued";
+      if (state === "failed")
+        st = s < failAt ? "succeeded" : s === failAt ? "failed" : "cancelled";
+      if (state === "cancelled") st = s < 2 ? "succeeded" : "cancelled";
+      return {
+        name,
+        state: st,
+        duration: st === "queued" || st === "cancelled" ? 0 : d,
+      };
+    });
+    return {
+      id: String(firstId - i),
+      repo: `${repo.owner}/${repo.name}`,
+      ref: repo.defaultBranch,
+      commitId: c.id,
+      state,
+      created: c.time + 20,
+      duration: state === "running" ? 140 : total,
+      runner: state === "running" ? "builder-1" : runners[h % runners.length],
+      trigger: h % 11 === 0 ? "manual" : "push",
+      steps,
+    };
+  });
+}
+
+export const MOCK_RUNS: MockRun[] = [
+  ...makeRuns(MOCK_REPOS[0], 1287, 60),
+  ...makeRuns(MOCK_REPOS[1], 912, 30),
+];
+
+// ── CI logs (ASSUMED GetRunLog) ─────────────────────────────────────────
+
+export interface MockLogLine {
+  /** Seconds since the step started. */
+  t: number;
+  text: string;
+  stream: "out" | "err" | "cmd";
+  /** The flake check (derivation) the line belongs to, if any. */
+  group?: string;
+}
+
+const TESTS = [
+  "git::refs::resolves_default_branch",
+  "git::refs::rejects_dangling_symref",
+  "git::tree::lists_root",
+  "git::tree::follows_symlinks",
+  "git::blob::detects_binary",
+  "git::blob::caps_size",
+  "http::pack::serves_info_refs",
+  "http::pack::streams_large_packs",
+  "http::pack::rejects_push",
+  "ssh::auth::accepts_signed_push",
+  "ssh::auth::rejects_unsigned_push",
+  "ssh::auth::rejects_archived_repo",
+  "rpc::repo::list_repos_paginates",
+  "rpc::repo::get_tree_not_found",
+  "rpc::repo::get_blob_range",
+  "rpc::commits::path_filter",
+  "config::validate::reserved_owner_dash",
+  "config::validate::duplicate_repo",
+  "config::validate::unknown_runner_label",
+  "mirror::backoff::exponential",
+  "mirror::backoff::caps_at_one_hour",
+  "mirror::push::reports_failure",
+  "ci::runner::assigns_by_label",
+  "ci::runner::requeues_on_disconnect",
+  "ci::log::streams_in_order",
+  "auth::passkey::enrolment_expires",
+  "auth::token::scopes_enforced",
+  "auth::token::declared_tokens_readonly",
+  "frontend::embed::serves_index",
+  "frontend::embed::spa_fallback",
+];
+const CRATES = [
+  "proc-macro2 v1.0.95",
+  "serde v1.0.219",
+  "tokio v1.48.0",
+  "prost v0.14.1",
+  "gix v0.73.0",
+  "axum v0.8.4",
+  "rusqlite v0.37.0",
+  "kajiba-proto v0.4.1 (/build/source/proto)",
+];
+export const CHECKS = ["fmt", "clippy", "frontend", "tests", "nixos-smoke"];
+
+/**
+ * Deterministic log of one step of a run. A running step is cut where the
+ * run is now (`complete: false`); a step that never ran has no lines.
+ */
+export function mockRunLog(
+  run: MockRun,
+  step: number,
+): { lines: MockLogLine[]; complete: boolean } {
+  const st = run.steps[step];
+  if (
+    !st ||
+    st.state === "queued" ||
+    (st.state === "cancelled" && st.duration === 0)
+  )
+    return { lines: [], complete: st?.state !== "queued" };
+  const repo = MOCK_REPOS.find((r) => `${r.owner}/${r.name}` === run.repo)!;
+  const commit = repo.commits.find((c) => c.id === run.commitId);
+  const subject = commit?.message.split("\n")[0] ?? "";
+  const short = run.commitId.slice(0, 7);
+  const h = hash32(run.id);
+  const failed = st.state === "failed";
+  const raw: Omit<MockLogLine, "t">[] = [];
+  const out = (text: string, group?: string) =>
+    raw.push({ text, stream: "out", group });
+  const err = (text: string, group?: string) =>
+    raw.push({ text, stream: "err", group });
+  const cmd = (text: string, group?: string) =>
+    raw.push({ text, stream: "cmd", group });
+  const drv = (name: string) =>
+    `/nix/store/${fakeId(name + run.id).slice(0, 32)}-${name}.drv`;
+
+  if (step === 0) {
+    cmd(`git fetch --no-tags --depth=1 kajiba:${run.repo} ${run.ref}`);
+    out(`From kajiba:${run.repo}`);
+    out(
+      ` * branch            ${run.ref.replace("refs/heads/", "")} -> FETCH_HEAD`,
+    );
+    cmd(`git checkout --detach ${short}`);
+    out(`HEAD is now at ${short} ${subject}`);
+    out(
+      `Good "git" signature for ${commit?.authorName.toLowerCase().split(" ")[0] ?? "scorsi"} with ED25519 key SHA256:${fakeId("key").slice(0, 24)}`,
+    );
+    out("checkout done in 0.8s");
+  } else if (step === 1) {
+    cmd("nix eval .#checks.x86_64-linux --apply builtins.attrNames --json");
+    if (failed) {
+      err("error: attribute 'kajiba-frontend' missing");
+      err("       at /nix/store/9x1q…-source/flake.nix:48:21:");
+      err("           47|       checks.${system}.frontend =");
+      err("           48|         self.packages.${system}.kajiba-frontend;");
+      err("             |                     ^");
+      err("       Did you mean 'kajiba-server'?");
+      err("       (use '--show-trace' to show detailed location information)");
+    } else {
+      out(JSON.stringify(CHECKS));
+      cmd(
+        "nix build --dry-run .#checks.x86_64-linux.{" + CHECKS.join(",") + "}",
+      );
+      out(`these ${CHECKS.length} derivations will be built:`);
+      for (const c of CHECKS) out(`  ${drv("kajiba-" + c + "-0.4.1")}`);
+      out(
+        `these ${180 + (h % 60)} paths will be fetched (412.6 MiB download, 1.9 GiB unpacked):`,
+      );
+      out("  from https://cache.infra (substituter)");
+    }
+  } else if (step === 2) {
+    cmd("nix flake check --print-build-logs --keep-going");
+    const failTest =
+      failed && /frontend|embed/.test(subject)
+        ? "frontend::embed::spa_fallback"
+        : failed
+          ? TESTS[h % TESTS.length]
+          : "";
+    // fmt
+    let g = "fmt";
+    out(`building '${drv("kajiba-fmt-0.4.1")}'...`, g);
+    cmd("treefmt --fail-on-change --no-cache", g);
+    out(`traversed ${300 + (h % 90)} files`, g);
+    out("emitted 0 files for processing", g);
+    out("formatted 0 files in 412ms", g);
+    // clippy
+    g = "clippy";
+    out(`building '${drv("kajiba-clippy-0.4.1")}'...`, g);
+    for (const c of CRATES) out(`   Compiling ${c}`, g);
+    out("    Checking kajiba-server v0.4.1 (/build/source/server)", g);
+    out("    Finished `release` profile [optimized] target(s) in 48.21s", g);
+    // frontend
+    g = "frontend";
+    out(`building '${drv("kajiba-frontend-check-0.4.1")}'...`, g);
+    cmd("pnpm check", g);
+    out("svelte-check found 0 errors and 0 warnings", g);
+    cmd("pnpm build", g);
+    out("vite v8.3.0 building for production...", g);
+    out("✓ 412 modules transformed.", g);
+    out(
+      "build/_app/immutable/entry/start.C1u7.js       0.08 kB │ gzip:  0.09 kB",
+      g,
+    );
+    out(
+      "build/_app/immutable/chunks/index.B2xk.js     41.37 kB │ gzip: 15.02 kB",
+      g,
+    );
+    out(
+      "build/_app/immutable/nodes/2.D9qa.js          28.10 kB │ gzip:  9.84 kB",
+      g,
+    );
+    out("✓ built in 3.41s", g);
+    // tests
+    g = "tests";
+    out(`building '${drv("kajiba-tests-0.4.1")}'...`, g);
+    out(
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 02s",
+      g,
+    );
+    out(
+      "     Running unittests src/main.rs (target/debug/deps/kajiba_server-3f2a)",
+      g,
+    );
+    out("", g);
+    out(`running ${TESTS.length} tests`, g);
+    for (const name of TESTS)
+      if (name === failTest) err(`test ${name} ... FAILED`, g);
+      else out(`test ${name} ... ok`, g);
+    out("", g);
+    if (failTest) {
+      out("failures:", g);
+      out("", g);
+      out(`---- ${failTest} stdout ----`, g);
+      const mod = failTest.split("::").slice(0, 2).join("/");
+      err(
+        `thread '${failTest}' panicked at server/src/${mod}.rs:${40 + (h % 160)}:9:`,
+        g,
+      );
+      err("assertion `left == right` failed", g);
+      err("  left: 404", g);
+      err(" right: 200", g);
+      out(
+        "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+        g,
+      );
+      out("", g);
+      out("failures:", g);
+      out(`    ${failTest}`, g);
+      out("", g);
+      err(
+        `test result: FAILED. ${TESTS.length - 1} passed; 1 failed; 0 ignored; finished in 4.12s`,
+        g,
+      );
+      err(
+        `error: builder for '${drv("kajiba-tests-0.4.1")}' failed with exit code 101`,
+      );
+      err(
+        "error: 1 dependencies of derivation 'checks.x86_64-linux.tests' failed to build",
+      );
+    } else {
+      out(
+        `test result: ok. ${TESTS.length} passed; 0 failed; 0 ignored; finished in 4.02s`,
+        g,
+      );
+      g = "nixos-smoke";
+      out(`building '${drv("vm-test-run-kajiba-smoke")}'...`, g);
+      out("machine: starting vm", g);
+      out(
+        "machine # [    0.000000] Linux version 6.12.30 (nixbld@localhost)",
+        g,
+      );
+      out("machine: waiting for unit kajiba-server.service", g);
+      out(
+        "machine: (finished: waiting for unit kajiba-server.service, in 6.42 seconds)",
+        g,
+      );
+      out("machine: must succeed: curl -sf http://localhost:3000/-/health", g);
+      out(
+        "machine: (finished: must succeed: curl -sf http://localhost:3000/-/health, in 0.05 seconds)",
+        g,
+      );
+      out("test script finished in 21.47s", g);
+      out(`all ${CHECKS.length} checks passed`);
+    }
+  } else {
+    const ok = run.steps.slice(0, 3).every((s) => s.state === "succeeded");
+    cmd(`kajiba-ci report --run ${run.id}`);
+    out(`commit status ${run.repo}@${short}: ${ok ? "success" : "failure"}`);
+    out("notifying ntfy topic kajiba-ci");
+    if (failed) {
+      err(
+        "error: POST https://ntfy.infra/kajiba-ci: connection refused (os error 111)",
+      );
+      out("retrying in 2s (attempt 2/3)");
+      err(
+        "error: POST https://ntfy.infra/kajiba-ci: connection refused (os error 111)",
+      );
+      out("retrying in 4s (attempt 3/3)");
+      err("error: giving up after 3 attempts");
+    } else out("done");
+  }
+
+  // timestamps spread over the step; a running step is cut at "now"
+  const running = st.state === "running";
+  const before = run.steps.slice(0, step).reduce((a, s) => a + s.duration, 0);
+  const elapsed = running
+    ? Math.max(1, run.duration - before)
+    : Math.max(1, st.duration);
+  const total = running ? Math.max(elapsed * 1.9, elapsed + 30) : elapsed;
+  const lines: MockLogLine[] = raw.map((l, i) => ({
+    ...l,
+    t: Math.round(((i + 1) / raw.length) * total * 10) / 10,
+  }));
+  return running
+    ? { lines: lines.filter((l) => l.t <= elapsed), complete: false }
+    : { lines, complete: true };
+}

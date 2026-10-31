@@ -1,9 +1,9 @@
 <!-- "Clone" disclosure with HTTPS and SSH URLs. Hidden for archived repos (transport refused). -->
 <script lang="ts">
 	import { cloneUrls } from '#lib/format.ts';
-	import CopyButton from './CopyButton.svelte';
-	import Icon from './Icon.svelte';
-	import Popover from './Popover.svelte';
+	import CopyButton from '#lib/components/CopyButton.svelte';
+	import Icon from '#lib/components/Icon.svelte';
+	import Popover from '#lib/components/Popover.svelte';
 
 	let { owner, name }: { owner: string; name: string } = $props();
 	const urls = $derived(cloneUrls(owner, name));

@@ -1,62 +1,38 @@
-<!-- Repository home: files at the default branch, details, README. -->
+<!--
+	/<owner>/<name> — the repository view. Everything else (path, ref, time
+	travel, folded bands) is in the query string, so one route serves the
+	README, files, history and commits. A previous name redirects to the
+	current one (declared renames).
+-->
 <script lang="ts">
-	import EmptyRepo from '#lib/components/EmptyRepo.svelte';
-	import FileList from '#lib/components/FileList.svelte';
-	import Markdown from '#lib/components/Markdown.svelte';
-	import RepoDetails from '#lib/components/RepoDetails.svelte';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import Skeleton from '#lib/components/Skeleton.svelte';
 	import StateView from '#lib/components/StateView.svelte';
-	import { getRepoContext } from '#lib/context.ts';
-	import { refShortName } from '#lib/format.ts';
-	import { loadDirectory } from '#lib/loaders.ts';
+	import { findRepo } from '#lib/loaders.ts';
 	import { resource } from '#lib/resource.svelte.ts';
-	import { treeHref } from '#lib/repo-ui.ts';
+	import RepoView from '#lib/views/RepoView.svelte';
 
-	const ctx = getRepoContext();
-	const empty = $derived(!ctx.refs.some((r) => r.name === ctx.repo.defaultBranch));
-	const dir = resource(() =>
-		empty ? Promise.resolve(undefined) : loadDirectory(ctx.key, ctx.repo.defaultBranch)
-	);
+	const found = resource(() => {
+		const owner = page.params.owner ?? '';
+		const name = page.params.name ?? '';
+		return findRepo(owner, name);
+	});
+	const repoKey = $derived(found.data ? `${found.data.repo.owner}/${found.data.repo.name}` : '');
+
+	$effect(() => {
+		if (found.data?.renamedFrom) goto(`/${repoKey}${page.url.search}`, { replace: true });
+	});
 </script>
 
-{#if empty}
-	<EmptyRepo repo={ctx.repo} />
-{:else if dir.error}
-	<StateView error={dir.error} onretry={dir.retry} />
-{:else}
-	<div class="grid gap-5 xl:grid-cols-[22rem_minmax(0,1fr)]">
-		<div class="min-w-0 space-y-5">
-			{#if dir.data}
-				<FileList
-					repo={ctx.repo}
-					refs={ctx.refs}
-					revision={ctx.repo.defaultBranch}
-					entries={dir.data.entries}
-					lastCommit={dir.data.lastCommit}
-				/>
-			{:else}
-				<div class="rounded-md border border-border bg-surface p-3"><Skeleton lines={10} /></div>
-			{/if}
-			<RepoDetails repo={ctx.repo} />
-		</div>
+<svelte:head
+	><title>{repoKey || `${page.params.owner}/${page.params.name}`} · kajiba</title></svelte:head
+>
 
-		{#if !dir.data}
-			<div class="rounded-md border border-border bg-surface p-7"><Skeleton lines={8} /></div>
-		{:else if dir.data.readme}
-			<article class="min-w-0 rounded-md border border-border bg-surface">
-				<h2 class="border-b border-border px-5 py-2.5 text-[0.8125rem] font-medium text-fg-muted">
-					{dir.data.readme.name}
-				</h2>
-				<Markdown
-					source={dir.data.readme.source}
-					linkBase={treeHref(ctx.repo, ctx.repo.defaultBranch) + '/'}
-					class="p-5 sm:p-7"
-				/>
-			</article>
-		{:else}
-			<p class="text-[0.8125rem] text-fg-subtle">
-				No README at the root of {refShortName(ctx.repo.defaultBranch)}.
-			</p>
-		{/if}
-	</div>
+{#if found.error}
+	<StateView error={found.error} onretry={found.retry} what="repository" />
+{:else if !found.data || found.data.renamedFrom}
+	<div class="p-6"><Skeleton lines={10} /></div>
+{:else}
+	{#key repoKey}<RepoView {repoKey} />{/key}
 {/if}

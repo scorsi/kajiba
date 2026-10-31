@@ -6,7 +6,7 @@
  */
 
 export interface RenderOptions {
-  /** Base used to resolve relative links, e.g. `/alice/kajiba/tree/main/docs/`. */
+  /** Base used to resolve relative links, e.g. `/scorsi/kajiba/tree/main/docs/`. */
   linkBase?: string;
 }
 

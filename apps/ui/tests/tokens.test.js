@@ -70,8 +70,6 @@ test("account token actions use TokenService and preserve server metadata", asyn
     });
   });
 
-  assert.equal(api.enrollPasskey, undefined);
-  assert.equal(api.listPasskeys, undefined);
   const { tokens } = await api.listTokens();
   assert.equal(tokens.length, 2);
   assert.equal(tokens[0].id, "runtime-id");

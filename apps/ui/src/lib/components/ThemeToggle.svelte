@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Icon from './Icon.svelte';
+	import Icon from '#lib/components/Icon.svelte';
 	import { theme, setTheme, type ThemeChoice } from '#lib/theme.svelte.ts';
 
 	const ORDER: ThemeChoice[] = ['system', 'light', 'dark'];

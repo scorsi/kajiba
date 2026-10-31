@@ -1,11 +1,12 @@
 <!--
-	Uniform loading / error states for every page.
+	Uniform error states for every page and band, in the Pulse grammar: a
+	status label, one sentence, what to do next.
 	`error` is an ApiError (or ConnectError — same `.code`) or anything else.
 -->
 <script lang="ts">
 	import { page } from '$app/state';
 	import { Code } from '#lib/api.ts';
-	import Icon from './Icon.svelte';
+	import Icon, { type IconName } from '#lib/components/Icon.svelte';
 
 	let {
 		error,
@@ -19,50 +20,86 @@
 			: undefined
 	);
 	const message = $derived(error instanceof Error ? error.message : String(error));
+	const next = $derived(
+		encodeURIComponent(page.url.pathname + page.url.search.replace(/[?&]mock=[^&]*/, ''))
+	);
+
+	const view = $derived.by((): { status: string; icon: IconName; tone: string; title: string } => {
+		switch (code) {
+			case Code.NotFound:
+				return {
+					status: '404 · not found',
+					icon: 'search',
+					tone: 'text-fg-subtle',
+					title: `No such ${what}`
+				};
+			case Code.Unauthenticated:
+				return {
+					status: '401 · signed out',
+					icon: 'key',
+					tone: 'text-fg-subtle',
+					title: 'Sign in required'
+				};
+			case Code.PermissionDenied:
+				return {
+					status: '403 · no access',
+					icon: 'lock',
+					tone: 'text-fg-subtle',
+					title: 'You don’t have access'
+				};
+			case Code.Unavailable:
+				return {
+					status: '503 · unavailable',
+					icon: 'server',
+					tone: 'text-danger',
+					title: 'kajiba-server is unreachable'
+				};
+			default:
+				return {
+					status: 'error',
+					icon: 'alert',
+					tone: 'text-danger',
+					title: 'Something went wrong'
+				};
+		}
+	});
+	const btn =
+		'inline-flex h-8 items-center gap-1.5 rounded-sm border border-border bg-bg px-3 text-[0.8125rem] hover:bg-surface-2';
 </script>
 
-<div class="mx-auto max-w-md px-4 py-16 text-center" role="alert">
-	{#if code === Code.NotFound}
-		<p class="font-mono text-3xl font-semibold text-fg-subtle">404</p>
-		<h1 class="mt-2 text-base font-semibold">Not found</h1>
-		<p class="mt-1 text-fg-muted">
-			This {what} does not exist, or you don't have access to it.
+<section class="border-b border-border bg-surface px-4 py-8 sm:px-6" role="alert">
+	<div class="max-w-xl">
+		<p class="flex items-center gap-2 text-xs tracking-wide text-fg-subtle uppercase">
+			<Icon name={view.icon} size={12} class={view.tone} />{view.status}
 		</p>
-		<a href="/" class="mt-4 inline-block text-link hover:underline">Back to repositories</a>
-	{:else if code === Code.Unauthenticated}
-		<Icon name="key" size={28} class="mx-auto text-fg-subtle" />
-		<h1 class="mt-3 text-base font-semibold">Sign in required</h1>
-		<p class="mt-1 text-fg-muted">Your session has expired or you are not signed in.</p>
-		<a
-			href="/-/login?next={encodeURIComponent(
-				page.url.pathname + page.url.search.replace(/[?&]mock=[^&]*/, '')
-			)}"
-			class="mt-4 inline-flex h-8 items-center rounded-sm bg-accent px-3 font-medium text-accent-fg"
-			>Sign in with a passkey</a
-		>
-	{:else if code === Code.PermissionDenied}
-		<Icon name="lock" size={28} class="mx-auto text-fg-subtle" />
-		<h1 class="mt-3 text-base font-semibold">No access</h1>
-		<p class="mt-1 text-fg-muted">Access is declared in the server configuration.</p>
-	{:else}
-		<Icon name="x" size={28} class="mx-auto text-danger" />
-		<h1 class="mt-3 text-base font-semibold">
-			{code === Code.Unavailable ? 'kajiba-server is unreachable' : 'Something went wrong'}
-		</h1>
-		{#if code !== Code.Unavailable}
-			<p class="mt-1 font-mono text-xs break-words text-fg-subtle">{message}</p>
-		{:else}
-			<p class="mt-1 text-[0.8125rem] text-fg-muted">
-				Check that the server is running, then retry.
-			</p>
+		<h1 class="mt-1 text-2xl font-semibold tracking-tight">{view.title}</h1>
+		<p class="mt-1 text-[0.8125rem] text-fg-muted">
+			{#if code === Code.NotFound}
+				This {what} does not exist, or it isn’t visible to you.
+			{:else if code === Code.Unauthenticated}
+				Your session has expired or you are not signed in.
+			{:else if code === Code.PermissionDenied}
+				Access is declared in the server configuration. Ask an administrator if you need it.
+			{:else if code === Code.Unavailable}
+				The interface is up but the server doesn’t answer. Check that it is running, then retry.
+			{:else}
+				An unexpected error. Retrying may help; if not, the server log will say more.
+			{/if}
+		</p>
+		{#if message && ![Code.NotFound, Code.Unauthenticated, Code.PermissionDenied, Code.Unavailable].includes(code as Code)}
+			<p class="mt-3 font-mono text-xs break-words text-fg-subtle">{message}</p>
 		{/if}
-		{#if onretry}
-			<button
-				type="button"
-				onclick={onretry}
-				class="mt-4 h-8 rounded-sm border border-border bg-surface px-3 hover:bg-surface-2"
-				>Retry</button
-			>
-		{/if}
-	{/if}
-</div>
+		<div class="mt-5 flex flex-wrap items-center gap-4">
+			{#if code === Code.Unauthenticated}
+				<a
+					href="/-/login?next={next}"
+					class="inline-flex h-8 items-center gap-1.5 rounded-sm bg-accent px-3 text-[0.8125rem] font-medium text-accent-fg hover:opacity-90"
+					><Icon name="key" size={14} />Sign in with a passkey</a
+				>
+			{:else if onretry && code !== Code.NotFound && code !== Code.PermissionDenied}
+				<button type="button" onclick={onretry} class={btn}>Retry</button>
+			{/if}
+			<a href="/" class="text-[0.8125rem] text-link hover:underline">Back to activity</a>
+		</div>
+	</div>
+</section>

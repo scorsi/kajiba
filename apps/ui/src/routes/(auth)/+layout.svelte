@@ -1,17 +1,20 @@
-<!-- Signed-out pages: a single centred card, no navigation. -->
+<!--
+	Signed-out pages, in the shell's grammar without the forge overview: the
+	same thin strip on top, then a Pulse-like band with the one thing to do.
+-->
 <script lang="ts">
 	import ThemeToggle from '#lib/components/ThemeToggle.svelte';
-	import Wordmark from '#lib/components/Wordmark.svelte';
 
 	let { children } = $props();
 </script>
 
 <div class="flex min-h-dvh flex-col bg-bg text-fg">
-	<header class="flex h-14 items-center justify-between px-4">
-		<Wordmark />
-		<ThemeToggle class="rounded-sm p-1.5 text-fg-muted hover:bg-surface-2 hover:text-fg" />
+	<header class="shrink-0 border-b border-border bg-surface">
+		<div class="flex h-9 items-center gap-2 px-3 text-xs sm:px-4">
+			<span class="pl-4 text-[0.8125rem] font-semibold tracking-tight">kajiba</span>
+			<span class="text-fg-subtle" lang="ja" aria-hidden="true">鍛冶場</span>
+			<ThemeToggle class="ml-auto rounded-sm p-1.5 text-fg-muted hover:bg-surface-2" />
+		</div>
 	</header>
-	<main class="flex flex-1 items-start justify-center px-4 pt-[12vh] pb-16">
-		<div class="w-full max-w-sm">{@render children()}</div>
-	</main>
+	<main id="main" class="flex flex-1 flex-col">{@render children()}</main>
 </div>
