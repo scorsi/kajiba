@@ -130,6 +130,18 @@ pub struct NewRun<'a> {
     pub triggered_by: Option<i64>,
     pub correlation_id: &'a str,
     pub now: i64,
+    /// A worktree run's selection and requirements (0097); `None` for the others.
+    pub worktree: Option<Worktree<'a>>,
+}
+
+/// What a worktree run builds and where (0097).
+pub struct Worktree<'a> {
+    /// Check names; empty for the whole `nix flake check`.
+    pub checks: &'a [String],
+    pub arch: &'a str,
+    pub os: &'a str,
+    /// Required runner tags.
+    pub features: &'a [String],
 }
 
 /// Insert a queued run, its one replayable `nix` job and `run-created` in the caller's
@@ -140,8 +152,8 @@ pub async fn create_run(
 ) -> Result<String, sqlx::Error> {
     let public_id = new_public_id(tx, run.now as u128).await?;
     let run_id = sqlx::query(
-        "INSERT INTO run (public_id, repo_id, sha, ref, trigger, event_id, triggered_by, state, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
+        "INSERT INTO run (public_id, repo_id, sha, ref, trigger, event_id, triggered_by, state, created_at, checks)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
     )
     .bind(&public_id)
     .bind(run.repo_id)
@@ -151,9 +163,24 @@ pub async fn create_run(
     .bind(run.event_id)
     .bind(run.triggered_by)
     .bind(run.now)
+    .bind(
+        run.worktree
+            .as_ref()
+            .filter(|worktree| !worktree.checks.is_empty())
+            .map(|worktree| serde_json::json!(worktree.checks).to_string()),
+    )
     .execute(&mut *tx)
     .await?
     .last_insert_rowid();
+    let requirements = match &run.worktree {
+        Some(worktree) => serde_json::json!({
+            "backend": "nix",
+            "arch": worktree.arch,
+            "os": worktree.os,
+            "tags": worktree.features,
+        }),
+        None => serde_json::json!({ "backend": "nix" }),
+    };
     let job_id = new_public_id(tx, run.now as u128).await?;
     sqlx::query(
         "INSERT INTO job (public_id, run_id, name, requirements, replayable, max_attempts, state, created_at)
@@ -162,7 +189,7 @@ pub async fn create_run(
     .bind(job_id)
     .bind(run_id)
     // Opaque to the schema (0013); read back by matching only.
-    .bind(serde_json::json!({ "backend": "nix" }).to_string())
+    .bind(requirements.to_string())
     .bind(MAX_ATTEMPTS)
     .bind(run.now)
     .execute(&mut *tx)
@@ -254,6 +281,7 @@ impl Handler for Ci {
                 triggered_by: Some(user_id),
                 correlation_id: &data.correlation_id,
                 now: (self.now)(),
+                worktree: None,
             },
         )
         .await?;

@@ -245,6 +245,10 @@ pub trait GitStore {
     /// Whether `commit` (a full id) is a commit reachable from any ref of the repository,
     /// whatever its namespace; read only, blocking.
     fn reachable(&self, repo: &Path, commit: &str) -> Result<bool>;
+    /// Whether every one of `commits` (full ids) is a commit reachable from
+    /// `refs/heads/*` or `refs/tags/*`, as a worktree bundle's prerequisites must be
+    /// (ADR 0097); true for none. Read only, blocking.
+    fn tips_reach(&self, repo: &Path, commits: &[String]) -> Result<bool>;
 }
 
 /// The single ref of a run bundle (ADR 0106).
@@ -813,6 +817,69 @@ impl GitStore for Gix<'_> {
             return Err(Error::Git(format!("git pack-objects: {status}")));
         }
         Ok(())
+    }
+
+    fn tips_reach(&self, repo: &Path, commits: &[String]) -> Result<bool> {
+        let opened = self.open(repo)?;
+        let is_commit = |commit: &String| {
+            commit
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                && gix::ObjectId::from_hex(commit.as_bytes())
+                    .ok()
+                    .and_then(|id| opened.try_find_header(id).ok().flatten())
+                    .is_some_and(|header| header.kind() == gix::object::Kind::Commit)
+        };
+        if !commits.iter().all(is_commit) {
+            return Ok(false);
+        }
+        if commits.is_empty() {
+            return Ok(true);
+        }
+        let mut command = git();
+        if let Some(path) = self.trusted(repo) {
+            command
+                .arg("-c")
+                .arg(format!("safe.directory={}", path.display()));
+        }
+        // The commits come on stdin, unaffected by `--not`: any output is one the
+        // branches and tags do not reach.
+        let mut child = command
+            .arg("-C")
+            .arg(repo)
+            .args([
+                "rev-list",
+                "--max-count=1",
+                "--not",
+                "--branches",
+                "--tags",
+                "--stdin",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| Error::Git(format!("git: {err}")))?;
+        let input = commits
+            .iter()
+            .map(|id| format!("{id}\n"))
+            .collect::<String>();
+        let mut stdin = child.stdin.take().expect("piped");
+        // Written from a thread: rev-list may answer before reading all of it.
+        let writer = std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut stdin, input.as_bytes());
+        });
+        let output = child
+            .wait_with_output()
+            .map_err(|err| Error::Git(format!("git: {err}")))?;
+        let _ = writer.join();
+        if !output.status.success() {
+            return Err(Error::Git(format!(
+                "git rev-list: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(output.stdout.is_empty())
     }
 
     fn reachable(&self, repo: &Path, commit: &str) -> Result<bool> {

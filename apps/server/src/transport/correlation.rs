@@ -76,6 +76,7 @@ fn known(path: &str) -> Option<&'static str> {
         "/kajiba.v1.RunService/ListRuns" => "/kajiba.v1.RunService/ListRuns",
         "/kajiba.v1.RunService/WatchRun" => "/kajiba.v1.RunService/WatchRun",
         "/kajiba.v1.RunService/GetWorktreeBase" => "/kajiba.v1.RunService/GetWorktreeBase",
+        "/kajiba.v1.RunService/CreateWorktreeRun" => "/kajiba.v1.RunService/CreateWorktreeRun",
         "/kajiba.v1.TokenService/CreateToken" => "/kajiba.v1.TokenService/CreateToken",
         "/kajiba.v1.TokenService/ListTokens" => "/kajiba.v1.TokenService/ListTokens",
         "/kajiba.v1.TokenService/RevokeToken" => "/kajiba.v1.TokenService/RevokeToken",

@@ -35,6 +35,7 @@ async fn new_run(writer: &mut SqliteConnection, now: i64) -> String {
             triggered_by: Some(1),
             correlation_id: "push",
             now,
+            worktree: None,
         },
     )
     .await

@@ -107,7 +107,7 @@ impl Health {
             && self.gate_serving.ready()
             && self.git_side.ready()
             && self.git_state_dir.join("repos").is_dir()
-            && ["db", "ci/logs", "ci/artifacts", "tmp"]
+            && ["db", "ci/logs", "ci/artifacts", "ci/bundles", "tmp"]
                 .iter()
                 .all(|name| self.state_dir.join(name).is_dir())
             && sqlx::query_scalar::<_, i64>("SELECT 1")

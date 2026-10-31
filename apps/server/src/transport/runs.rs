@@ -12,15 +12,20 @@ use kajiba_gitstore::{GitStore, Gix};
 use kajiba_proto::{
     google::protobuf::Timestamp,
     v1::{
-        Attempt, AttemptState, FailureSummary, GetRunRequest, GetRunResponse,
-        GetWorktreeBaseRequest, GetWorktreeBaseResponse, Job, JobState, ListRunsRequest,
-        ListRunsResponse, LogBytes, LogSection, Run, RunState, RunTrigger, TriggerRunRequest,
-        TriggerRunResponse, WatchRunRequest, WatchRunResponse, WorktreeRunSpec,
-        run_service_server::RunService, watch_run_response,
+        Attempt, AttemptState, CreateWorktreeRunRequest, CreateWorktreeRunResponse, FailureSummary,
+        GetRunRequest, GetRunResponse, GetWorktreeBaseRequest, GetWorktreeBaseResponse, Job,
+        JobState, ListRunsRequest, ListRunsResponse, LogBytes, LogSection, Run, RunState,
+        RunTrigger, TriggerRunRequest, TriggerRunResponse, WatchRunRequest, WatchRunResponse,
+        WorktreeRunSpec, create_worktree_run_request::Part, run_service_server::RunService,
+        watch_run_response,
     },
 };
 use sqlx::SqliteConnection;
-use std::{io::Read, path::Path, time::Duration};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::sync::{mpsc, watch};
 use tonic::{Request, Response, Status};
 
@@ -153,6 +158,7 @@ impl Runs {
             trigger: match trigger.as_str() {
                 "push" => RunTrigger::Push,
                 "manual" => RunTrigger::Manual,
+                "worktree" => RunTrigger::Worktree,
                 _ => RunTrigger::Unspecified,
             }
             .into(),
@@ -275,8 +281,6 @@ pub const WORKTREE_RUNS: i64 = 4;
 
 /// A worktree run that passed the creation checks (ADR 0118).
 #[derive(Debug)]
-// shortcut: CreateWorktreeRun (J6 task 23) reads the other fields; drop this then.
-#[allow(dead_code)]
 pub struct Admitted {
     pub repo_id: i64,
     pub repo: String,
@@ -414,6 +418,83 @@ pub async fn active_worktree_runs<'e>(
         ));
     }
     Ok(())
+}
+
+/// ADR 0097: a worktree run's bundle holds at most 64 MiB.
+pub const MAX_BUNDLE: u64 = 64 << 20;
+
+/// An upload under `tmp/`, removed when dropped unless it was moved away.
+struct Upload(Option<PathBuf>);
+
+impl Drop for Upload {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn bundle_invalid() -> Status {
+    refused(
+        tonic::Code::InvalidArgument,
+        "BUNDLE_INVALID",
+        "not a git bundle with exactly one head".into(),
+    )
+}
+
+/// The prerequisites and the single head of a v2 bundle, or a v3 one in SHA-1, read
+/// from its header; a pack must follow.
+fn bundle_header(path: &Path) -> Result<(Vec<String>, String), Status> {
+    use std::io::BufRead;
+    let file =
+        std::fs::File::open(path).map_err(|err| Status::internal(format!("bundle: {err}")))?;
+    let mut reader = std::io::BufReader::new(file);
+    let next = |reader: &mut std::io::BufReader<std::fs::File>| {
+        let mut line = Vec::new();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(_) if line.pop() == Some(b'\n') => {
+                String::from_utf8(line).map_err(|_| bundle_invalid())
+            }
+            _ => Err(bundle_invalid()),
+        }
+    };
+    let v3 = match next(&mut reader)?.as_str() {
+        "# v2 git bundle" => false,
+        "# v3 git bundle" => true,
+        _ => return Err(bundle_invalid()),
+    };
+    let id = |text: &str| {
+        (text.len() == 40 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+            .then(|| text.to_owned())
+            .ok_or_else(bundle_invalid)
+    };
+    let (mut prerequisites, mut heads) = (Vec::new(), Vec::new());
+    loop {
+        let line = next(&mut reader)?;
+        if line.is_empty() {
+            break;
+        }
+        if let Some(capability) = line.strip_prefix('@') {
+            if !v3 || capability != "object-format=sha1" {
+                return Err(bundle_invalid());
+            }
+        } else if let Some(rest) = line.strip_prefix('-') {
+            // `-<id>[ <comment>]`
+            prerequisites.push(id(rest.split(' ').next().unwrap_or_default())?);
+        } else {
+            let (head, name) = line.split_once(' ').ok_or_else(bundle_invalid)?;
+            if name.is_empty() {
+                return Err(bundle_invalid());
+            }
+            heads.push(id(head)?);
+        }
+    }
+    let mut magic = [0; 4];
+    std::io::Read::read_exact(&mut reader, &mut magic).map_err(|_| bundle_invalid())?;
+    match (heads.pop(), heads.is_empty(), &magic) {
+        (Some(head), true, b"PACK") => Ok((prerequisites, head)),
+        _ => Err(bundle_invalid()),
+    }
 }
 
 type Watcher = mpsc::Sender<Result<WatchRunResponse, Status>>;
@@ -603,6 +684,7 @@ impl RunService for Runs {
                 triggered_by: Some(user),
                 correlation_id: &correlation_id,
                 now: crate::db::runs::now(),
+                worktree: None,
             },
         )
         .await
@@ -641,6 +723,126 @@ impl RunService for Runs {
         Ok(Response::new(GetWorktreeBaseResponse {
             ids: ids.into_iter().collect(),
         }))
+    }
+
+    async fn create_worktree_run(
+        &self,
+        request: Request<tonic::Streaming<CreateWorktreeRunRequest>>,
+    ) -> Result<Response<CreateWorktreeRunResponse>, Status> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let user = caller(&request)?;
+        let correlation_id = request
+            .extensions()
+            .get::<super::correlation::RequestId>()
+            .map_or_else(String::new, |id| id.0.clone());
+        let mut parts = request.into_inner();
+        let out_of_order = || cursor::invalid_field("part", "the spec first, then bundle chunks");
+        let spec = match parts.message().await?.and_then(|message| message.part) {
+            Some(Part::Spec(spec)) => spec,
+            _ => return Err(out_of_order()),
+        };
+        // Every check before a byte of the bundle is stored (0097).
+        let admitted = self.admit(user, &spec).await?;
+        let (writer, declared) = match (self.0.writer.get(), self.0.runners.get()) {
+            (Some(writer), Some(declared)) => (writer, declared),
+            _ => return Err(Status::unavailable("starting")),
+        };
+        let io = |err: std::io::Error| Status::internal(format!("bundle: {err}"));
+        // tmp/ is emptied at startup (0032): an interrupted upload leaves nothing.
+        let path = self.0.state_dir.join(format!(
+            "tmp/worktree-{}.bundle",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+            .map_err(io)?;
+        let mut upload = Upload(Some(path.clone()));
+        let mut size = 0;
+        while let Some(message) = parts.message().await? {
+            let Some(Part::Chunk(chunk)) = message.part else {
+                return Err(out_of_order());
+            };
+            size += chunk.len() as u64;
+            if size > MAX_BUNDLE {
+                return Err(refused(
+                    tonic::Code::ResourceExhausted,
+                    "BUNDLE_TOO_LARGE",
+                    format!("a worktree bundle holds at most {MAX_BUNDLE} bytes"),
+                ));
+            }
+            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+                .await
+                .map_err(io)?;
+        }
+        file.sync_all().await.map_err(io)?;
+        drop(file);
+        let header = path.clone();
+        let (prerequisites, head) = tokio::task::spawn_blocking(move || bundle_header(&header))
+            .await
+            .map_err(|err| Status::internal(format!("bundle: {err}")))??;
+        let root = self.0.git_state_dir.join("repos");
+        let dir = root.join(format!("{}.git", admitted.repo));
+        let reached = tokio::task::spawn_blocking(move || {
+            Gix::shared(&root).tips_reach(&dir, &prerequisites)
+        })
+        .await
+        .map_err(|err| Status::internal(format!("git: {err}")))?
+        .map_err(super::repos::git_error("REPO_NOT_FOUND"))?;
+        if !reached {
+            return Err(refused(
+                tonic::Code::FailedPrecondition,
+                "BUNDLE_PREREQUISITE_MISSING",
+                "a prerequisite of the bundle is on no branch or tag of the repository".into(),
+            ));
+        }
+        let mut writer = writer.lock().await;
+        let mut tx = sqlx::Connection::begin(&mut *writer)
+            .await
+            .map_err(internal)?;
+        // Again under the write lock: concurrent uploads cannot pass the limit together.
+        active_worktree_runs(&mut *tx, user).await?;
+        let public_id = crate::db::runs::create_run(
+            &mut tx,
+            &crate::db::runs::NewRun {
+                repo_id: admitted.repo_id,
+                sha: &head,
+                reference: None,
+                trigger: "worktree",
+                event_id: None,
+                triggered_by: Some(user),
+                correlation_id: &correlation_id,
+                now: crate::db::runs::now(),
+                worktree: Some(crate::db::runs::Worktree {
+                    checks: &spec.checks,
+                    arch: &admitted.arch,
+                    os: &admitted.os,
+                    features: &spec.features,
+                }),
+            },
+        )
+        .await
+        .map_err(internal)?;
+        let row: Row = sqlx::query_as(&format!("{SELECT} WHERE run.public_id = ?"))
+            .bind(&public_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(internal)?;
+        let run = self.message(&mut tx, row).await?;
+        // Moved before the commit, so a committed run always has its bundle (0097).
+        let bundles = self.0.state_dir.join("ci/bundles");
+        let bundle = bundles.join(format!("{public_id}.bundle"));
+        std::fs::rename(&path, &bundle).map_err(io)?;
+        upload.0 = Some(bundle);
+        kajiba_core::state::sync_dir(&bundles).map_err(io)?;
+        declared.bus.commit(tx).await.map_err(internal)?;
+        upload.0 = None;
+        drop(writer);
+        tracing::info!(event = "run-state", run = public_id, state = "queued");
+        declared.wake.notify_one();
+        Ok(Response::new(CreateWorktreeRunResponse { run: Some(run) }))
     }
 
     async fn get_run(

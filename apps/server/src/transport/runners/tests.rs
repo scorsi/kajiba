@@ -167,6 +167,7 @@ impl Forge {
                 triggered_by: Some(1),
                 correlation_id: "push",
                 now: 1,
+                worktree: None,
             },
         )
         .await

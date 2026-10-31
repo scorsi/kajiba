@@ -15,11 +15,11 @@ fn prepare_with_sync(
 ) -> Result<StateLock, String> {
     create_dir_all(state_dir, sync).map_err(|err| format!("{}: {err}", state_dir.display()))?;
     let lock = StateLock::acquire(&state_dir.join("kajiba.lock"))?;
-    for name in ["db", "ci/logs", "ci/artifacts", "tmp"] {
+    for name in ["db", "ci/logs", "ci/artifacts", "ci/bundles", "tmp"] {
         let path = state_dir.join(name);
         create_dir_all(&path, sync).map_err(|err| format!("{}: {err}", path.display()))?;
     }
-    for name in ["db", "ci", "ci/logs", "ci/artifacts", "tmp"] {
+    for name in ["db", "ci", "ci/logs", "ci/artifacts", "ci/bundles", "tmp"] {
         real_dir(&state_dir.join(name)).map_err(|err| err.to_string())?;
     }
     Ok(lock)
@@ -129,7 +129,7 @@ mod tests {
                 sync_dir(parent)
             })
             .unwrap();
-            for name in ["db", "ci/logs", "ci/artifacts", "tmp"] {
+            for name in ["db", "ci/logs", "ci/artifacts", "ci/bundles", "tmp"] {
                 assert!(root.join(name).is_dir(), "{name}");
             }
             assert!(root.join("kajiba.lock").is_file());
@@ -141,6 +141,7 @@ mod tests {
                         temp.0.join("nested"),
                         root.clone(),
                         root.clone(),
+                        root.join("ci"),
                         root.join("ci"),
                         root.join("ci"),
                         root.clone(),

@@ -1253,3 +1253,45 @@ fn reachability_counts_every_ref_namespace() {
         assert!(!Gix.reachable(&f.bare, id).unwrap(), "{id}");
     }
 }
+
+#[test]
+fn tips_reach_only_through_branches_and_tags() {
+    let f = fixture("tips-reach");
+    let t = "1700000300 +0000";
+    let contributed = git(
+        &f.bare,
+        &[
+            "commit-tree",
+            &format!("{}^{{tree}}", f.third),
+            "-p",
+            &f.third,
+            "-m",
+            "contrib",
+        ],
+        t,
+    );
+    git(
+        &f.bare,
+        &["update-ref", "refs/contrib/alice/x", &contributed],
+        t,
+    );
+    let tips = |ids: &[&str]| {
+        Gix.tips_reach(
+            &f.bare,
+            &ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>(),
+        )
+        .unwrap()
+    };
+    assert!(tips(&[]));
+    assert!(tips(&[&f.first, &f.third]));
+    // Only `refs/contrib/*` reaches it; an absent id, a tag object, uppercase: refused.
+    assert!(!tips(&[&f.first, &contributed]));
+    let tag = git(&f.bare, &["rev-parse", "v1"], t);
+    for id in [
+        tag.as_str(),
+        "ffffffffffffffffffffffffffffffffffffffff",
+        &f.first.to_uppercase(),
+    ] {
+        assert!(!tips(&[id]), "{id}");
+    }
+}

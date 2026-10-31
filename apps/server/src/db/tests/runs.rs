@@ -199,6 +199,7 @@ async fn run_created_commits_with_its_run() {
         triggered_by: Some(1),
         correlation_id: "request-9",
         now: 7000,
+        worktree: None,
     };
     let mut tx = writer.begin().await.unwrap();
     create_run(&mut tx, &run).await.unwrap();

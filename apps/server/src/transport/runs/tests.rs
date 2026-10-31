@@ -4,7 +4,7 @@ use crate::transport::{
     repos::tests::{Fixture, git},
     runners::Declared,
 };
-use kajiba_proto::v1::Scope;
+use kajiba_proto::v1::{Scope, create_worktree_run_request::Part};
 use prost::Message;
 use std::{sync::Arc, time::Duration};
 use tonic::Code;
@@ -227,6 +227,14 @@ async fn methods_require_their_scope() {
     for (method, token, message) in [
         ("TriggerRun", &read, trigger.clone()),
         ("GetWorktreeBase", &read, base.clone()),
+        (
+            "CreateWorktreeRun",
+            &read,
+            CreateWorktreeRunRequest {
+                part: Some(Part::Spec(spec("alice/ci"))),
+            }
+            .encode_to_vec(),
+        ),
         ("ListRuns", &ci, list.clone()),
         ("GetRun", &ci, GetRunRequest::default().encode_to_vec()),
     ] {
@@ -949,4 +957,285 @@ async fn watching_needs_a_readable_run() {
     assert_eq!(refusal(status), (Code::NotFound, "REPO_NOT_FOUND".into()));
     let status = watch(&runs, ALICE, ATTEMPT, 0, false).await.err().unwrap();
     assert_eq!(refusal(status), (Code::NotFound, "RUN_NOT_FOUND".into()));
+}
+
+/// The spec (when given) then `bundle` in chunks the service's 16 KiB message bound admits.
+async fn create(
+    runs: &Runs,
+    user: i64,
+    spec: Option<WorktreeRunSpec>,
+    bundle: &[u8],
+) -> Result<Run, Status> {
+    let parts = spec.map(Part::Spec).into_iter().chain(
+        bundle
+            .chunks(16_000)
+            .map(|chunk| Part::Chunk(chunk.to_vec())),
+    );
+    upload(runs, user, parts).await
+}
+
+async fn upload(
+    runs: &Runs,
+    user: i64,
+    parts: impl IntoIterator<Item = Part>,
+) -> Result<Run, Status> {
+    use tonic::codec::Codec;
+    let mut body = Vec::new();
+    for part in parts {
+        let message = CreateWorktreeRunRequest { part: Some(part) }.encode_to_vec();
+        body.push(0);
+        body.extend_from_slice(&(message.len() as u32).to_be_bytes());
+        body.extend_from_slice(&message);
+    }
+    let decoder =
+        tonic::codec::ProstCodec::<CreateWorktreeRunResponse, CreateWorktreeRunRequest>::default()
+            .decoder();
+    let parts = tonic::Streaming::new_request(decoder, axum::body::Body::from(body), None, None);
+    runs.create_worktree_run(as_user(user, parts))
+        .await
+        .map(|response| response.into_inner().run.unwrap())
+}
+
+/// A clone of `bare` at `main`, for bundles.
+fn clone(fixture: &Fixture, bare: &Path) -> std::path::PathBuf {
+    let work = fixture.dir.join("tmp/clone");
+    git(
+        &fixture.dir,
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            work.to_str().unwrap(),
+        ],
+    );
+    work
+}
+
+/// Commit a change in `work` and return the new head.
+fn commit(work: &Path, file: &str) -> String {
+    std::fs::write(work.join(file), file).unwrap();
+    git(work, &["add", "-A"]);
+    git(work, &["commit", "-q", "-m", file]);
+    git(work, &["rev-parse", "HEAD"]).trim().to_owned()
+}
+
+fn bundle(work: &Path, args: &[&str]) -> Vec<u8> {
+    let path = work.join("out.bundle");
+    let path = path.to_str().unwrap();
+    git(
+        work,
+        &[&["bundle", "create", "-q", path][..], args].concat(),
+    );
+    std::fs::read(path).unwrap()
+}
+
+fn listing(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn a_worktree_bundle_becomes_a_run_outside_the_repository() {
+    let (fixture, runs) = fixture("").await;
+    let bare = fixture.bare("alice/ci").await;
+    let tip = head(&bare);
+    let work = clone(&fixture, &bare);
+    let captured = commit(&work, "change");
+    git(&work, &["branch", "wip"]);
+    let bytes = bundle(&work, &["wip", "--not", &tip]);
+    let selected = WorktreeRunSpec {
+        checks: vec!["vm".into(), "unit".into()],
+        features: vec!["kvm".into()],
+        ..spec("alice/ci")
+    };
+    let run = create(&runs, BOB, Some(selected), &bytes).await.unwrap();
+    assert_eq!(
+        (
+            run.trigger(),
+            run.state(),
+            run.sha.as_str(),
+            run.r#ref.as_str(),
+            run.triggered_by.as_str()
+        ),
+        (
+            RunTrigger::Worktree,
+            RunState::Queued,
+            captured.as_str(),
+            "",
+            "bob"
+        )
+    );
+    let state = fixture.dir.join("server");
+    assert_eq!(
+        std::fs::read(state.join(format!("ci/bundles/{}.bundle", run.public_id))).unwrap(),
+        bytes
+    );
+    assert!(listing(&state.join("tmp")).is_empty());
+    let row: (String, Option<String>, Option<i64>, Option<String>, String) = sqlx::query_as(
+        "SELECT trigger, ref, event_id, checks, job.requirements FROM run JOIN job ON job.run_id = run.id",
+    )
+    .fetch_one(runs.readers().unwrap())
+    .await
+    .unwrap();
+    assert_eq!(
+        (row.0.as_str(), row.1, row.2, row.3.as_deref()),
+        ("worktree", None, None, Some(r#"["vm","unit"]"#))
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&row.4).unwrap(),
+        serde_json::json!({ "backend": "nix", "arch": "x86_64", "os": "linux", "tags": ["kvm"] })
+    );
+    let events: Vec<(String, Option<i64>, String)> =
+        sqlx::query_as("SELECT kind, principal_id, payload FROM event WHERE kind = 'run-created'")
+            .fetch_all(runs.readers().unwrap())
+            .await
+            .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].1, Some(BOB));
+    assert!(
+        events[0].2.contains(r#""trigger":"worktree""#),
+        "{}",
+        events[0].2
+    );
+
+    // The captured commit never enters the repository: nothing to serve or browse.
+    let missing = std::process::Command::new("git")
+        .args(["-C", bare.to_str().unwrap(), "cat-file", "-e", &captured])
+        .status()
+        .unwrap();
+    assert!(!missing.success());
+    let status = trigger(&runs, BOB, "alice/ci", &captured)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refusal(status),
+        (Code::NotFound, "REVISION_NOT_FOUND".into())
+    );
+    use kajiba_proto::v1::{GetTreeRequest, repo_service_server::RepoService};
+    let status = fixture
+        .repos
+        .get_tree(as_user(
+            BOB,
+            GetTreeRequest {
+                repo: "alice/ci".into(),
+                revision: captured.clone(),
+                path: String::new(),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refusal(status),
+        (Code::NotFound, "REVISION_NOT_FOUND".into())
+    );
+    // A whole-history bundle (no prerequisite) is accepted too.
+    let whole = bundle(&work, &["wip"]);
+    assert!(
+        create(&runs, BOB, Some(spec("alice/ci")), &whole)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn worktree_bundles_are_refused_with_nothing_left_on_disk() {
+    let (fixture, runs) = fixture("").await;
+    let bare = fixture.bare("alice/ci").await;
+    let tip = head(&bare);
+    let work = clone(&fixture, &bare);
+    let contributed = commit(&work, "contributed");
+    git(
+        &work,
+        &[
+            "push",
+            "-q",
+            bare.to_str().unwrap(),
+            "HEAD:refs/contrib/bob/x",
+        ],
+    );
+    commit(&work, "on-contrib");
+    git(&work, &["branch", "wip"]);
+    git(&work, &["branch", "wip2"]);
+    let mut not_a_bundle = b"# v2 git bundle\n".to_vec();
+    not_a_bundle.extend_from_slice(&[0; 64]);
+    let invalid = (Code::InvalidArgument, "BUNDLE_INVALID");
+    let missing = (Code::FailedPrecondition, "BUNDLE_PREREQUISITE_MISSING");
+    let mut no_pack = bundle(&work, &["wip", "--not", &tip]);
+    let header = no_pack.windows(2).position(|w| w == b"\n\n").unwrap();
+    no_pack.truncate(header + 2);
+    let cases = [
+        (b"not a bundle".to_vec(), invalid),
+        (not_a_bundle, invalid),
+        (no_pack, invalid),
+        (Vec::new(), invalid),
+        (bundle(&work, &["wip", "wip2", "--not", &tip]), invalid),
+        // Its prerequisite is only on refs/contrib/*.
+        (bundle(&work, &["wip", "--not", &contributed]), missing),
+    ];
+    for (bytes, expected) in cases {
+        let status = create(&runs, BOB, Some(spec("alice/ci")), &bytes)
+            .await
+            .unwrap_err();
+        assert_eq!(refusal(status), (expected.0, expected.1.into()));
+    }
+    // A prerequisite the forge never saw.
+    let unseen = commit(&work, "unseen");
+    commit(&work, "after-unseen");
+    git(&work, &["branch", "-f", "wip"]);
+    let status = create(
+        &runs,
+        BOB,
+        Some(spec("alice/ci")),
+        &bundle(&work, &["wip", "--not", &unseen]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refusal(status), (missing.0, missing.1.into()));
+
+    // One byte over 64 MiB is refused while streaming.
+    let status = create(
+        &runs,
+        BOB,
+        Some(spec("alice/ci")),
+        &vec![0; MAX_BUNDLE as usize + 1],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        refusal(status),
+        (Code::ResourceExhausted, "BUNDLE_TOO_LARGE".into())
+    );
+    // Out of order: no spec first, or a second spec.
+    let field = (Code::InvalidArgument, "INVALID_FIELD".into());
+    assert_eq!(
+        refusal(create(&runs, BOB, None, b"x").await.unwrap_err()),
+        field
+    );
+    let twice = [
+        Part::Spec(spec("alice/ci")),
+        Part::Chunk(b"x".to_vec()),
+        Part::Spec(spec("alice/ci")),
+    ];
+    assert_eq!(refusal(upload(&runs, BOB, twice).await.unwrap_err()), field);
+    // Admission comes first: a refused spec stores nothing either.
+    let status = create(&runs, ALICE, Some(spec("bob/zeta")), b"anything")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refusal(status),
+        (Code::PermissionDenied, "ROLE_MISSING".into())
+    );
+
+    let state = fixture.dir.join("server");
+    assert!(listing(&state.join("tmp")).is_empty());
+    assert!(listing(&state.join("ci/bundles")).is_empty());
+    let runs_count: i64 = sqlx::query_scalar("SELECT count(*) FROM run")
+        .fetch_one(runs.readers().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(runs_count, 0);
 }

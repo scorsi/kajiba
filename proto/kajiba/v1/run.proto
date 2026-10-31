@@ -37,6 +37,14 @@ service RunService {
   rpc GetWorktreeBase(GetWorktreeBaseRequest) returns (GetWorktreeBaseResponse) {
     option (kajiba.v1.scope) = SCOPE_CI_TRIGGER;
   }
+  // A worktree run from an uploaded git bundle (0097): the spec first, checked as by
+  // GetWorktreeBase before any bundle byte is stored, then the bundle in chunks.
+  // BUNDLE_TOO_LARGE above 64 MiB, BUNDLE_INVALID when not a bundle with exactly one
+  // head, BUNDLE_PREREQUISITE_MISSING when a prerequisite is not reachable from
+  // `refs/heads/*` or `refs/tags/*`; INVALID_FIELD when the messages are out of order.
+  rpc CreateWorktreeRun(stream CreateWorktreeRunRequest) returns (CreateWorktreeRunResponse) {
+    option (kajiba.v1.scope) = SCOPE_CI_TRIGGER;
+  }
 }
 
 message TriggerRunRequest {
@@ -72,6 +80,7 @@ enum RunTrigger {
   RUN_TRIGGER_UNSPECIFIED = 0;
   RUN_TRIGGER_PUSH = 1;
   RUN_TRIGGER_MANUAL = 2;
+  RUN_TRIGGER_WORKTREE = 3;
 }
 
 enum RunState {
@@ -87,7 +96,7 @@ message Run {
   string public_id = 1;
   string repo_public_id = 2;
   string sha = 3;
-  // The pushed ref; empty for a manual run.
+  // The pushed ref; empty for a manual or worktree run.
   string ref = 4;
   RunTrigger trigger = 5;
   // The user who pushed or triggered; empty for an import.
@@ -204,4 +213,18 @@ message GetWorktreeBaseRequest {
 message GetWorktreeBaseResponse {
   // Distinct, sorted; empty for an empty repository.
   repeated string ids = 1;
+}
+
+message CreateWorktreeRunRequest {
+  oneof part {
+    // The first message, and only it.
+    WorktreeRunSpec spec = 1;
+    // The bundle's bytes, in order; a message holds at most 16 KiB (0057), so
+    // chunks of 16000 bytes at most.
+    bytes chunk = 2;
+  }
+}
+
+message CreateWorktreeRunResponse {
+  Run run = 1;
 }
