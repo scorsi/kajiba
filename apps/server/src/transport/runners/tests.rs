@@ -315,6 +315,14 @@ async fn a_stalled_runner_does_not_block_matching_or_lease_expiry() {
     runners
         .disconnected(stalled_id, "build-1", generation, "test")
         .await;
+    {
+        let mut writer = state.health.writer.get().unwrap().lock().await;
+        sqlx::query("UPDATE runner SET last_contact_at = ? WHERE name = 'build-2'")
+            .bind(now + attempts::LEASE_MS + 1)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+    }
     tokio::time::timeout(
         Duration::from_secs(1),
         runners.pass(now + attempts::LEASE_MS + 1),
@@ -332,6 +340,89 @@ async fn a_stalled_runner_does_not_block_matching_or_lease_expiry() {
             .await
             .unwrap(),
         2
+    );
+}
+
+#[tokio::test]
+async fn a_frozen_runner_does_not_consume_replays_with_a_healthy_alternative() {
+    let state = Forge::state().await;
+    let runners = Runners::new(state.health.clone(), Arc::default());
+    let (frozen, mut frozen_received) = mpsc::channel(4);
+    let (frozen_id, _, _frozen_session) = runners
+        .admit(
+            Some(SECRET.as_bytes().to_vec()),
+            &hello("build-1"),
+            "test",
+            frozen,
+        )
+        .await
+        .unwrap();
+    let (healthy, mut healthy_received) = mpsc::channel(4);
+    let (healthy_id, _, _healthy_session) = runners
+        .admit(
+            Some(OTHER_SECRET.as_bytes().to_vec()),
+            &hello("build-2"),
+            "test",
+            healthy,
+        )
+        .await
+        .unwrap();
+    let now = crate::db::runs::now();
+    {
+        let mut writer = state.health.writer.get().unwrap().lock().await;
+        sqlx::raw_sql("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
+            INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')")
+            .execute(&mut *writer).await.unwrap();
+        let mut tx = writer.begin().await.unwrap();
+        crate::db::runs::create_run(
+            &mut tx,
+            &crate::db::runs::NewRun {
+                repo_id: 1,
+                sha: SHA,
+                reference: Some("refs/heads/main"),
+                trigger: "push",
+                event_id: None,
+                triggered_by: Some(1),
+                correlation_id: "test",
+                now,
+                worktree: None,
+            },
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    runners.pass(now).await;
+    assert!(matches!(
+        frozen_received.try_recv().unwrap().unwrap().message,
+        Some(connect_response::Message::Assignment(_))
+    ));
+    // Both sockets stay open, but only build-2 keeps heartbeating.
+    let replay_at = now + attempts::LEASE_MS + 1;
+    {
+        let mut writer = state.health.writer.get().unwrap().lock().await;
+        attempts::heartbeat(&mut writer, healthy_id, replay_at)
+            .await
+            .unwrap();
+    }
+    runners.pass(replay_at).await;
+    assert!(matches!(
+        healthy_received.try_recv().unwrap().unwrap().message,
+        Some(connect_response::Message::Assignment(_))
+    ));
+    assert!(frozen_received.try_recv().is_err());
+    let mut writer = state.health.writer.get().unwrap().lock().await;
+    let attempts: Vec<(i64, i64, String)> =
+        sqlx::query_as("SELECT number, runner_id, state FROM job_attempt ORDER BY number")
+            .fetch_all(&mut *writer)
+            .await
+            .unwrap();
+    assert_eq!(
+        attempts,
+        [
+            (1, frozen_id, "lost".into()),
+            (2, healthy_id, "running".into())
+        ]
     );
 }
 

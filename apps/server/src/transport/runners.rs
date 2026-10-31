@@ -457,17 +457,24 @@ impl Runners {
             }
         }
         let mut writer = writer.lock().await;
-        // Read under the writer lock, like admission, so it agrees with `runner.connected`.
-        let offers: Vec<Offer> = self
-            .live
-            .lock()
-            .unwrap()
-            .1
-            .values()
-            .map(|live| live.offer.clone())
-            .collect();
         let result = async {
             let mut tx = writer.begin().await?;
+            let fresh: Vec<i64> = sqlx::query_scalar(
+                "SELECT id FROM runner WHERE connected = 1 AND last_contact_at >= ?",
+            )
+            .bind(now - attempts::LEASE_MS)
+            .fetch_all(&mut *tx)
+            .await?;
+            // Read under the writer lock; an open socket alone cannot establish liveness.
+            let offers: Vec<Offer> = self
+                .live
+                .lock()
+                .unwrap()
+                .1
+                .values()
+                .filter(|live| fresh.contains(&live.offer.runner_id))
+                .map(|live| live.offer.clone())
+                .collect();
             // Expiry first: a replayed job is matched in the same pass.
             let changes = attempts::expire(&mut tx, now).await?;
             let matched = attempts::assign(&mut tx, &offers, now).await?;
