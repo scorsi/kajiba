@@ -8,7 +8,7 @@
 	const error = $derived(
 		page.status === 404
 			? new ApiError(Code.NotFound, 'not found')
-			: new ApiError(Code.Unknown, page.error?.message ?? `HTTP ${page.status}`)
+			: (page.error ?? new ApiError(Code.Unknown, `HTTP ${page.status}`))
 	);
 </script>
 

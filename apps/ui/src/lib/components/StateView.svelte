@@ -6,6 +6,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { Code } from '#lib/api.ts';
+	import { codeName, describeError, type ErrorReport } from '#lib/errors.ts';
 	import Icon, { type IconName } from '#lib/components/Icon.svelte';
 
 	let {
@@ -14,12 +15,24 @@
 		what = 'page'
 	}: { error: unknown; onretry?: () => void; what?: string } = $props();
 
-	const code = $derived(
-		typeof error === 'object' && error && 'code' in error
-			? (error as { code: Code }).code
-			: undefined
+	const route = $derived(page.url.pathname + page.url.search);
+	// An error page hands over `{ report }` (see hooks.client.ts); anything else is described here.
+	const report = $derived<ErrorReport>(
+		typeof error === 'object' && error && 'report' in error
+			? (error as { report: ErrorReport }).report
+			: describeError(error, route)
 	);
-	const message = $derived(error instanceof Error ? error.message : String(error));
+	const code = $derived(report.code as Code | undefined);
+	const browser = $derived(report.kind === 'browser');
+	let copied = $state(false);
+	async function copy() {
+		try {
+			await navigator.clipboard.writeText(report.details);
+			copied = true;
+		} catch {
+			/* the block stays selectable */
+		}
+	}
 	const next = $derived(
 		encodeURIComponent(page.url.pathname + page.url.search)
 	);
@@ -56,10 +69,10 @@
 				};
 			default:
 				return {
-					status: 'error',
+					status: browser ? 'client-side error' : 'backend-side error',
 					icon: 'alert',
 					tone: 'text-danger',
-					title: 'Something went wrong'
+					title: browser ? 'Client-side error' : 'Backend-side error'
 				};
 		}
 	});
@@ -82,12 +95,15 @@
 				Access is declared in the server configuration. Ask an administrator if you need it.
 			{:else if code === Code.Unavailable}
 				The interface is up but the server doesn’t answer. Check that it is running, then retry.
-			{:else}
-				An unexpected error. Retrying may help; if not, the server log will say more.
 			{/if}
 		</p>
-		{#if message && ![Code.NotFound, Code.Unauthenticated, Code.PermissionDenied, Code.Unavailable].includes(code as Code)}
-			<p class="mt-3 font-mono text-xs break-words text-fg-subtle">{message}</p>
+		{#if ![Code.NotFound, Code.Unauthenticated, Code.PermissionDenied, Code.Unavailable].includes(code as Code)}
+			<pre
+				data-testid="error-details"
+				class="mt-3 max-h-48 overflow-auto rounded-sm border border-border bg-bg p-2 font-mono text-xs break-words whitespace-pre-wrap text-fg-subtle">{report.details}</pre>
+			<button type="button" onclick={copy} class="{btn} mt-2"
+				>{copied ? 'Copied' : 'Copy details'}</button
+			>
 		{/if}
 		<div class="mt-5 flex flex-wrap items-center gap-4">
 			{#if code === Code.Unauthenticated}

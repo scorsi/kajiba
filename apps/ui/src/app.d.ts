@@ -2,7 +2,9 @@
 // for information about these interfaces
 declare global {
   namespace App {
-    // interface Error {}
+    interface Error {
+      report?: import("#lib/errors.ts").ErrorReport;
+    }
     // interface Locals {}
     // interface PageData {}
     // interface PageState {}
