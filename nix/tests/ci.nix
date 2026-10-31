@@ -382,7 +382,9 @@ pkgs.testers.runNixOSTest {
 
     with subtest("a closed pipe ends kajiba ci logs quietly"):
         assert forge.succeed(f"set -o pipefail; {writer_cli} ci logs {r2} 2>/tmp/head.err | head -c 4096").strip() != ""
-        assert forge.succeed("cat /tmp/head.err") == ""
+        # Attempt markers go to stderr by design (0117); nothing else may, e.g. a panic or EPIPE error.
+        head_err = forge.succeed("cat /tmp/head.err")
+        assert all(line.startswith("kajiba: attempt ") for line in head_err.splitlines()), head_err
 
     with subtest("refs/contrib does not trigger; a write user can, a read user cannot"):
         forge.succeed("git -C /root/work checkout -q -b topic")
