@@ -51,6 +51,7 @@ type Outbound = mpsc::Sender<Result<ConnectResponse, Status>>;
 
 struct Live {
     generation: u64,
+    secret: Vec<u8>,
     replaced: oneshot::Sender<()>,
     outbound: Outbound,
     offer: Offer,
@@ -321,6 +322,7 @@ impl Runners {
                 name.to_owned(),
                 Live {
                     generation,
+                    secret: expected.trim_ascii().to_vec(),
                     replaced,
                     outbound,
                     offer,
@@ -432,6 +434,28 @@ impl Runners {
             return;
         };
         let bus = &declared.bus;
+        // Rotation revokes existing streams too, including stalled ones (0008, 0105).
+        let credentials: Vec<_> = self
+            .live
+            .lock()
+            .unwrap()
+            .1
+            .iter()
+            .map(|(name, live)| {
+                (
+                    name.clone(),
+                    live.generation,
+                    live.offer.runner_id,
+                    live.secret.clone(),
+                )
+            })
+            .collect();
+        for (name, generation, id, secret) in credentials {
+            let current = tokio::fs::read(&declared.runners[&name].token_file).await;
+            if !current.is_ok_and(|current| same_secret(&secret, current.trim_ascii())) {
+                self.disconnected(id, &name, generation, "").await;
+            }
+        }
         let mut writer = writer.lock().await;
         // Read under the writer lock, like admission, so it agrees with `runner.connected`.
         let offers: Vec<Offer> = self

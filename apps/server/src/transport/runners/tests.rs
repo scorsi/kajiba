@@ -336,6 +336,85 @@ async fn a_stalled_runner_does_not_block_matching_or_lease_expiry() {
 }
 
 #[tokio::test]
+async fn rotating_a_secret_revokes_only_streams_using_the_previous_secret() {
+    for remove in [false, true] {
+        let state = Forge::state().await;
+        let runners = Runners::new(state.health.clone(), Arc::default());
+        let (outbound, _unread) = mpsc::channel(1);
+        outbound.try_send(Ok(cancel("unknown"))).unwrap();
+        let (_, old_generation, mut ended) = runners
+            .admit(
+                Some(SECRET.as_bytes().to_vec()),
+                &hello("build-1"),
+                "test",
+                outbound,
+            )
+            .await
+            .unwrap();
+        let (outbound, _received) = mpsc::channel(1);
+        let (_, _, mut unaffected) = runners
+            .admit(
+                Some(OTHER_SECRET.as_bytes().to_vec()),
+                &hello("build-2"),
+                "test",
+                outbound,
+            )
+            .await
+            .unwrap();
+        runners.pass(crate::db::runs::now()).await;
+        assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+
+        let token = state.health.state_dir.join("runner-token");
+        if remove {
+            std::fs::remove_file(&token).unwrap();
+        } else {
+            std::fs::write(&token, "rotated-secret\n").unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(1), runners.pass(crate::db::runs::now()))
+            .await
+            .expect("revocation blocked on an unread response queue");
+        assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+        assert_eq!(
+            unaffected.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+        assert!(!runners.live.lock().unwrap().1.contains_key("build-1"));
+        let mut writer = state.health.writer.get().unwrap().lock().await;
+        assert!(
+            !sqlx::query_scalar::<_, bool>("SELECT connected FROM runner WHERE name = 'build-1'")
+                .fetch_one(&mut *writer)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM event WHERE kind = 'runner-disconnected'"
+            )
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap(),
+            1
+        );
+        drop(writer);
+        if !remove {
+            let (outbound, _received) = mpsc::channel(1);
+            let (_, generation, mut current) = runners
+                .admit(
+                    Some(b"rotated-secret".to_vec()),
+                    &hello("build-1"),
+                    "test",
+                    outbound,
+                )
+                .await
+                .unwrap();
+            assert_ne!(generation, old_generation);
+            runners.pass(crate::db::runs::now()).await;
+            assert_eq!(current.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+        }
+    }
+}
+
+#[tokio::test]
 async fn each_refusal_has_its_code_reason_metric_and_journal_entry() {
     let forge = Forge::start().await;
     let capabilities = |change: fn(&mut Announced)| {
