@@ -75,7 +75,8 @@ enum AdminCommand {
         #[arg(long)]
         credentials_file: Option<PathBuf>,
     },
-    /// Delete CI logs older than `ci.log_retention` now, as the daily pass does.
+    /// Delete CI logs older than `ci.log_retention` and worktree runs older than
+    /// `ci.worktree_retention` now, as the daily pass does.
     Retention,
     /// Administer repositories (not implemented yet).
     Repo {
@@ -167,6 +168,28 @@ async fn main() -> ExitCode {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
+            match db::retention::fail_missing_bundles(
+                &mut writer,
+                &config.state_dir.join("ci/bundles"),
+                db::runs::now(),
+            )
+            .await
+            {
+                Ok(runs) => {
+                    for run in runs {
+                        tracing::warn!(
+                            event = "run-state",
+                            run,
+                            state = "failed",
+                            reason = "bundle-missing"
+                        );
+                    }
+                }
+                Err(err) => {
+                    log::error("fatal", &err.to_string());
+                    return ExitCode::FAILURE;
+                }
+            }
             let repos_root = config.git.state_dir.join("repos");
             let store = kajiba_gitstore::Gix::shared(&repos_root);
             let bus = std::sync::Arc::new(db::events::EventBus::default());
@@ -195,7 +218,12 @@ async fn main() -> ExitCode {
                 now: db::runs::now,
                 wake: wake.clone(),
             });
-            let logs = config.state_dir.join("ci/logs");
+            let retention = db::retention::Pass {
+                logs: config.state_dir.join("ci/logs"),
+                bundles: config.state_dir.join("ci/bundles"),
+                log_retention: config.ci.log_retention,
+                worktree_retention: config.ci.worktree_retention,
+            };
             let admin = transport::local::Admin {
                 git_socket: config.git.socket.clone(),
                 writer: writer.clone(),
@@ -204,8 +232,7 @@ async fn main() -> ExitCode {
                 gate: gate.clone(),
                 bus: bus.clone(),
                 state_dir: config.git.state_dir.clone(),
-                logs: logs.clone(),
-                log_retention: config.ci.log_retention,
+                retention: retention.clone(),
             };
             health.set_runners(transport::runners::Declared {
                 runners: config.runners.clone(),
@@ -217,7 +244,7 @@ async fn main() -> ExitCode {
                 result = transport::serve(&config, health, readers, bus.clone(), admin) => result,
                 () = dispatcher.run(&bus, &writer) => unreachable!("dispatcher runs until shutdown"),
                 () = db::sessions::purge_periodically(&writer) => unreachable!("purge runs until shutdown"),
-                () = db::retention::purge_daily(&writer, &logs, config.ci.log_retention, config.ci.run_at) => unreachable!("retention runs until shutdown"),
+                () = db::retention::purge_daily(&writer, &retention, config.ci.run_at) => unreachable!("retention runs until shutdown"),
                 () = gate.recover_periodically(&db::events::SystemClock, &writer, &bus, &config.git.state_dir, &store) => unreachable!("recovery runs until shutdown"),
             } {
                 Ok(()) => ExitCode::SUCCESS,
@@ -342,8 +369,8 @@ async fn admin_repo_list(path: &std::path::Path) -> ExitCode {
 
 async fn admin_retention(path: &std::path::Path) -> ExitCode {
     match transport::local::retention(path).await {
-        Ok(logs) => {
-            println!("{}", retention_line(logs));
+        Ok(deleted) => {
+            println!("{}", retention_line(deleted.logs, deleted.worktree_runs));
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -357,8 +384,8 @@ async fn admin_retention(path: &std::path::Path) -> ExitCode {
     }
 }
 
-fn retention_line(logs: u64) -> String {
-    format!("logs deleted: {logs} attempts")
+fn retention_line(logs: u64, worktree_runs: u64) -> String {
+    format!("logs deleted: {logs} attempts\nworktree runs deleted: {worktree_runs}")
 }
 
 /// `<public id>\t<owner>/<name>`, then `\tarchived` for an archived repository.

@@ -40,8 +40,12 @@ pub(in crate::transport) async fn admin(dir: &Path, users: &str) -> Admin {
         gate: Arc::default(),
         bus: Arc::default(),
         state_dir: dir.into(),
-        logs: dir.join("logs"),
-        log_retention: Duration::from_secs(60),
+        retention: crate::db::retention::Pass {
+            logs: dir.join("logs"),
+            bundles: dir.join("bundles"),
+            log_retention: Duration::from_secs(60),
+            worktree_retention: Duration::from_secs(60),
+        },
     }
 }
 
@@ -520,20 +524,39 @@ async fn retention_deletes_old_logs_on_demand() {
         INSERT INTO job (id, public_id, run_id, name, requirements, replayable, max_attempts, state, created_at) VALUES (1, '00000000000000000000000001', 1, 'flake-check', '{}', 1, 3, 'failed', 0);
         INSERT INTO job_attempt (id, public_id, job_id, number, runner_id, state, lease_expires_at, started_at, finished_at) VALUES
         (1, '00000000000000000000000001', 1, 1, 1, 'failed', 0, 0, 1);
-        INSERT INTO log_chunk (attempt_id, seq, step_idx, offset, length) VALUES (1, 1, 0, 0, 3)")
+        INSERT INTO log_chunk (attempt_id, seq, step_idx, offset, length) VALUES (1, 1, 0, 0, 3);
+        INSERT INTO run (id, public_id, repo_id, sha, trigger, state, created_at) VALUES (2, '00000000000000000000000002', 1, 'b', 'worktree', 'queued', 0)")
         .execute(&mut *admin.writer.lock().await)
         .await
         .unwrap();
-    fs::create_dir(&admin.logs).unwrap();
-    let file = admin.logs.join("00000000000000000000000001.log");
+    fs::create_dir(&admin.retention.logs).unwrap();
+    let file = admin.retention.logs.join("00000000000000000000000001.log");
     fs::write(&file, "abc").unwrap();
+    fs::create_dir(&admin.retention.bundles).unwrap();
+    let bundle = admin
+        .retention
+        .bundles
+        .join("00000000000000000000000002.bundle");
+    fs::write(&bundle, "bundle").unwrap();
+    let writer = admin.writer.clone();
     let server = tokio::spawn(serve(local, admin, Arc::default(), std::future::pending()));
-    assert_eq!(retention(&dir.socket()).await.unwrap(), 1);
+    let deleted = retention(&dir.socket()).await.unwrap();
+    assert_eq!((deleted.logs, deleted.worktree_runs), (1, 1));
     assert!(!file.exists());
+    // The worktree run goes whole, bundle included; the manual run stays.
+    assert!(!bundle.exists());
+    let runs: Vec<String> = sqlx::query_scalar("SELECT trigger FROM run")
+        .fetch_all(&mut *writer.lock().await)
+        .await
+        .unwrap();
+    assert_eq!(runs, ["manual"]);
     assert_eq!(
         crate::admin_retention(&dir.socket()).await,
         std::process::ExitCode::SUCCESS
     );
-    assert_eq!(crate::retention_line(0), "logs deleted: 0 attempts");
+    assert_eq!(
+        crate::retention_line(0, 2),
+        "logs deleted: 0 attempts\nworktree runs deleted: 2"
+    );
     server.abort();
 }

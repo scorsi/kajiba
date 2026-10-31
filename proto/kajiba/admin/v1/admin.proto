@@ -64,4 +64,6 @@ message RetentionRequest {}
 message RetentionResponse {
   // Number of attempts whose logs were deleted.
   uint64 logs = 1;
+  // Number of worktree runs deleted with their bundle (0097).
+  uint64 worktree_runs = 2;
 }

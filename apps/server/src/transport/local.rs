@@ -31,9 +31,8 @@ pub struct Admin {
     pub bus: Arc<crate::db::events::EventBus>,
     pub state_dir: PathBuf,
     pub git_socket: PathBuf,
-    /// The server's `ci/logs` and `ci.log_retention` (ADR 0115).
-    pub logs: PathBuf,
-    pub log_retention: Duration,
+    /// The retention pass run on demand (ADR 0115, 0097).
+    pub retention: crate::db::retention::Pass,
 }
 
 pub(super) fn refused(code: tonic::Code, reason: &str, message: String) -> Status {
@@ -194,16 +193,16 @@ impl AdminService for Admin {
         &self,
         _: Request<RetentionRequest>,
     ) -> Result<Response<RetentionResponse>, Status> {
-        let logs = crate::db::retention::purge_logs(
-            &mut *self.writer.lock().await,
-            &self.logs,
-            self.log_retention,
-            crate::db::runs::now(),
-        )
-        .await
-        .map_err(|err| Status::internal(format!("retention: {err}")))?;
-        tracing::info!(event = "retention-completed", logs);
-        Ok(Response::new(RetentionResponse { logs }))
+        let (logs, worktree_runs) = self
+            .retention
+            .run(&mut *self.writer.lock().await, crate::db::runs::now())
+            .await
+            .map_err(|err| Status::internal(format!("retention: {err}")))?;
+        tracing::info!(event = "retention-completed", logs, worktree_runs);
+        Ok(Response::new(RetentionResponse {
+            logs,
+            worktree_runs,
+        }))
     }
 }
 
@@ -272,13 +271,12 @@ pub async fn import(
 }
 
 /// No request timeout: the pass holds the writer as long as it deletes.
-pub async fn retention(path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
+pub async fn retention(path: &Path) -> Result<RetentionResponse, Box<dyn std::error::Error>> {
     Ok(client(path, None)
         .await?
         .retention(RetentionRequest {})
         .await?
-        .into_inner()
-        .logs)
+        .into_inner())
 }
 
 /// Every page, in name order.
