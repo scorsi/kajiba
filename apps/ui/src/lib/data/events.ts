@@ -16,7 +16,8 @@ import {
   type Run,
   type Runner,
 } from "#lib/api.ts";
-import { dayKey } from "#lib/data/forge.ts";
+import { dayKey, type Forge } from "#lib/data/forge.ts";
+import { refShortName } from "#lib/format.ts";
 
 export type HistoryEvent =
   | {
@@ -137,4 +138,37 @@ export function countEvents(events: HistoryEvent[]) {
   for (const e of events)
     n[e.kind] += e.kind === "commits" ? e.commits.length : 1;
   return n;
+}
+
+/**
+ * "Needs attention": current states someone should act on. A default branch
+ * whose last finished run failed (a manual run has no ref: it counts when it
+ * ran the branch's tip), a failing push mirror, an offline runner. Mirrors and
+ * runners are only loaded for administrators (0139).
+ */
+export function attention(forge: Forge) {
+  return {
+    branches: forge.repos.flatMap((r) => {
+      const tip = r.commits[0]?.id;
+      const last = r.runs.find(
+        (x) =>
+          (x.ref === r.repo.defaultBranch || (!x.ref && x.commitId === tip)) &&
+          x.state !== RunState.RUNNING &&
+          x.state !== RunState.QUEUED,
+      );
+      return last?.state === RunState.FAILED
+        ? [
+            {
+              key: r.key,
+              branch: refShortName(r.repo.defaultBranch),
+              run: last,
+            },
+          ]
+        : [];
+    }),
+    mirrors: forge.mirrors.filter((m) => m.state === MirrorState.FAILING),
+    runners: forge.runners.filter(
+      (r) => r.state === RunnerState.OFFLINE && !r.disabled,
+    ),
+  };
 }

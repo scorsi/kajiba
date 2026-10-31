@@ -204,7 +204,7 @@ writeShellApplication {
     sleep 1
     echo "building 'fmt'"
     sleep 1
-    if [ "''${ref##*rev=}" = "$KAJIBA_E2E_FEATURE_SHA" ]; then
+    if [ "''${ref##*rev=}" = "$KAJIBA_E2E_FEATURE_SHA" ] || [ -e "$KAJIBA_E2E_FAIL_FLAG" ]; then
       echo "error: build of '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-fmt.drv' failed"
       exit 1
     fi
@@ -237,6 +237,8 @@ writeShellApplication {
     # (it creates $dir/start-runner), then takes that run first.
     KAJIBA_E2E_PENDING_RUN="$(kajiba --token-file "$dir/token" --development ci run --detach alice/demo "$main_sha")"
     export KAJIBA_E2E_PENDING_RUN
+    # while this file exists every run fails (the activity scenario fails one on main)
+    export KAJIBA_E2E_FAIL_FLAG="$dir/fail-runs"
     export KAJIBA_E2E_START_RUNNER="$dir/start-runner"
     (
       while [ ! -e "$dir/start-runner" ]; do sleep 0.2; done

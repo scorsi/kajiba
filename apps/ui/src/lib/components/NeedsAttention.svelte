@@ -3,32 +3,14 @@
 	whose last finished run failed, a failing push mirror, an offline runner.
 	Renders nothing when all is well. Shared by Activity and Administration.
 -->
-<script lang="ts" module>
-	import { MirrorState, RunState, RunnerState } from '#lib/api.ts';
-	import { refShortName } from '#lib/format.ts';
-	import type { Forge } from '#lib/data/forge.ts';
-
-	export function attention(forge: Forge) {
-		return {
-			branches: forge.repos.flatMap((r) => {
-				const last = r.runs.find(
-					(x) => x.ref === r.repo.defaultBranch && x.state !== RunState.RUNNING
-				);
-				return last?.state === RunState.FAILED
-					? [{ key: r.key, branch: refShortName(r.repo.defaultBranch), run: last }]
-					: [];
-			}),
-			mirrors: forge.mirrors.filter((m) => m.state === MirrorState.FAILING),
-			runners: forge.runners.filter((r) => r.state === RunnerState.OFFLINE && !r.disabled)
-		};
-	}
-</script>
-
 <script lang="ts">
 	import Icon from '#lib/components/Icon.svelte';
 	import { relativeTime, toDate } from '#lib/format.ts';
 	import RunBadge from '#lib/components/RunBadge.svelte';
 	import { repoHref } from '#lib/data/forge.ts';
+	import { attention } from '#lib/data/events.ts';
+	import type { Forge } from '#lib/data/forge.ts';
+	import { RunState } from '#lib/api.ts';
 
 	let {
 		forge,
