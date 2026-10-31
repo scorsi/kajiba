@@ -5,6 +5,7 @@
   commonCargoArgs,
   cargoArtifacts,
   git,
+  openssh,
   procps,
 }:
 craneLib.buildPackage (
@@ -13,9 +14,10 @@ craneLib.buildPackage (
     inherit cargoArtifacts;
     pname = "kajiba-server";
     cargoExtraArgs = "--locked -p kajiba-server";
-    # Tests create Git repositories and inspect descendant cleanup with ps.
+    # Tests create signed Git fixtures and inspect descendant cleanup with ps.
     nativeCheckInputs = [
       git
+      openssh
       procps
     ];
     meta.mainProgram = "kajiba-server";

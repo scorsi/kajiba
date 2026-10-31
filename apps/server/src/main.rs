@@ -216,6 +216,7 @@ async fn main() -> ExitCode {
             let wake = std::sync::Arc::new(tokio::sync::Notify::new());
             dispatcher.register(db::runs::Ci {
                 now: db::runs::now,
+                repos: config.git.state_dir.join("repos"),
                 wake: wake.clone(),
             });
             let retention = db::retention::Pass {

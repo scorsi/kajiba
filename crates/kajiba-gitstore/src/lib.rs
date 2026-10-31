@@ -188,6 +188,8 @@ pub trait GitStore {
     /// when none): the longest leading run of segments naming a branch, then a tag,
     /// otherwise a full commit id as the first segment.
     fn resolve<'a>(&self, repo: &Path, spec: &'a str) -> Result<(String, &'a str)>;
+    /// The commit named by an object id, peeling annotated tags without resolving refs.
+    fn peel_commit(&self, repo: &Path, id: &str) -> Result<String>;
     /// `git <service> <options> <repo>`, to be spawned by the transport (SSH, HTTP
     /// with `--stateless-rpc`).
     fn transport(
@@ -1270,6 +1272,13 @@ impl GitStore for Gix<'_> {
         walked?;
         work.check()?;
         Ok(changes)
+    }
+
+    fn peel_commit(&self, repo: &Path, id: &str) -> Result<String> {
+        let repo = self.open(repo)?;
+        let id = gix::ObjectId::from_hex(id.as_bytes()).map_err(|_| Error::NotFound)?;
+        let commit = peel_to_commit(&repo, id)?;
+        Ok(commit.id.to_string())
     }
 
     fn resolve<'a>(&self, repo_path: &Path, spec: &'a str) -> Result<(String, &'a str)> {

@@ -2,6 +2,7 @@
 
 use super::events::{Event, Handler, NewEvent, append_event};
 use super::users::new_public_id;
+use kajiba_gitstore::{GitStore, Gix};
 use sqlx::SqliteConnection;
 
 /// The server clock in epoch milliseconds.
@@ -229,6 +230,7 @@ pub async fn create_run(
 /// keyed on the push event (`run.event_id`), so a replay creates nothing.
 pub struct Ci {
     pub now: fn() -> i64,
+    pub repos: std::path::PathBuf,
     /// Wakes matching once the new job is committed (0008).
     pub wake: std::sync::Arc<tokio::sync::Notify>,
 }
@@ -256,8 +258,8 @@ impl Handler for Ci {
         {
             return Ok(());
         }
-        let eligible: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM repo JOIN user ON user.id = ?
+        let eligible: Option<String> = sqlx::query_scalar(
+            "SELECT repo.public_id FROM repo JOIN user ON user.id = ?
              WHERE repo.id = ? AND repo.archived_at IS NULL AND repo.ci_enabled = 1
                AND user.kind = 'local'
                AND NOT EXISTS (SELECT 1 FROM run WHERE event_id = ?)",
@@ -267,14 +269,25 @@ impl Handler for Ci {
         .bind(event.id)
         .fetch_optional(&mut *tx)
         .await?;
-        if eligible.is_none() {
+        let Some(repo) = eligible else {
             return Ok(());
-        }
+        };
+        let sha = if reference.starts_with("refs/tags/") {
+            let root = self.repos.clone();
+            let dir = root.join(format!("{repo}.git"));
+            let new = new.to_owned();
+            tokio::task::spawn_blocking(move || Gix::shared(&root).peel_commit(&dir, &new))
+                .await
+                .map_err(|err| sqlx::Error::Io(std::io::Error::other(err)))?
+                .map_err(|err| sqlx::Error::Io(std::io::Error::other(err)))?
+        } else {
+            new.to_owned()
+        };
         let run = create_run(
             tx,
             &NewRun {
                 repo_id,
-                sha: new,
+                sha: &sha,
                 reference: Some(reference),
                 trigger: "push",
                 event_id: Some(event.id),

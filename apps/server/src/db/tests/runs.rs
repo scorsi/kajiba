@@ -4,6 +4,7 @@ use crate::db::runs::{
     AttemptState, Ci, JobState, NewRun, RunState, attempt_transition, create_run, job_transition,
     run_transition,
 };
+use kajiba_gitstore::{GitStore, Gix};
 
 const ZERO: &str = "0000000000000000000000000000000000000000";
 const SHA: &str = "1111111111111111111111111111111111111111";
@@ -47,9 +48,10 @@ async fn push(
     .unwrap()
 }
 
-async fn drain(writer: &mut SqliteConnection, bus: &EventBus) {
+async fn drain(writer: &mut SqliteConnection, bus: &EventBus, repos: &std::path::Path) {
     let mut ci = Ci {
         now: || 5000,
+        repos: repos.to_owned(),
         wake: std::sync::Arc::default(),
     };
     while bus.dispatch_next(writer, &mut ci).await.unwrap() {}
@@ -84,8 +86,47 @@ async fn ci_handler_runs_only_trusted_pushes_once() {
     let dir = TempDir::new();
     let (mut writer, readers) = open(&dir.database()).await.unwrap();
     populate(&mut writer).await;
+    let root = dir.0.join("repos");
+    std::fs::create_dir(&root).unwrap();
+    let repo = root.join("00000000000000000000000001.git");
+    let source = dir.0.join("source.git");
+    Gix.init_bare(&repo, "main").unwrap();
+    Gix.init_bare(&source, "main").unwrap();
+    let key = dir.0.join("signing-key");
+    assert!(
+        std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let git = |args: &[&str], input: &str| super::repos::git(&source, args, input);
+    let tree = git(&["mktree"], "");
+    let commit = git(&["commit-tree", &tree], "tagged commit\n");
+    git(
+        &[
+            "-c",
+            "gpg.format=ssh",
+            "-c",
+            &format!("user.signingkey={}", key.display()),
+            "tag",
+            "-s",
+            "v1",
+            &commit,
+            "-m",
+            "signed tag",
+        ],
+        "",
+    );
+    let tag_id = git(&["rev-parse", "refs/tags/v1"], "");
+    assert_ne!(tag_id, commit);
+    git(&["push", repo.to_str().unwrap(), "refs/tags/v1"], "");
     let branch = push(&mut writer, Some(1), 1, "refs/heads/main", SHA).await;
-    let tag = push(&mut writer, Some(1), 1, "refs/tags/v1", SHA).await;
+    let tag = push(&mut writer, Some(1), 1, "refs/tags/v1", &tag_id).await;
+    // The handler must use the event's object, even if the ref moves before dispatch.
+    let other = super::repos::git(&repo, &["commit-tree", &tree], "another commit\n");
+    super::repos::git(&repo, &["update-ref", "refs/tags/v1", &other], "");
     for (user, repo, reference, new) in [
         (Some(1), 1, "refs/contrib/alice/x", SHA),
         (Some(1), 1, "refs/heads/gone", ZERO),
@@ -97,7 +138,7 @@ async fn ci_handler_runs_only_trusted_pushes_once() {
         push(&mut writer, user, repo, reference, new).await;
     }
     let bus = EventBus::default();
-    drain(&mut writer, &bus).await;
+    drain(&mut writer, &bus, &root).await;
     let expected = vec![
         (
             1,
@@ -111,7 +152,7 @@ async fn ci_handler_runs_only_trusted_pushes_once() {
         ),
         (
             1,
-            SHA.into(),
+            commit.clone(),
             Some("refs/tags/v1".into()),
             "push".into(),
             Some(tag),
@@ -121,6 +162,10 @@ async fn ci_handler_runs_only_trusted_pushes_once() {
         ),
     ];
     assert_eq!(runs(&mut writer).await, expected);
+    let mut bundle = Vec::new();
+    Gix.bundle(&repo, &[expected[1].1.clone()], &[], &mut bundle)
+        .unwrap();
+    assert!(bundle.starts_with(b"# v2 git bundle\n"));
     let jobs: Vec<(String, String, bool, i64, String, Option<String>)> = sqlx::query_as(
         "SELECT name, requirements, replayable, max_attempts, state, pending_reason FROM job ORDER BY id",
     )
@@ -161,7 +206,8 @@ async fn ci_handler_runs_only_trusted_pushes_once() {
         assert_eq!(row.3, format!("request-{event}"));
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&row.4).unwrap(),
-            serde_json::json!({ "run": run, "trigger": "push", "ref": reference, "sha": SHA })
+            serde_json::json!({ "run": run, "trigger": "push", "ref": reference,
+                "sha": if event == tag { commit.as_str() } else { SHA } })
         );
     }
 
@@ -170,7 +216,7 @@ async fn ci_handler_runs_only_trusted_pushes_once() {
         .execute(&mut writer)
         .await
         .unwrap();
-    drain(&mut writer, &bus).await;
+    drain(&mut writer, &bus, &root).await;
     assert_eq!(runs(&mut writer).await, expected);
     assert_eq!(count(&mut writer, "SELECT count(*) FROM job").await, 2);
     assert_eq!(
