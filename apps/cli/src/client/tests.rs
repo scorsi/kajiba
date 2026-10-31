@@ -246,6 +246,7 @@ impl AuthService for Fake {
             Ok(GetViewerResponse {
                 user: state.viewer.clone(),
                 admin: false,
+                keys: vec![],
             })
         })
     }

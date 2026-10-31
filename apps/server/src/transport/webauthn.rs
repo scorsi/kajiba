@@ -1,16 +1,17 @@
 //! WebAuthn relying party, in-memory ceremony state and the JSON ceremony routes under
-//! `/auth/webauthn/` (ADR 0014, 0019, 0020, 0083, 0084, 0085).
+//! `/auth/webauthn/` (ADR 0014, 0019, 0020, 0083, 0084, 0085, 0143).
 // Refusals are whole responses, returned by value to the handlers anyway.
 #![allow(clippy::result_large_err)]
 use super::{
     Health,
     auth::{now, set_cookie},
 };
+use crate::db::credentials::Found;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Request, State},
     http::{
-        StatusCode,
+        HeaderMap, StatusCode,
         header::{RETRY_AFTER, SET_COOKIE},
     },
     middleware::{self, Next},
@@ -27,8 +28,9 @@ use std::{
 };
 use tokio::sync::Semaphore;
 use webauthn_rs::prelude::{
-    DiscoverableAuthentication, DiscoverableKey, Passkey, PasskeyRegistration, PublicKeyCredential,
-    RegisterPublicKeyCredential, Url, Uuid, Webauthn, WebauthnBuilder,
+    DiscoverableAuthentication, DiscoverableKey, Passkey, PasskeyAuthentication,
+    PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential, Url, Uuid, Webauthn,
+    WebauthnBuilder,
 };
 
 /// A challenge is valid for five minutes (ADR 0014).
@@ -41,6 +43,8 @@ pub const MAX_BODY: usize = 64 * 1024;
 pub const MAX_REQUESTS: usize = 32;
 /// Longest passkey name, in characters (ADR 0084).
 const MAX_NAME: usize = 64;
+/// A step-up lets its session add or remove passkeys for five minutes (ADR 0143).
+pub const STEP_UP_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// RP ID = host of `http.public_url`, origin = the URL itself, port included (ADR 0014,
 /// 0019). A host that is not a domain name (an IP address) cannot be an RP ID.
@@ -115,6 +119,16 @@ enum Ceremony {
         token_hash: [u8; 32],
     },
     Login(DiscoverableAuthentication),
+    /// Re-authentication of a signed-in session with one of its user's passkeys.
+    StepUp {
+        state: PasskeyAuthentication,
+        session: i64,
+    },
+    /// An additional passkey for a session that stepped up.
+    Register {
+        state: PasskeyRegistration,
+        session: i64,
+    },
 }
 
 /// The relying party, the outstanding ceremonies and the lifetime of the sessions the
@@ -186,6 +200,10 @@ pub(super) fn routes(health: Health) -> Router {
         .route("/auth/webauthn/enroll/finish", post(enroll_finish))
         .route("/auth/webauthn/login/start", post(login_start))
         .route("/auth/webauthn/login/finish", post(login_finish))
+        .route("/auth/webauthn/step-up/start", post(step_up_start))
+        .route("/auth/webauthn/step-up/finish", post(step_up_finish))
+        .route("/auth/webauthn/register/start", post(register_start))
+        .route("/auth/webauthn/register/finish", post(register_finish))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .route_layer(middleware::from_fn_with_state(budget, admit))
         .with_state(health)
@@ -263,8 +281,8 @@ async fn enroll_finish(State(health): State<Health>, Json(body): Json<EnrollFini
         return starting();
     };
     // Checked first: a bad name must not burn the ceremony.
-    if body.name.chars().count() > MAX_NAME || body.name.chars().any(char::is_control) {
-        return refusal(StatusCode::BAD_REQUEST, "NAME_INVALID");
+    if let Err(response) = valid_name(&body.name) {
+        return response;
     }
     let (state, user, token_hash) = match passkeys.finish(&body.ceremony) {
         Ok(Ceremony::Enroll {
@@ -272,7 +290,7 @@ async fn enroll_finish(State(health): State<Health>, Json(body): Json<EnrollFini
             user,
             token_hash,
         }) => (state, user, token_hash),
-        Ok(Ceremony::Login(_)) => return refused("CEREMONY_INVALID"),
+        Ok(_) => return refused("CEREMONY_INVALID"),
         Err(response) => return response,
     };
     // Checks the challenge, the origin and the RP ID among others.
@@ -357,7 +375,7 @@ async fn login_finish(State(health): State<Health>, Json(body): Json<LoginFinish
     };
     let state = match passkeys.finish(&body.ceremony) {
         Ok(Ceremony::Login(state)) => state,
-        Ok(Ceremony::Enroll { .. }) => return refused("CEREMONY_INVALID"),
+        Ok(_) => return refused("CEREMONY_INVALID"),
         Err(response) => return response,
     };
     let Ok((handle, credential_id)) = passkeys
@@ -410,6 +428,294 @@ async fn login_finish(State(health): State<Health>, Json(body): Json<LoginFinish
     match opened {
         Ok(Some(cookie)) => session_opened(&cookie, passkeys.session_ttl),
         Ok(None) => refused("PASSKEY_INVALID"),
+        Err(err) => internal(err),
+    }
+}
+
+fn valid_name(name: &str) -> Result<(), Response> {
+    if name.chars().count() > MAX_NAME || name.chars().any(char::is_control) {
+        return Err(refusal(StatusCode::BAD_REQUEST, "NAME_INVALID"));
+    }
+    Ok(())
+}
+
+/// The request's valid session; `401` `SESSION_INVALID` without one (ADR 0143).
+async fn signed_in(
+    connection: impl sqlx::SqliteExecutor<'_>,
+    headers: &HeaderMap,
+    now: i64,
+) -> Result<Found, Response> {
+    match super::auth::session(connection, headers, now).await {
+        Ok(Some(found)) => Ok(found),
+        Ok(None) => Err(refusal(StatusCode::UNAUTHORIZED, "SESSION_INVALID")),
+        Err(err) => Err(internal(err)),
+    }
+}
+
+/// The request's valid session, the one `ceremony` was started by (a cookie of another
+/// session, even of the same user, cannot finish it).
+async fn same_session(
+    connection: impl sqlx::SqliteExecutor<'_>,
+    headers: &HeaderMap,
+    now: i64,
+    ceremony: i64,
+) -> Result<Found, Response> {
+    let found = signed_in(connection, headers, now).await?;
+    if found.id != ceremony {
+        return Err(refused("CEREMONY_INVALID"));
+    }
+    Ok(found)
+}
+
+/// Refuses with `403` `STEP_UP_REQUIRED` unless session `id` stepped up within
+/// `STEP_UP_TTL` (ADR 0143).
+async fn stepped_up(
+    connection: impl sqlx::SqliteExecutor<'_>,
+    id: i64,
+    now: i64,
+) -> Result<(), Response> {
+    match crate::db::sessions::step_up_fresh(connection, id, STEP_UP_TTL.as_millis() as i64, now)
+        .await
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(refused("STEP_UP_REQUIRED")),
+        Err(err) => Err(internal(err)),
+    }
+}
+
+/// The passkeys of `user`, deserialized.
+async fn passkeys_of(
+    connection: impl sqlx::SqliteExecutor<'_>,
+    user: i64,
+) -> Result<Vec<Passkey>, Response> {
+    crate::db::passkeys::of_user(connection, user)
+        .await
+        .map_err(internal)?
+        .iter()
+        .map(|stored| serde_json::from_str(stored).map_err(internal))
+        .collect()
+}
+
+/// Step-up (ADR 0143): a signed-in session asks for an assertion by one of its user's
+/// passkeys, named in the request options.
+async fn step_up_start(State(health): State<Health>, headers: HeaderMap) -> Response {
+    let (Some(passkeys), Some(readers)) = (health.passkeys.get(), health.database.get()) else {
+        return starting();
+    };
+    let Ok(now) = now() else {
+        return internal("clock");
+    };
+    let session = match signed_in(readers, &headers, now).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    let allowed = match passkeys_of(readers, session.user_id).await {
+        Ok(allowed) if !allowed.is_empty() => allowed,
+        Ok(_) => return refused("PASSKEY_INVALID"),
+        Err(response) => return response,
+    };
+    let (options, state) = match passkeys.webauthn.start_passkey_authentication(&allowed) {
+        Ok(started) => started,
+        Err(err) => return internal(err),
+    };
+    match passkeys.begin(Ceremony::StepUp {
+        state,
+        session: session.id,
+    }) {
+        Ok(ceremony) => {
+            Json(serde_json::json!({ "ceremony": ceremony, "options": options })).into_response()
+        }
+        Err(response) => response,
+    }
+}
+
+async fn step_up_finish(
+    State(health): State<Health>,
+    headers: HeaderMap,
+    Json(body): Json<LoginFinish>,
+) -> Response {
+    let (Some(passkeys), Some(writer)) = (health.passkeys.get(), health.writer.get()) else {
+        return starting();
+    };
+    let (state, session) = match passkeys.finish(&body.ceremony) {
+        Ok(Ceremony::StepUp { state, session }) => (state, session),
+        Ok(_) => return refused("CEREMONY_INVALID"),
+        Err(response) => return response,
+    };
+    let Ok(now) = now() else {
+        return internal("clock");
+    };
+    // Serialized with logins, removals and recovery, as login is.
+    let mut writer = writer.lock().await;
+    let mut tx = match writer.begin().await {
+        Ok(tx) => tx,
+        Err(err) => return internal(err),
+    };
+    let session = match same_session(&mut *tx, &headers, now, session).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    // A passkey removed since the start, or another user's credential.
+    let (id, stored) =
+        match crate::db::passkeys::find(&mut tx, body.credential.raw_id.as_ref()).await {
+            Ok(Some((id, user, _, stored))) if user == session.user_id => (id, stored),
+            Ok(_) => return refused("PASSKEY_INVALID"),
+            Err(err) => return internal(err),
+        };
+    let mut passkey: Passkey = match serde_json::from_str(&stored) {
+        Ok(passkey) => passkey,
+        Err(err) => return internal(err),
+    };
+    // Checks the challenge, the origin, the allowed credentials, the signature and user
+    // verification.
+    let Ok(result) = passkeys
+        .webauthn
+        .finish_passkey_authentication(&body.credential, &state)
+    else {
+        return refused("VERIFICATION_FAILED");
+    };
+    passkey.update_credential(&result);
+    let Ok(serialized) = serde_json::to_string(&passkey) else {
+        return internal("passkey state");
+    };
+    let recorded = async {
+        if !crate::db::passkeys::used(&mut tx, &id, session.user_id, &serialized, now).await?
+            || !crate::db::sessions::stepped_up(&mut tx, session.id, now).await?
+        {
+            return Ok(false);
+        }
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(true)
+    }
+    .await;
+    match recorded {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => refused("PASSKEY_INVALID"),
+        Err(err) => internal(err),
+    }
+}
+
+/// An additional passkey (ADR 0143): the session must have stepped up; the user's
+/// passkeys are excluded so that an authenticator does not register twice.
+async fn register_start(State(health): State<Health>, headers: HeaderMap) -> Response {
+    let (Some(passkeys), Some(readers)) = (health.passkeys.get(), health.database.get()) else {
+        return starting();
+    };
+    let Ok(now) = now() else {
+        return internal("clock");
+    };
+    let session = match signed_in(readers, &headers, now).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if let Err(response) = stepped_up(readers, session.id, now).await {
+        return response;
+    }
+    let user: Result<(String, String), _> =
+        sqlx::query_as("SELECT public_id, name FROM user WHERE id = ?")
+            .bind(session.user_id)
+            .fetch_one(readers)
+            .await;
+    let (public_id, name) = match user {
+        Ok(user) => user,
+        Err(err) => return internal(err),
+    };
+    let excluded = match passkeys_of(readers, session.user_id).await {
+        Ok(existing) => existing.iter().map(|p| p.cred_id().clone()).collect(),
+        Err(response) => return response,
+    };
+    let (options, state) = match passkeys.webauthn.start_passkey_registration(
+        user_handle(&public_id),
+        &name,
+        &name,
+        Some(excluded),
+    ) {
+        Ok(started) => started,
+        Err(err) => return internal(err),
+    };
+    // Discoverable, as at enrollment (ADR 0085).
+    let mut options = serde_json::json!(options);
+    options["publicKey"]["authenticatorSelection"]["residentKey"] = "required".into();
+    match passkeys.begin(Ceremony::Register {
+        state,
+        session: session.id,
+    }) {
+        Ok(ceremony) => {
+            Json(serde_json::json!({ "ceremony": ceremony, "options": options })).into_response()
+        }
+        Err(response) => response,
+    }
+}
+
+#[derive(Deserialize)]
+struct RegisterFinish {
+    ceremony: String,
+    credential: RegisterPublicKeyCredential,
+    #[serde(default)]
+    name: String,
+}
+
+/// Stores the additional passkey; the session and its cookie stay as they are.
+async fn register_finish(
+    State(health): State<Health>,
+    headers: HeaderMap,
+    Json(body): Json<RegisterFinish>,
+) -> Response {
+    let (Some(passkeys), Some(writer)) = (health.passkeys.get(), health.writer.get()) else {
+        return starting();
+    };
+    if let Err(response) = valid_name(&body.name) {
+        return response;
+    }
+    let (state, session) = match passkeys.finish(&body.ceremony) {
+        Ok(Ceremony::Register { state, session }) => (state, session),
+        Ok(_) => return refused("CEREMONY_INVALID"),
+        Err(response) => return response,
+    };
+    let Ok(passkey) = passkeys
+        .webauthn
+        .finish_passkey_registration(&body.credential, &state)
+    else {
+        return refused("VERIFICATION_FAILED");
+    };
+    let Ok(serialized) = serde_json::to_string(&passkey) else {
+        return internal("passkey state");
+    };
+    let Ok(now) = now() else {
+        return internal("clock");
+    };
+    let mut writer = writer.lock().await;
+    let mut tx = match writer.begin().await {
+        Ok(tx) => tx,
+        Err(err) => return internal(err),
+    };
+    // Logout, recovery or an expired step-up since the start.
+    let session = match same_session(&mut *tx, &headers, now, session).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if let Err(response) = stepped_up(&mut *tx, session.id, now).await {
+        return response;
+    }
+    let stored = async {
+        crate::db::passkeys::insert(
+            &mut tx,
+            session.user_id,
+            passkey.cred_id().as_ref(),
+            &serialized,
+            &body.name,
+            now,
+        )
+        .await?;
+        tx.commit().await
+    }
+    .await;
+    match stored {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        // A credential already registered, by this user or another.
+        Err(sqlx::Error::Database(err)) if err.is_unique_violation() => {
+            refused("VERIFICATION_FAILED")
+        }
         Err(err) => internal(err),
     }
 }

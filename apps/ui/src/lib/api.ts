@@ -2,8 +2,8 @@
  * Data access for the whole UI — the ONLY module views use to get data.
  *
  * Mirrors `kajiba.v1` with protobuf-es naming (camelCase fields, `{ … }` request
- * objects, numeric enums). Sign-in, enrollment, logout, `getViewer` and token
- * management talk to kajiba-server (the WebAuthn ceremonies and the committed
+ * objects, numeric enums). Sign-in, enrollment, logout, `getViewer`, passkey and
+ * token management talk to kajiba-server (the WebAuthn ceremonies and the committed
  * connect-web client); everything else is still a MOCK reading `./mock.ts`, replaced
  * slice by slice in J5 keeping the exported names and types.
  *
@@ -15,7 +15,8 @@
 
 import { createClient } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
-import { AuthService } from "./gen/kajiba/v1/auth_pb.ts";
+import { AuthService, SshKeyUsage } from "./gen/kajiba/v1/auth_pb.ts";
+import { PasskeyService } from "./gen/kajiba/v1/passkey_pb.ts";
 import { Scope } from "./gen/kajiba/v1/options_pb.ts";
 import {
   RunService,
@@ -35,7 +36,6 @@ import {
 } from "./gen/kajiba/v1/token_pb.ts";
 import {
   MOCK_MIRROR_STATUS,
-  MOCK_PASSKEYS,
   MOCK_TOKENS,
   MOCK_REPOS,
   MOCK_SERVER,
@@ -328,18 +328,36 @@ export async function listRefs(req: { repo: RepoRef }) {
   };
 }
 
+/** A declared SSH key: its identity only, read-only (ADR 0143). */
+export interface SshKey {
+  usage: "auth" | "signing";
+  keyType: string;
+  /** `SHA256:…` */
+  fingerprint: string;
+}
+
 export interface Viewer {
   user: string;
   /** Forge administrator (sees Administration). */
   admin: boolean;
+  /** Declared SSH keys, authentication then signing. */
+  keys: SshKey[];
 }
 
 const auth = createClient(AuthService, transport);
 
 /** `AuthService.GetViewer` — who is signed in. Throws `Unauthenticated` otherwise (ADR 0087). */
 export async function getViewer(): Promise<Viewer> {
-  const { user, admin } = await auth.getViewer({});
-  return { user, admin };
+  const { user, admin, keys } = await auth.getViewer({});
+  return {
+    user,
+    admin,
+    keys: keys.map((k) => ({
+      usage: k.usage === SshKeyUsage.SIGNING ? "signing" : "auth",
+      keyType: k.keyType,
+      fingerprint: k.fingerprint,
+    })),
+  };
 }
 
 /** `AuthService.Logout` — ends the browser session and clears its cookie (ADR 0079). */
@@ -474,11 +492,11 @@ export async function getServerInfo(): Promise<ServerInfo> {
   };
 }
 
-// ── ASSUMED: auth / account service ─────────────────────────────────────
+// ── Account: passkeys and tokens ────────────────────────────────────────
 
 export interface Passkey {
   id: string;
-  /** Label chosen at enrolment (authenticator name). */
+  /** Label chosen at enrolment; empty when none was given. */
   name: string;
   createTime?: Timestamp;
   lastUsedTime?: Timestamp;
@@ -505,47 +523,33 @@ export interface Token {
   revokedTime?: Timestamp;
 }
 
-const ts = (s?: number): Timestamp | undefined =>
-  s === undefined ? undefined : { seconds: BigInt(s), nanos: 0 };
-const nowSec = () => Math.floor(Date.now() / 1000);
+const passkeyService = createClient(PasskeyService, transport);
 
-/** ASSUMED `ListPasskeys`. */
+/** `ListPasskeys` — all pages, oldest first. */
 export async function listPasskeys() {
-  await mockGate();
-  const passkeys: Passkey[] = MOCK_PASSKEYS.map((p) => ({
-    id: p.id,
-    name: p.name,
-    createTime: ts(p.created),
-    lastUsedTime: ts(p.lastUsed),
-  }));
+  const passkeys: Passkey[] = [];
+  let pageToken = "";
+  do {
+    const page = await passkeyService.listPasskeys({ pageToken });
+    passkeys.push(
+      ...page.passkeys.map((p) => ({
+        id: p.publicId,
+        name: p.name,
+        createTime: p.createdAt,
+        lastUsedTime: p.lastUsedAt,
+      })),
+    );
+    pageToken = page.nextPageToken;
+  } while (pageToken);
   return { passkeys };
 }
 
 /**
- * ASSUMED `BeginPasskeyEnrollment` + `navigator.credentials.create` +
- * `FinishPasskeyEnrollment`. `replaceId` re-enrols (replaces) an existing one.
+ * `DeletePasskey` — needs a `stepUp()` less than five minutes old; the last passkey is
+ * refused (ADR 0143).
  */
-export async function enrollPasskey(req: {
-  name: string;
-  replaceId?: string;
-}): Promise<Passkey> {
-  await mockGate();
-  await new Promise((r) => setTimeout(r, 900)); // the authenticator prompt
-  const pk = {
-    id: `pk_${Date.now()}`,
-    name: req.name,
-    created: nowSec(),
-    lastUsed: nowSec(),
-  };
-  const i = MOCK_PASSKEYS.findIndex((p) => p.id === req.replaceId);
-  if (i >= 0) MOCK_PASSKEYS.splice(i, 1, pk);
-  else MOCK_PASSKEYS.push(pk);
-  return {
-    id: pk.id,
-    name: pk.name,
-    createTime: ts(pk.created),
-    lastUsedTime: ts(pk.lastUsed),
-  };
+export async function deletePasskey(req: { id: string }) {
+  await passkeyService.deletePasskey({ publicId: req.id });
 }
 
 const tokens = createClient(TokenService, transport);
@@ -609,6 +613,9 @@ const REFUSALS: Record<string, string> = {
   VERIFICATION_FAILED: "The passkey could not be verified.",
   PASSKEY_INVALID: "This passkey is not recognised.",
   NAME_INVALID: "The passkey name is too long or contains control characters.",
+  SESSION_INVALID: "Your session has ended. Sign in again.",
+  STEP_UP_REQUIRED:
+    "Confirm with one of your passkeys first; a confirmation lasts five minutes.",
   CEREMONIES_FULL:
     "Too many sign-ins are in progress. Try again in a few minutes.",
   BUSY: "The server is busy. Try again in a moment.",
@@ -626,7 +633,11 @@ async function ceremony(path: string, body?: unknown): Promise<Response> {
     .then((r: { reason?: string }) => r.reason ?? "")
     .catch(() => "");
   throw new ApiError(
-    res.status === 503 ? Code.Unavailable : Code.PermissionDenied,
+    res.status === 503
+      ? Code.Unavailable
+      : res.status === 401
+        ? Code.Unauthenticated
+        : Code.PermissionDenied,
     REFUSALS[reason] ?? `kajiba-server answered ${res.status}.`,
   );
 }
@@ -705,6 +716,63 @@ export async function completeEnrollment(req: {
     name: req.name,
   });
   return getViewer();
+}
+
+/**
+ * Step-up (ADR 0143): re-authenticates this session with one of the user's passkeys;
+ * adding or removing a passkey is then allowed for five minutes.
+ */
+export async function stepUp(): Promise<void> {
+  const started = (await (await ceremony("step-up/start")).json()) as {
+    ceremony: string;
+    options: { publicKey: PublicKeyCredentialRequestOptionsJSON };
+  };
+  const publicKey = PublicKeyCredential.parseRequestOptionsFromJSON(
+    started.options.publicKey,
+  );
+  const credential = await prompt(() =>
+    navigator.credentials.get({ publicKey }),
+  );
+  await ceremony("step-up/finish", {
+    ceremony: started.ceremony,
+    credential: (credential as PublicKeyCredential).toJSON(),
+  });
+}
+
+/** An additional passkey's ceremony, started after a step-up. */
+export interface Registration {
+  ceremony: string;
+  publicKey: PublicKeyCredentialCreationOptionsJSON;
+}
+
+/**
+ * Starts registering an additional passkey (ADR 0143). Started before the click that
+ * creates it, so that the browser prompt opens from that click.
+ */
+export async function startPasskeyRegistration(): Promise<Registration> {
+  const started = (await (await ceremony("register/start")).json()) as {
+    ceremony: string;
+    options: { publicKey: PublicKeyCredentialCreationOptionsJSON };
+  };
+  return { ceremony: started.ceremony, publicKey: started.options.publicKey };
+}
+
+/** Creates and stores the additional passkey; the session stays as it is. */
+export async function addPasskey(req: {
+  registration: Registration;
+  name: string;
+}): Promise<void> {
+  const publicKey = PublicKeyCredential.parseCreationOptionsFromJSON(
+    req.registration.publicKey,
+  );
+  const credential = await prompt(() =>
+    navigator.credentials.create({ publicKey }),
+  );
+  await ceremony("register/finish", {
+    ceremony: req.registration.ceremony,
+    credential: (credential as PublicKeyCredential).toJSON(),
+    name: req.name,
+  });
 }
 
 // ── RunService ──────────────────────────────────────────────────────────

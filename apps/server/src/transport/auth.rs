@@ -17,8 +17,8 @@ use kajiba_core::version::semver;
 use kajiba_proto::{
     Access,
     v1::{
-        GetViewerRequest, GetViewerResponse, LogoutRequest, LogoutResponse, Scope,
-        auth_service_server::AuthService,
+        GetViewerRequest, GetViewerResponse, LogoutRequest, LogoutResponse, Scope, SshKey,
+        SshKeyUsage, auth_service_server::AuthService,
     },
 };
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -159,6 +159,21 @@ fn cookie(headers: &HeaderMap) -> Option<&str> {
         .find_map(|pair| pair.trim().strip_prefix(SESSION_COOKIE)?.strip_prefix('='))
 }
 
+/// The valid session of a request's cookie, resolved and admitted as the interceptor does:
+/// for the ceremony routes that act for a signed-in user (ADR 0143).
+pub(super) async fn session(
+    connection: impl sqlx::SqliteExecutor<'_>,
+    headers: &HeaderMap,
+    now: i64,
+) -> Result<Option<Found>, sqlx::Error> {
+    let Some(value) = cookie(headers) else {
+        return Ok(None);
+    };
+    let found =
+        crate::db::sessions::find(connection, &kajiba_core::sha256(value.as_bytes())).await?;
+    Ok(admit(found, now).ok())
+}
+
 /// Unknown, revoked or disabled-user credentials are invalid; a credential is expired
 /// from its `expires_at` instant on. `now` is UTC epoch milliseconds.
 pub(super) fn admit(found: Option<Found>, now: i64) -> Result<Found, Refusal> {
@@ -233,7 +248,10 @@ impl Auth {
         };
         let found = admit(found, now).map_err(refuse)?;
         // ADR 0081: a valid PAT is refused regardless of its scopes.
-        if session.is_none() && path.starts_with("/kajiba.v1.TokenService/") {
+        if session.is_none()
+            && (path.starts_with("/kajiba.v1.TokenService/")
+                || path.starts_with("/kajiba.v1.PasskeyService/"))
+        {
             return Err(refused(
                 tonic::Code::PermissionDenied,
                 "SESSION_REQUIRED",
@@ -350,10 +368,32 @@ impl AuthService for Sessions {
                 .fetch_one(readers)
                 .await
                 .map_err(|err| Status::internal(format!("viewer: {err}")))?;
+        // Declared keys only, read-only (ADR 0143); `auth` sorts before `signing`.
+        let keys: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT usage, key_type, fingerprint FROM ssh_key
+             WHERE user_id = ? AND source = 'config' ORDER BY usage, fingerprint",
+        )
+        .bind(principal.user_id)
+        .fetch_all(readers)
+        .await
+        .map_err(|err| Status::internal(format!("viewer: {err}")))?;
         Ok(tonic::Response::new(GetViewerResponse {
             user,
             // The `admin` scope never grants more than the user's real rights (ADR 0081).
             admin: is_admin && principal.scopes.contains(&Scope::Admin),
+            keys: keys
+                .into_iter()
+                .map(|(usage, key_type, fingerprint)| SshKey {
+                    usage: if usage == "signing" {
+                        SshKeyUsage::Signing
+                    } else {
+                        SshKeyUsage::Auth
+                    }
+                    .into(),
+                    key_type,
+                    fingerprint,
+                })
+                .collect(),
         }))
     }
 }

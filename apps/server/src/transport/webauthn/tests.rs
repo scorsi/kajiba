@@ -126,10 +126,21 @@ mod ceremonies {
         path: &str,
         body: serde_json::Value,
     ) -> (StatusCode, Option<String>, serde_json::Value) {
-        let request = Request::post(path)
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap();
+        post_as(app, path, None, body).await
+    }
+
+    /// `post` with the session cookie `cookie`, if any.
+    async fn post_as(
+        app: &mut Router,
+        path: &str,
+        cookie: Option<&str>,
+        body: serde_json::Value,
+    ) -> (StatusCode, Option<String>, serde_json::Value) {
+        let mut request = Request::post(path).header("content-type", "application/json");
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", format!("kajiba_session={cookie}"));
+        }
+        let request = request.body(Body::from(body.to_string())).unwrap();
         let response = app.call(request).await.unwrap();
         let status = response.status();
         let cookie = response
@@ -464,6 +475,8 @@ mod ceremonies {
             "/auth/webauthn/enroll/start",
             "/auth/webauthn/enroll/finish",
             "/auth/webauthn/login/finish",
+            "/auth/webauthn/step-up/finish",
+            "/auth/webauthn/register/finish",
         ] {
             let (status, _, _) = raw(&mut app, path, enroll_body(MAX_BODY + 1)).await;
             assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{path}");
@@ -503,6 +516,10 @@ mod ceremonies {
             "/auth/webauthn/enroll/finish",
             "/auth/webauthn/login/start",
             "/auth/webauthn/login/finish",
+            "/auth/webauthn/step-up/start",
+            "/auth/webauthn/step-up/finish",
+            "/auth/webauthn/register/start",
+            "/auth/webauthn/register/finish",
         ] {
             // An oversized body is not read: refused as busy, not as too large.
             assert_eq!(
@@ -803,6 +820,435 @@ mod ceremonies {
         assert_eq!(
             login(&mut app, &enrollment, &credential).await,
             refused("CEREMONY_INVALID")
+        );
+    }
+
+    fn cookie_value(set_cookie: &str) -> String {
+        let value = set_cookie.strip_prefix("kajiba_session=").unwrap();
+        value.split(';').next().unwrap().into()
+    }
+
+    /// Signs in with `authenticator`'s credential: the session cookie value.
+    async fn signed_in(
+        app: &mut Router,
+        authenticator: &mut WebauthnAuthenticator<SoftPasskey>,
+        id: &[u8],
+        handle: Uuid,
+    ) -> String {
+        let (ceremony, credential) = assertion(app, authenticator, id, handle, ORIGIN).await;
+        let (status, cookie, _) = login(app, &ceremony, &credential).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        cookie_value(&cookie.unwrap())
+    }
+
+    /// Starts a step-up for session `cookie` and signs it from `origin` with credential `id`
+    /// of `authenticator`, whether the server allowed it or not: the ceremony and assertion.
+    async fn step_up_assertion(
+        app: &mut Router,
+        cookie: &str,
+        authenticator: &mut WebauthnAuthenticator<SoftPasskey>,
+        id: &[u8],
+        origin: &str,
+    ) -> (String, PublicKeyCredential) {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let (status, _, mut json) = post_as(
+            app,
+            "/auth/webauthn/step-up/start",
+            Some(cookie),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let options = &mut json["options"];
+        options["publicKey"]["allowCredentials"] =
+            serde_json::json!([{ "type": "public-key", "id": URL_SAFE_NO_PAD.encode(id) }]);
+        let credential = authenticator
+            .do_authentication(
+                Url::parse(origin).unwrap(),
+                serde_json::from_value(options.take()).unwrap(),
+            )
+            .unwrap();
+        (json["ceremony"].as_str().unwrap().into(), credential)
+    }
+
+    /// Finishes a step-up: the status, any `Set-Cookie` and the refusal reason.
+    async fn finish_step_up(
+        app: &mut Router,
+        cookie: &str,
+        ceremony: &str,
+        credential: &PublicKeyCredential,
+    ) -> (StatusCode, Option<String>, Option<String>) {
+        let (status, set_cookie, json) = post_as(
+            app,
+            "/auth/webauthn/step-up/finish",
+            Some(cookie),
+            serde_json::json!({ "ceremony": ceremony, "credential": credential }),
+        )
+        .await;
+        (status, set_cookie, json["reason"].as_str().map(Into::into))
+    }
+
+    async fn step_up(
+        app: &mut Router,
+        cookie: &str,
+        authenticator: &mut WebauthnAuthenticator<SoftPasskey>,
+        id: &[u8],
+    ) {
+        let (ceremony, credential) =
+            step_up_assertion(app, cookie, authenticator, id, ORIGIN).await;
+        assert_eq!(
+            finish_step_up(app, cookie, &ceremony, &credential).await,
+            (StatusCode::NO_CONTENT, None, None)
+        );
+    }
+
+    async fn register_start(
+        app: &mut Router,
+        cookie: Option<&str>,
+    ) -> Result<(String, CreationChallengeResponse), (StatusCode, String)> {
+        let (status, _, json) = post_as(
+            app,
+            "/auth/webauthn/register/start",
+            cookie,
+            serde_json::json!({}),
+        )
+        .await;
+        if status != StatusCode::OK {
+            return Err((status, json["reason"].as_str().unwrap_or_default().into()));
+        }
+        Ok((
+            json["ceremony"].as_str().unwrap().into(),
+            serde_json::from_value(json["options"].clone()).unwrap(),
+        ))
+    }
+
+    /// Registers a new authenticator for session `cookie`: the status, any `Set-Cookie`,
+    /// the refusal reason, and the authenticator with its credential id.
+    async fn register(
+        app: &mut Router,
+        cookie: &str,
+        ceremony: &str,
+        options: CreationChallengeResponse,
+    ) -> (
+        (StatusCode, Option<String>, Option<String>),
+        WebauthnAuthenticator<SoftPasskey>,
+        Vec<u8>,
+    ) {
+        let mut authenticator = authenticator();
+        let credential = authenticator
+            .do_registration(Url::parse(ORIGIN).unwrap(), options)
+            .unwrap();
+        let (status, set_cookie, json) = post_as(
+            app,
+            "/auth/webauthn/register/finish",
+            Some(cookie),
+            serde_json::json!({ "ceremony": ceremony, "credential": credential, "name": "backup" }),
+        )
+        .await;
+        let id = credential.raw_id.as_ref().to_vec();
+        (
+            (status, set_cookie, json["reason"].as_str().map(Into::into)),
+            authenticator,
+            id,
+        )
+    }
+
+    fn step_up_required() -> Result<(), (StatusCode, String)> {
+        Err((StatusCode::FORBIDDEN, "STEP_UP_REQUIRED".into()))
+    }
+
+    async fn passkeys_of(fixture: &Fixture, user: &str) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT webauthn_credential.public_id, webauthn_credential.name FROM webauthn_credential
+             JOIN user ON user.id = user_id WHERE user.name = ? ORDER BY webauthn_credential.id",
+        )
+        .bind(user)
+        .fetch_all(fixture.repos.readers().unwrap())
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_step_up_lets_the_session_add_a_passkey() {
+        let (fixture, mut app) = fixture().await;
+        let (mut first, first_id, handle) = enrolled(&fixture, &mut app, "alice").await;
+        let cookie = signed_in(&mut app, &mut first, &first_id, handle).await;
+        let session_invalid = Err((StatusCode::UNAUTHORIZED, "SESSION_INVALID".into()));
+        assert_eq!(
+            register_start(&mut app, None).await.map(drop),
+            session_invalid
+        );
+        let (status, _, json) = post(
+            &mut app,
+            "/auth/webauthn/step-up/start",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(
+            (status, json["reason"].as_str()),
+            (StatusCode::UNAUTHORIZED, Some("SESSION_INVALID"))
+        );
+        // An open session is not enough.
+        assert_eq!(
+            register_start(&mut app, Some(&cookie)).await.map(drop),
+            step_up_required()
+        );
+
+        step_up(&mut app, &cookie, &mut first, &first_id).await;
+        let (ceremony, options) = register_start(&mut app, Some(&cookie)).await.unwrap();
+        let json = serde_json::json!(options);
+        assert_eq!(
+            json["publicKey"]["authenticatorSelection"]["residentKey"],
+            "required"
+        );
+        assert_eq!(
+            options.public_key.user.id.as_ref(),
+            handle.as_bytes(),
+            "the user handle of enrollment"
+        );
+        let excluded: Vec<Vec<u8>> = options
+            .public_key
+            .exclude_credentials
+            .clone()
+            .unwrap_or_default()
+            .iter()
+            .map(|credential| credential.id.as_ref().to_vec())
+            .collect();
+        assert_eq!(excluded, std::slice::from_ref(&first_id));
+        let (answer, mut second, second_id) = register(&mut app, &cookie, &ceremony, options).await;
+        // No new session: the caller's stays.
+        assert_eq!(answer, (StatusCode::NO_CONTENT, None, None));
+        let names: Vec<_> = passkeys_of(&fixture, "alice")
+            .await
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        assert_eq!(names, ["", "backup"]);
+        assert_eq!(count(&fixture, "session").await, 2);
+        // The new passkey signs in; the ceremony cannot be finished twice.
+        signed_in(&mut app, &mut second, &second_id, handle).await;
+        let (_, options) = register_start(&mut app, Some(&cookie)).await.unwrap();
+        let (answer, ..) = register(&mut app, &cookie, &ceremony, options).await;
+        assert_eq!(answer, refused("CEREMONY_INVALID"));
+    }
+
+    #[tokio::test]
+    async fn a_step_up_refuses_replays_other_sessions_and_other_users() {
+        let (fixture, mut app) = fixture().await;
+        let (mut alice, alice_id, alice_handle) = enrolled(&fixture, &mut app, "alice").await;
+        let (mut bob, bob_id, bob_handle) = enrolled(&fixture, &mut app, "bob").await;
+        let cookie = signed_in(&mut app, &mut alice, &alice_id, alice_handle).await;
+        let other = signed_in(&mut app, &mut alice, &alice_id, alice_handle).await;
+        let bob_cookie = signed_in(&mut app, &mut bob, &bob_id, bob_handle).await;
+
+        // Another session of the same user cannot finish it, and that consumed it.
+        let (ceremony, credential) =
+            step_up_assertion(&mut app, &cookie, &mut alice, &alice_id, ORIGIN).await;
+        assert_eq!(
+            finish_step_up(&mut app, &other, &ceremony, &credential).await,
+            refused("CEREMONY_INVALID")
+        );
+        assert_eq!(
+            finish_step_up(&mut app, &cookie, &ceremony, &credential).await,
+            refused("CEREMONY_INVALID")
+        );
+        // The same assertion on a new challenge.
+        let (ceremony, _) =
+            step_up_assertion(&mut app, &cookie, &mut alice, &alice_id, ORIGIN).await;
+        assert_eq!(
+            finish_step_up(&mut app, &cookie, &ceremony, &credential).await,
+            refused("VERIFICATION_FAILED")
+        );
+        // A login ceremony is not a step-up one.
+        let (login_ceremony, _) =
+            assertion(&mut app, &mut alice, &alice_id, alice_handle, ORIGIN).await;
+        let (_, credential) =
+            step_up_assertion(&mut app, &cookie, &mut alice, &alice_id, ORIGIN).await;
+        assert_eq!(
+            finish_step_up(&mut app, &cookie, &login_ceremony, &credential).await,
+            refused("CEREMONY_INVALID")
+        );
+        // Bob's session signed by alice's passkey.
+        let (ceremony, credential) =
+            step_up_assertion(&mut app, &bob_cookie, &mut alice, &alice_id, ORIGIN).await;
+        assert_eq!(
+            finish_step_up(&mut app, &bob_cookie, &ceremony, &credential).await,
+            refused("PASSKEY_INVALID")
+        );
+        // Another origin.
+        let (ceremony, credential) = step_up_assertion(
+            &mut app,
+            &cookie,
+            &mut alice,
+            &alice_id,
+            "https://evil.example.org",
+        )
+        .await;
+        assert_eq!(
+            finish_step_up(&mut app, &cookie, &ceremony, &credential).await,
+            refused("VERIFICATION_FAILED")
+        );
+        for cookie in [&cookie, &other, &bob_cookie] {
+            assert_eq!(
+                register_start(&mut app, Some(cookie)).await.map(drop),
+                step_up_required()
+            );
+        }
+        // A step-up counts for its own session only.
+        step_up(&mut app, &cookie, &mut alice, &alice_id).await;
+        assert!(register_start(&mut app, Some(&cookie)).await.is_ok());
+        assert_eq!(
+            register_start(&mut app, Some(&other)).await.map(drop),
+            step_up_required()
+        );
+    }
+
+    async fn age_step_ups(fixture: &Fixture, millis: i64) {
+        sqlx::query("UPDATE session SET step_up_at = step_up_at - ?")
+            .bind(millis)
+            .execute(&mut *fixture.writer.lock().await)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_step_up_expires_after_five_minutes() {
+        let (fixture, mut app) = fixture().await;
+        let (mut alice, alice_id, handle) = enrolled(&fixture, &mut app, "alice").await;
+        let cookie = signed_in(&mut app, &mut alice, &alice_id, handle).await;
+        step_up(&mut app, &cookie, &mut alice, &alice_id).await;
+        let ttl = STEP_UP_TTL.as_millis() as i64;
+        age_step_ups(&fixture, ttl - 10_000).await;
+        let (ceremony, options) = register_start(&mut app, Some(&cookie)).await.unwrap();
+        // Expired between start and finish: nothing stored.
+        age_step_ups(&fixture, 10_000).await;
+        let (answer, ..) = register(&mut app, &cookie, &ceremony, options).await;
+        assert_eq!(answer, refused("STEP_UP_REQUIRED"));
+        assert_eq!(passkeys_of(&fixture, "alice").await.len(), 1);
+        assert_eq!(
+            register_start(&mut app, Some(&cookie)).await.map(drop),
+            step_up_required()
+        );
+        // A new step-up opens a new window.
+        step_up(&mut app, &cookie, &mut alice, &alice_id).await;
+        assert!(register_start(&mut app, Some(&cookie)).await.is_ok());
+    }
+
+    /// `alice`'s session `cookie` as the auth layer passes it to the passkey service.
+    async fn as_session<T>(fixture: &Fixture, cookie: &str, message: T) -> tonic::Request<T> {
+        let user: i64 = sqlx::query_scalar("SELECT id FROM user WHERE name = 'alice'")
+            .fetch_one(fixture.repos.readers().unwrap())
+            .await
+            .unwrap();
+        let mut request = tonic::Request::new(message);
+        request
+            .extensions_mut()
+            .insert(crate::transport::auth::Principal {
+                user_id: user,
+                scopes: crate::transport::auth::scopes(None),
+                session: Some(kajiba_core::sha256(cookie.as_bytes())),
+            });
+        request
+    }
+
+    async fn delete(fixture: &Fixture, cookie: &str, public_id: &str) -> Result<(), String> {
+        use kajiba_proto::v1::{DeletePasskeyRequest, passkey_service_server::PasskeyService};
+        use tonic_types::StatusExt;
+        let service = crate::transport::passkeys::Passkeys(fixture.repos.0.clone());
+        let request = as_session(
+            fixture,
+            cookie,
+            DeletePasskeyRequest {
+                public_id: public_id.into(),
+            },
+        )
+        .await;
+        service
+            .delete_passkey(request)
+            .await
+            .map(drop)
+            .map_err(|status| {
+                format!(
+                    "{:?} {}",
+                    status.code(),
+                    status.get_details_error_info().unwrap().reason
+                )
+            })
+    }
+
+    #[tokio::test]
+    async fn removing_a_passkey_needs_a_step_up_and_keeps_the_last_one() {
+        use kajiba_proto::v1::{ListPasskeysRequest, passkey_service_server::PasskeyService};
+        let (fixture, mut app) = fixture().await;
+        let (mut first, first_id, handle) = enrolled(&fixture, &mut app, "alice").await;
+        let (_, _, _) = enrolled(&fixture, &mut app, "bob").await;
+        let cookie = signed_in(&mut app, &mut first, &first_id, handle).await;
+        step_up(&mut app, &cookie, &mut first, &first_id).await;
+        let (ceremony, options) = register_start(&mut app, Some(&cookie)).await.unwrap();
+        let (_, mut second, second_id) = register(&mut app, &cookie, &ceremony, options).await;
+        let alice = passkeys_of(&fixture, "alice").await;
+        let bob = passkeys_of(&fixture, "bob").await;
+
+        // Listed oldest first, one page at a time; bob's are not alice's.
+        let service = crate::transport::passkeys::Passkeys(fixture.repos.0.clone());
+        let mut listed = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            let request = as_session(
+                &fixture,
+                &cookie,
+                ListPasskeysRequest {
+                    page_size: 1,
+                    page_token,
+                },
+            )
+            .await;
+            let page = service.list_passkeys(request).await.unwrap().into_inner();
+            assert_eq!(page.passkeys.len(), 1);
+            listed.extend(page.passkeys.into_iter().map(|p| (p.public_id, p.name)));
+            page_token = page.next_page_token;
+            if page_token.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(listed, alice);
+
+        assert_eq!(
+            delete(&fixture, &cookie, &bob[0].0).await,
+            Err("NotFound PASSKEY_NOT_FOUND".into())
+        );
+        age_step_ups(&fixture, STEP_UP_TTL.as_millis() as i64).await;
+        assert_eq!(
+            delete(&fixture, &cookie, &alice[0].0).await,
+            Err("PermissionDenied STEP_UP_REQUIRED".into())
+        );
+        step_up(&mut app, &cookie, &mut second, &second_id).await;
+        delete(&fixture, &cookie, &alice[0].0).await.unwrap();
+        // The removed passkey no longer signs in; the session it opened stays.
+        let (ceremony, credential) =
+            assertion(&mut app, &mut first, &first_id, handle, ORIGIN).await;
+        assert_eq!(
+            login(&mut app, &ceremony, &credential).await,
+            refused("PASSKEY_INVALID")
+        );
+        assert!(register_start(&mut app, Some(&cookie)).await.is_ok());
+        assert_eq!(
+            delete(&fixture, &cookie, &alice[1].0).await,
+            Err("FailedPrecondition LAST_PASSKEY".into())
+        );
+        assert_eq!(passkeys_of(&fixture, "alice").await, alice[1..]);
+        signed_in(&mut app, &mut second, &second_id, handle).await;
+
+        // Recovery still deletes every passkey of the user, and its sessions.
+        let (ceremony, options) = register_start(&mut app, Some(&cookie)).await.unwrap();
+        register(&mut app, &cookie, &ceremony, options).await;
+        assert_eq!(passkeys_of(&fixture, "alice").await.len(), 2);
+        issue(&fixture, "alice", epoch_ms()).await;
+        assert_eq!(passkeys_of(&fixture, "alice").await, []);
+        assert_eq!(passkeys_of(&fixture, "bob").await, bob);
+        assert_eq!(
+            delete(&fixture, &cookie, &alice[1].0).await,
+            Err("Unauthenticated CREDENTIAL_INVALID".into())
         );
     }
 }

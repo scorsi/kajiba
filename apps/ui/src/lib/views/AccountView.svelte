@@ -2,19 +2,24 @@
 	Account in the bands grammar. Pulse: who you are, what you hold, what
 	needs attention (a token about to expire, a passkey unused for a month,
 	a single passkey), and your access on the right (declared, read-only).
-	Bands: Passkeys (enrol, re-enrol), Tokens (create, copy once, revoke),
-	Declared tokens (folded, read-only).
-	URL: ?passkeys=0, ?tokens=0, ?declared=1.
+	Bands: Passkeys (add, remove; both confirmed with an existing passkey first,
+	ADR 0143), Tokens (create, copy once, revoke), Declared tokens and Declared
+	keys (folded, read-only).
+	URL: ?passkeys=0, ?tokens=0, ?declared=1, ?keys=1.
 -->
 <script lang="ts">
 	import {
 		TOKEN_SCOPES,
+		addPasskey,
 		createToken,
-		enrollPasskey,
+		deletePasskey,
 		getViewer,
 		listPasskeys,
 		listTokens,
 		revokeToken,
+		startPasskeyRegistration,
+		stepUp,
+		type Registration,
 		type Token
 	} from '#lib/api.ts';
 	import { page } from '$app/state';
@@ -24,6 +29,7 @@
 	import Skeleton from '#lib/components/Skeleton.svelte';
 	import StateView from '#lib/components/StateView.svelte';
 	import { absoluteTime, relativeTime, toDate } from '#lib/format.ts';
+	import type { Timestamp } from '#lib/api.ts';
 	import { allRepos } from '#lib/loaders.ts';
 	import { ROLE_LABEL } from '#lib/repo-ui.ts';
 	import { resource } from '#lib/resource.svelte.ts';
@@ -45,6 +51,7 @@
 	const passkeysOpen = $derived(q.get('passkeys') !== '0');
 	const tokensOpen = $derived(q.get('tokens') !== '0');
 	const declaredOpen = $derived(q.get('declared') === '1');
+	const keysOpen = $derived(q.get('keys') === '1');
 
 	// ── access: the viewer's role on each repository (declared) ──
 	const access = $derived(
@@ -56,10 +63,10 @@
 
 	// ── needs attention: tokens about to expire, a passkey unused for long, a single passkey ──
 	const MONTH = 30 * 86400000;
+	const lastUse = (p: { lastUsedTime?: Timestamp; createTime?: Timestamp }) =>
+		toDate(p.lastUsedTime ?? p.createTime);
 	const stalePasskeys = $derived(
-		(passkeys.data ?? []).filter(
-			(p) => Date.now() - (toDate(p.lastUsedTime)?.getTime() ?? 0) > MONTH
-		)
+		(passkeys.data ?? []).filter((p) => Date.now() - (lastUse(p)?.getTime() ?? 0) > MONTH)
 	);
 	const lastSignIn = $derived(
 		(passkeys.data ?? [])
@@ -69,24 +76,49 @@
 
 	const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-	// ── passkeys ──
-	let enrolling = $state<string | null>(null); // passkey id being replaced, or 'new'
-	let enrolError = $state('');
+	// ── passkeys: each change is confirmed with an existing passkey first (ADR 0143) ──
+	let busy = $state<string | null>(null); // passkey id being removed, or 'new'
+	let passkeyError = $state('');
 	let newKeyName = $state('');
+	let registration = $state<Registration | null>(null);
+	let confirmRemove = $state<string | null>(null);
 
-	async function enrol(replaceId?: string, name?: string) {
-		enrolling = replaceId ?? 'new';
-		enrolError = '';
+	async function passkeyStep(id: string, step: () => Promise<void>) {
+		busy = id;
+		passkeyError = '';
 		try {
-			await enrollPasskey({ name: name || newKeyName || 'Passkey', replaceId });
-			newKeyName = '';
-			passkeys.retry();
+			await step();
 		} catch (e) {
-			enrolError = errorText(e);
+			passkeyError = errorText(e);
 		} finally {
-			enrolling = null;
+			busy = null;
 		}
 	}
+
+	// Two clicks, one browser prompt each: confirm, then create.
+	const confirmAdd = () =>
+		passkeyStep('new', async () => {
+			await stepUp();
+			registration = await startPasskeyRegistration();
+		});
+
+	const createPasskey = () =>
+		passkeyStep('new', async () => {
+			if (!registration) return;
+			const started = registration;
+			registration = null;
+			await addPasskey({ registration: started, name: newKeyName.trim() });
+			newKeyName = '';
+			passkeys.retry();
+		});
+
+	const remove = (id: string) =>
+		passkeyStep(id, async () => {
+			await stepUp();
+			await deletePasskey({ id });
+			confirmRemove = null;
+			passkeys.retry();
+		});
 
 	// ── tokens ──
 	const EXPIRY = [
@@ -218,8 +250,8 @@
 						{/each}
 						{#each stalePasskeys as p (p.id)}
 							<span class="flex items-center gap-1.5 text-fg-muted"
-								><Icon name="key" size={11} />{p.name} unused since {relativeTime(
-									toDate(p.lastUsedTime)
+								><Icon name="key" size={11} />{p.name || 'unnamed passkey'} unused since {relativeTime(
+									lastUse(p)
 								)} — check it still works</span
 							>
 						{/each}
@@ -231,9 +263,9 @@
 					</div>
 				{/if}
 				<p class="mt-3 text-xs text-fg-subtle">
-					<Icon name="lock" size={12} class="mr-1 inline-block align-[-2px]" />Your access and
-					declared tokens come from the server configuration; passkeys and personal tokens are yours
-					to manage here.
+					<Icon name="lock" size={12} class="mr-1 inline-block align-[-2px]" />Your access,
+					declared tokens and SSH keys come from the server configuration; passkeys and personal
+					tokens are yours to manage here.
 				</p>
 			</div>
 
@@ -279,28 +311,51 @@
 			{:else}
 				<ul class="divide-y divide-border/60">
 					{#each passkeys.data as pk (pk.id)}
+						{@const last = passkeys.data.length < 2}
 						<li
 							class="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 text-[0.8125rem] sm:px-6"
 						>
 							<Icon name="key" size={14} class="text-fg-subtle" />
 							<span class="min-w-0 flex-1">
-								<span class="font-medium">{pk.name}</span>
+								<span class="font-medium {pk.name ? '' : 'text-fg-muted'}"
+									>{pk.name || 'Unnamed passkey'}</span
+								>
 								<span class="block text-xs text-fg-subtle">
 									added <span title={absoluteTime(toDate(pk.createTime))}
 										>{relativeTime(toDate(pk.createTime))}</span
 									>
-									· last used {relativeTime(toDate(pk.lastUsedTime))}
+									· {pk.lastUsedTime
+										? `last used ${relativeTime(toDate(pk.lastUsedTime))}`
+										: 'never used'}
 								</span>
 							</span>
-							<button
-								type="button"
-								class={btn}
-								disabled={enrolling !== null}
-								onclick={() => enrol(pk.id, pk.name)}
-								title="Register a new credential on this authenticator; the old one stops working"
-							>
-								{enrolling === pk.id ? 'Waiting for the key…' : 'Re-enrol'}
-							</button>
+							{#if confirmRemove === pk.id}
+								<span class="flex items-center gap-2">
+									<span class="text-xs text-fg-muted">Remove “{pk.name || 'Unnamed passkey'}”?</span>
+									<button
+										type="button"
+										class="inline-flex h-8 items-center rounded-sm bg-danger px-3 text-[0.8125rem] font-medium text-surface disabled:opacity-60"
+										disabled={busy !== null}
+										onclick={() => remove(pk.id)}
+										>{busy === pk.id ? 'Waiting for the key…' : 'Confirm and remove'}</button
+									>
+									<button type="button" class={btn} onclick={() => (confirmRemove = null)}
+										>Cancel</button
+									>
+								</span>
+							{:else}
+								<button
+									type="button"
+									class={btn}
+									disabled={busy !== null || last}
+									onclick={() => (confirmRemove = pk.id)}
+									title={last
+										? 'Your last passkey cannot be removed'
+										: 'Confirm with a passkey, then this one stops working'}
+								>
+									<Icon name="trash" size={14} /> Remove
+								</button>
+							{/if}
 						</li>
 					{:else}
 						<li class="px-4 py-3 text-[0.8125rem] text-fg-subtle sm:px-6">No passkey.</li>
@@ -310,7 +365,8 @@
 					class="flex flex-wrap items-end gap-2 border-t border-border/60 bg-surface px-4 py-3 sm:px-6"
 					onsubmit={(e) => {
 						e.preventDefault();
-						enrol();
+						if (registration) createPasskey();
+						else confirmAdd();
 					}}
 				>
 					<label class="max-w-sm min-w-48 flex-1 text-xs text-fg-subtle">
@@ -322,12 +378,25 @@
 							class="mt-1 h-8 w-full rounded-sm border border-border bg-bg px-2 text-[0.8125rem] text-fg placeholder:text-fg-subtle"
 						/>
 					</label>
-					<button type="submit" class={btn} disabled={enrolling !== null}>
-						<Icon name="plus" size={14} />
-						{enrolling === 'new' ? 'Waiting for the key…' : 'Enrol another passkey'}
-					</button>
-					{#if enrolError}<p class="basis-full text-xs text-danger" role="alert">
-							{enrolError}
+					{#if registration}
+						<button type="submit" class={btnPrimary} disabled={busy !== null}>
+							<Icon name="plus" size={14} />
+							{busy === 'new' ? 'Waiting for the key…' : 'Create the new passkey'}
+						</button>
+						<button type="button" class={btn} onclick={() => (registration = null)}>Cancel</button>
+					{:else}
+						<button type="submit" class={btn} disabled={busy !== null}>
+							<Icon name="plus" size={14} />
+							{busy === 'new' ? 'Waiting for the key…' : 'Add a passkey'}
+						</button>
+					{/if}
+					<p class="basis-full text-xs text-fg-subtle">
+						{registration
+							? 'Confirmed. Now create the new passkey on its authenticator (within five minutes).'
+							: 'You first confirm with one of your passkeys.'}
+					</p>
+					{#if passkeyError}<p class="basis-full text-xs text-danger" role="alert">
+							{passkeyError}
 						</p>{/if}
 				</form>
 			{/if}
@@ -499,6 +568,31 @@
 						<span class="min-w-0 flex-1">
 							<span class="font-medium">{t.name}</span>
 							{@render tokenMeta(t)}
+						</span>
+					</li>
+				{:else}
+					<li class="px-4 py-3 text-[0.8125rem] text-fg-subtle sm:px-6">None declared.</li>
+				{/each}
+			</ul>
+		</section>
+	{/if}
+
+	<!-- Declared SSH keys -->
+	<BandStrip label="Declared keys" open={keysOpen} href={hrefFor({ keys: keysOpen ? null : '1' })}>
+		<span class="tabular">{viewer.data?.keys.length ?? '…'}</span>
+		<span>SSH authentication and signing, read-only, from the server configuration</span>
+	</BandStrip>
+	{#if keysOpen}
+		<section class="border-b border-border" aria-label="Declared keys">
+			<ul class="divide-y divide-border/60">
+				{#each viewer.data?.keys ?? [] as k (k.usage + k.fingerprint)}
+					<li class="flex items-center gap-3 px-4 py-2.5 text-[0.8125rem] sm:px-6">
+						<Icon name="lock" size={13} class="text-fg-subtle" />
+						<span class="min-w-0 flex-1">
+							<span class="font-medium">{k.usage === 'signing' ? 'Signing' : 'Authentication'}</span>
+							<span class="mt-0.5 block truncate font-mono text-xs text-fg-subtle"
+								>{k.keyType} {k.fingerprint}</span
+							>
 						</span>
 					</li>
 				{:else}

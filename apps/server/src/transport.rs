@@ -22,6 +22,7 @@ use kajiba_proto::v1::{
     auth_service_server::AuthServiceServer,
     check_response::ServingStatus,
     health_service_server::{HealthService, HealthServiceServer},
+    passkey_service_server::PasskeyServiceServer,
     repo_service_server::RepoServiceServer,
     run_service_server::RunServiceServer,
     token_service_server::TokenServiceServer,
@@ -213,6 +214,9 @@ fn router(
     let api = Routes::new(HealthServiceServer::new(health.clone()))
         .add_service(AuthServiceServer::new(auth::Sessions(health.clone())))
         .add_service(TokenServiceServer::new(tokens::Tokens(health.clone())))
+        .add_service(PasskeyServiceServer::new(passkeys::Passkeys(
+            health.clone(),
+        )))
         .add_service(
             RepoServiceServer::new(repos::Repos(health.clone()))
                 // Bound inbound work before handler admission (ADR 0057).
@@ -740,6 +744,7 @@ mod gate;
 pub mod git_http;
 pub(crate) mod git_side;
 pub mod local;
+mod passkeys;
 pub mod raw;
 pub mod repos;
 pub mod runners;

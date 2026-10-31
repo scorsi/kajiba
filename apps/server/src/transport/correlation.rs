@@ -81,6 +81,8 @@ fn known(path: &str) -> Option<&'static str> {
         "/kajiba.v1.TokenService/CreateToken" => "/kajiba.v1.TokenService/CreateToken",
         "/kajiba.v1.TokenService/ListTokens" => "/kajiba.v1.TokenService/ListTokens",
         "/kajiba.v1.TokenService/RevokeToken" => "/kajiba.v1.TokenService/RevokeToken",
+        "/kajiba.v1.PasskeyService/ListPasskeys" => "/kajiba.v1.PasskeyService/ListPasskeys",
+        "/kajiba.v1.PasskeyService/DeletePasskey" => "/kajiba.v1.PasskeyService/DeletePasskey",
         "/kajiba.runner.v1.RunnerService/Connect" => "/kajiba.runner.v1.RunnerService/Connect",
         "/kajiba.runner.v1.RunnerService/FetchRunBundle" => {
             "/kajiba.runner.v1.RunnerService/FetchRunBundle"

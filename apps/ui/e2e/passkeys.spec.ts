@@ -1,6 +1,7 @@
 // Passkey enrollment, login, logout and session expiry against both daemons (0014, 0028,
-// 0079, 0084, 0085), with Chromium's WebAuthn virtual authenticator.
-import { expect, test } from "@playwright/test";
+// 0079, 0084, 0085), the account page's passkeys, tokens and declared credentials (0081,
+// 0143), with Chromium's WebAuthn virtual authenticator.
+import { expect, test, type Page } from "@playwright/test";
 import { authenticator, enroll, enrollLink, signIn } from "./support";
 
 const signedIn = (page: Page) =>
@@ -92,4 +93,68 @@ test("a ceremony from another origin is refused and leaves the link usable", asy
 
   await page.unroute("**/auth/webauthn/enroll/finish");
   await enroll(page, link);
+});
+
+test("account: add a passkey, sign in with it, remove the first; tokens; declared credentials", async ({
+  page,
+}) => {
+  const { cdp, authenticatorId } = await authenticator(page);
+  await enroll(page, enrollLink());
+  await page.goto("/-/account?declared=1&keys=1");
+  const passkeys = page.getByRole("region", { name: "Passkeys" });
+  await expect(passkeys.getByText("virtual")).toBeVisible();
+  // The only passkey cannot be removed.
+  await expect(passkeys.getByRole("button", { name: "Remove" })).toBeDisabled();
+
+  // Confirm with the existing passkey, then create the second one on another
+  // authenticator: the first one is excluded, and holding only the second, the new
+  // authenticator signs in with it alone.
+  await passkeys.getByLabel("Name of the new passkey").fill("second");
+  await passkeys.getByRole("button", { name: "Add a passkey" }).click();
+  const create = passkeys.getByRole("button", {
+    name: "Create the new passkey",
+  });
+  await expect(create).toBeVisible();
+  await cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId });
+  await authenticator(page);
+  await create.click();
+  await expect(passkeys.getByText("second")).toBeVisible();
+  await expect(passkeys.getByRole("listitem")).toHaveCount(2);
+
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await signIn(page);
+  await signedIn(page);
+
+  // Remove the first passkey, confirmed with the second.
+  await page.goto("/-/account?declared=1&keys=1");
+  const virtual = passkeys.getByRole("listitem").filter({ hasText: "virtual" });
+  await virtual.getByRole("button", { name: "Remove" }).click();
+  await virtual.getByRole("button", { name: "Confirm and remove" }).click();
+  await expect(passkeys.getByRole("listitem")).toHaveCount(1);
+  await expect(passkeys.getByText("second")).toBeVisible();
+  await expect(passkeys.getByRole("button", { name: "Remove" })).toBeDisabled();
+
+  // A token: created, shown once, revoked.
+  const tokens = page.getByRole("region", { name: "Personal tokens" });
+  await tokens.getByRole("button", { name: "New token" }).click();
+  await tokens.getByLabel("Name").fill("e2e");
+  await tokens.getByRole("button", { name: "Create token" }).click();
+  await expect(tokens.getByLabel("New token secret")).toHaveValue(/^kjb_/);
+  const token = tokens.getByRole("listitem").filter({ hasText: "e2e" });
+  await token.getByRole("button", { name: "Revoke" }).click();
+  await token.getByRole("button", { name: "Revoke" }).click();
+  await expect(token.getByText("revoked")).toBeVisible();
+
+  // Declared token and keys: shown with a lock, no control.
+  for (const name of ["Declared tokens", "Declared keys"]) {
+    const region = page.getByRole("region", { name });
+    await expect(region.getByRole("listitem").first()).toBeVisible();
+    await expect(region.getByRole("button")).toHaveCount(0);
+  }
+  const declared = page.getByRole("region", { name: "Declared tokens" });
+  await expect(declared.getByText("ci", { exact: true })).toBeVisible();
+  const keys = page.getByRole("region", { name: "Declared keys" });
+  await expect(keys.getByText("Authentication")).toBeVisible();
+  await expect(keys.getByText("Signing")).toBeVisible();
+  await expect(keys.getByText(/ssh-ed25519 SHA256:/)).toHaveCount(2);
 });

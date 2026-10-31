@@ -666,15 +666,53 @@ async fn session_expiry_is_absolute_and_expired_rows_are_purged() {
 }
 
 #[tokio::test]
-async fn get_viewer_names_the_caller_and_its_effective_admin_flag() {
-    use kajiba_proto::v1::GetViewerResponse;
+async fn get_viewer_names_the_caller_its_effective_admin_flag_and_declared_keys() {
+    use kajiba_proto::v1::{GetViewerResponse, SshKey, SshKeyUsage};
     use prost::Message;
     const VIEWER: &str = "/kajiba.v1.AuthService/GetViewer";
     let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
+    let mut writer = fixture.writer.lock().await;
     sqlx::query("UPDATE user SET is_admin = 1 WHERE name = 'alice'")
-        .execute(&mut *fixture.writer.lock().await)
+        .execute(&mut *writer)
         .await
         .unwrap();
+    // Two declared keys, and a runtime one that is not declared.
+    for (id, usage, fingerprint, source) in [
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "signing",
+            "SHA256:a",
+            "config",
+        ),
+        ("01ARZ3NDEKTSV4RRFFQ69G5FAW", "auth", "SHA256:b", "config"),
+        ("01ARZ3NDEKTSV4RRFFQ69G5FAX", "auth", "SHA256:c", "runtime"),
+    ] {
+        sqlx::query(
+            "INSERT INTO ssh_key (public_id, user_id, usage, key_type, public_key, fingerprint, source, created_at)
+             SELECT ?, id, ?, 'ssh-ed25519', ?, ?, ?, 0 FROM user WHERE name = 'alice'",
+        )
+        .bind(id)
+        .bind(usage)
+        .bind(fingerprint)
+        .bind(fingerprint)
+        .bind(source)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    }
+    drop(writer);
+    let alice_keys = vec![
+        SshKey {
+            usage: SshKeyUsage::Auth.into(),
+            key_type: "ssh-ed25519".into(),
+            fingerprint: "SHA256:b".into(),
+        },
+        SshKey {
+            usage: SshKeyUsage::Signing.into(),
+            key_type: "ssh-ed25519".into(),
+            fingerprint: "SHA256:a".into(),
+        },
+    ];
     session(&fixture, "alice", SESSION, now() + 60_000).await;
     session(&fixture, "bob", "bob-session", now() + 60_000).await;
     let mut app = router(
@@ -689,11 +727,21 @@ async fn get_viewer_names_the_caller_and_its_effective_admin_flag() {
     assert_eq!(reason(&status), "CREDENTIAL_INVALID");
     let alice_cookie = format!("kajiba_session={SESSION}");
     let read = format!("Bearer {READ}");
-    for (header, user, admin) in [
-        (("cookie", alice_cookie.as_str()), "alice", true),
-        (("cookie", "kajiba_session=bob-session"), "bob", false),
+    for (header, user, admin, keys) in [
+        (
+            ("cookie", alice_cookie.as_str()),
+            "alice",
+            true,
+            alice_keys.clone(),
+        ),
+        (
+            ("cookie", "kajiba_session=bob-session"),
+            "bob",
+            false,
+            vec![],
+        ),
         // An admin's `repo:read` PAT does not act as an administrator (ADR 0081).
-        (("authorization", read.as_str()), "alice", false),
+        (("authorization", read.as_str()), "alice", false, alice_keys),
     ] {
         let response = app
             .call(
@@ -713,7 +761,8 @@ async fn get_viewer_names_the_caller_and_its_effective_admin_flag() {
             viewer,
             GetViewerResponse {
                 user: user.into(),
-                admin
+                admin,
+                keys
             },
             "{header:?}"
         );

@@ -21,20 +21,27 @@ export function enrollLink(): string {
   return link;
 }
 
-/** A platform authenticator holding discoverable credentials, verifying the user at once. */
+/**
+ * A platform authenticator holding discoverable credentials, verifying the user at once:
+ * its CDP session and id, to inspect or remove its credentials.
+ */
 export async function authenticator(page: Page) {
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("WebAuthn.enable");
-  await cdp.send("WebAuthn.addVirtualAuthenticator", {
-    options: {
-      protocol: "ctap2",
-      transport: "internal",
-      hasResidentKey: true,
-      hasUserVerification: true,
-      isUserVerified: true,
-      automaticPresenceSimulation: true,
+  const { authenticatorId } = await cdp.send(
+    "WebAuthn.addVirtualAuthenticator",
+    {
+      options: {
+        protocol: "ctap2",
+        transport: "internal",
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+        automaticPresenceSimulation: true,
+      },
     },
-  });
+  );
+  return { cdp, authenticatorId };
 }
 
 export async function enroll(page: Page, link: string) {

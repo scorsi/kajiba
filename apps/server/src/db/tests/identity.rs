@@ -101,7 +101,7 @@ async fn identity_valid_rows_nullability_and_session_expiry_index() {
             "webauthn_credential" => {
                 "id public_id user_id credential_id passkey name created_at last_used_at"
             }
-            "session" => "id user_id token_hash created_at expires_at last_seen_at",
+            "session" => "id user_id token_hash created_at expires_at last_seen_at step_up_at",
             "enrollment_token" => "id user_id token_hash created_at expires_at consumed_at",
             _ => unreachable!(),
         };
@@ -117,7 +117,7 @@ async fn identity_valid_rows_nullability_and_session_expiry_index() {
             let required = name != "id"
                 && !matches!(
                     name.as_str(),
-                    "disabled_at" | "last_used_at" | "revoked_at" | "consumed_at"
+                    "disabled_at" | "last_used_at" | "revoked_at" | "consumed_at" | "step_up_at"
                 )
                 && !(table == "api_token" && name == "expires_at");
             assert_eq!(

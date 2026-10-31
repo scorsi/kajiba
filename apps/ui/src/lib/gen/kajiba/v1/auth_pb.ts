@@ -2,8 +2,8 @@
 // @generated from file kajiba/v1/auth.proto (package kajiba.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
 import { file_kajiba_v1_options } from "./options_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file kajiba/v1/auth.proto.
  */
 export const file_kajiba_v1_auth: GenFile = /*@__PURE__*/
-  fileDesc("ChRrYWppYmEvdjEvYXV0aC5wcm90bxIJa2FqaWJhLnYxIg8KDUxvZ291dFJlcXVlc3QiEAoOTG9nb3V0UmVzcG9uc2UiEgoQR2V0Vmlld2VyUmVxdWVzdCIwChFHZXRWaWV3ZXJSZXNwb25zZRIMCgR1c2VyGAEgASgJEg0KBWFkbWluGAIgASgIMqABCgtBdXRoU2VydmljZRJDCgZMb2dvdXQSGC5rYWppYmEudjEuTG9nb3V0UmVxdWVzdBoZLmthamliYS52MS5Mb2dvdXRSZXNwb25zZSIEiLUYARJMCglHZXRWaWV3ZXISGy5rYWppYmEudjEuR2V0Vmlld2VyUmVxdWVzdBocLmthamliYS52MS5HZXRWaWV3ZXJSZXNwb25zZSIEgLUYAWIGcHJvdG8z", [file_kajiba_v1_options]);
+  fileDesc("ChRrYWppYmEvdjEvYXV0aC5wcm90bxIJa2FqaWJhLnYxIg8KDUxvZ291dFJlcXVlc3QiEAoOTG9nb3V0UmVzcG9uc2UiEgoQR2V0Vmlld2VyUmVxdWVzdCJRChFHZXRWaWV3ZXJSZXNwb25zZRIMCgR1c2VyGAEgASgJEg0KBWFkbWluGAIgASgIEh8KBGtleXMYAyADKAsyES5rYWppYmEudjEuU3NoS2V5IlYKBlNzaEtleRIlCgV1c2FnZRgBIAEoDjIWLmthamliYS52MS5Tc2hLZXlVc2FnZRIQCghrZXlfdHlwZRgCIAEoCRITCgtmaW5nZXJwcmludBgDIAEoCSpfCgtTc2hLZXlVc2FnZRIdChlTU0hfS0VZX1VTQUdFX1VOU1BFQ0lGSUVEEAASFgoSU1NIX0tFWV9VU0FHRV9BVVRIEAESGQoVU1NIX0tFWV9VU0FHRV9TSUdOSU5HEAIyoAEKC0F1dGhTZXJ2aWNlEkMKBkxvZ291dBIYLmthamliYS52MS5Mb2dvdXRSZXF1ZXN0Ghkua2FqaWJhLnYxLkxvZ291dFJlc3BvbnNlIgSItRgBEkwKCUdldFZpZXdlchIbLmthamliYS52MS5HZXRWaWV3ZXJSZXF1ZXN0Ghwua2FqaWJhLnYxLkdldFZpZXdlclJlc3BvbnNlIgSAtRgBYgZwcm90bzM", [file_kajiba_v1_options]);
 
 /**
  * @generated from message kajiba.v1.LogoutRequest
@@ -70,6 +70,14 @@ export type GetViewerResponse = Message<"kajiba.v1.GetViewerResponse"> & {
    * @generated from field: bool admin = 2;
    */
   admin: boolean;
+
+  /**
+   * The caller's declared SSH keys, authentication and signing, ordered by usage then
+   * fingerprint: read-only, from the configuration (0014, 0143).
+   *
+   * @generated from field: repeated kajiba.v1.SshKey keys = 3;
+   */
+  keys: SshKey[];
 };
 
 /**
@@ -78,6 +86,69 @@ export type GetViewerResponse = Message<"kajiba.v1.GetViewerResponse"> & {
  */
 export const GetViewerResponseSchema: GenMessage<GetViewerResponse> = /*@__PURE__*/
   messageDesc(file_kajiba_v1_auth, 3);
+
+/**
+ * An SSH public key's identity, never the key itself.
+ *
+ * @generated from message kajiba.v1.SshKey
+ */
+export type SshKey = Message<"kajiba.v1.SshKey"> & {
+  /**
+   * @generated from field: kajiba.v1.SshKeyUsage usage = 1;
+   */
+  usage: SshKeyUsage;
+
+  /**
+   * The OpenSSH algorithm name, e.g. `ssh-ed25519`.
+   *
+   * @generated from field: string key_type = 2;
+   */
+  keyType: string;
+
+  /**
+   * `SHA256:…`.
+   *
+   * @generated from field: string fingerprint = 3;
+   */
+  fingerprint: string;
+};
+
+/**
+ * Describes the message kajiba.v1.SshKey.
+ * Use `create(SshKeySchema)` to create a new message.
+ */
+export const SshKeySchema: GenMessage<SshKey> = /*@__PURE__*/
+  messageDesc(file_kajiba_v1_auth, 4);
+
+/**
+ * @generated from enum kajiba.v1.SshKeyUsage
+ */
+export enum SshKeyUsage {
+  /**
+   * @generated from enum value: SSH_KEY_USAGE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Authenticates Git over SSH.
+   *
+   * @generated from enum value: SSH_KEY_USAGE_AUTH = 1;
+   */
+  AUTH = 1,
+
+  /**
+   * Signs commits and tags.
+   *
+   * @generated from enum value: SSH_KEY_USAGE_SIGNING = 2;
+   */
+  SIGNING = 2,
+}
+
+/**
+ * Describes the enum kajiba.v1.SshKeyUsage.
+ */
+export const SshKeyUsageSchema: GenEnum<SshKeyUsage> = /*@__PURE__*/
+  enumDesc(file_kajiba_v1_auth, 0);
 
 /**
  * Browser sessions (0014, 0079); opened by the WebAuthn ceremonies under /auth/webauthn/.

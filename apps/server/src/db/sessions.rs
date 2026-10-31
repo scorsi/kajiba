@@ -95,3 +95,36 @@ pub async fn seen(writer: &mut SqliteConnection, id: i64, now: i64) -> Result<()
         .await
         .map(drop)
 }
+
+/// Records a step-up re-authentication of session `id` at `now` (ADR 0143); false when the
+/// session is gone or expired.
+pub async fn stepped_up(
+    writer: &mut SqliteConnection,
+    id: i64,
+    now: i64,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query("UPDATE session SET step_up_at = ?1 WHERE id = ?2 AND expires_at > ?1")
+        .bind(now)
+        .bind(id)
+        .execute(writer)
+        .await
+        .map(|done| done.rows_affected() == 1)
+}
+
+/// Whether session `id` stepped up less than `window` milliseconds before `now`.
+pub async fn step_up_fresh(
+    connection: impl sqlx::SqliteExecutor<'_>,
+    id: i64,
+    window: i64,
+    now: i64,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM session
+         WHERE id = ?1 AND step_up_at > ?2 - ?3 AND step_up_at <= ?2 AND expires_at > ?2)",
+    )
+    .bind(id)
+    .bind(now)
+    .bind(window)
+    .fetch_one(connection)
+    .await
+}

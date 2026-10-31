@@ -102,6 +102,8 @@ writeShellApplication {
     session_ttl = "1m"
     [users.alice]
     is_admin = true
+    ssh_keys = ["$(cat ${../tests/fixtures/ssh-admin-key.pub})"]
+    signing_keys = ["$(cat ${../tests/fixtures/ssh-signing-key.pub})"]
     [users.alice.tokens.ci]
     sha256 = "$(printf %s "$pat" | sha256sum | cut -d' ' -f1)"
     scopes = ["repo:read", "ci:trigger"]

@@ -32,4 +32,24 @@ message GetViewerResponse {
   // A forge administrator (`is_admin`) whose credential holds the `admin` scope; always
   // the user's `is_admin` for a browser session, which holds every scope.
   bool admin = 2;
+  // The caller's declared SSH keys, authentication and signing, ordered by usage then
+  // fingerprint: read-only, from the configuration (0014, 0143).
+  repeated SshKey keys = 3;
+}
+
+// An SSH public key's identity, never the key itself.
+message SshKey {
+  SshKeyUsage usage = 1;
+  // The OpenSSH algorithm name, e.g. `ssh-ed25519`.
+  string key_type = 2;
+  // `SHA256:…`.
+  string fingerprint = 3;
+}
+
+enum SshKeyUsage {
+  SSH_KEY_USAGE_UNSPECIFIED = 0;
+  // Authenticates Git over SSH.
+  SSH_KEY_USAGE_AUTH = 1;
+  // Signs commits and tags.
+  SSH_KEY_USAGE_SIGNING = 2;
 }

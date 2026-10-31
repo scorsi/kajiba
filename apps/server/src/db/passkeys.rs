@@ -63,3 +63,57 @@ pub async fn used(
     .await
     .map(|done| done.rows_affected() == 1)
 }
+
+/// The serialized passkeys of `user`, for a step-up's allowed list or a registration's
+/// excluded list (ADR 0143).
+pub async fn of_user(
+    connection: impl sqlx::SqliteExecutor<'_>,
+    user: i64,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT passkey FROM webauthn_credential WHERE user_id = ? ORDER BY id")
+        .bind(user)
+        .fetch_all(connection)
+        .await
+}
+
+/// The outcome of a passkey removal (ADR 0143).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Removal {
+    Removed,
+    /// Not a passkey of this user.
+    NotFound,
+    /// The user's only passkey: kept.
+    Last,
+}
+
+/// Deletes passkey `public_id` of `user` unless it is the user's last one.
+pub async fn remove(
+    writer: &mut SqliteConnection,
+    user: i64,
+    public_id: &str,
+) -> Result<Removal, sqlx::Error> {
+    let deleted = sqlx::query(
+        "DELETE FROM webauthn_credential WHERE public_id = ?1 AND user_id = ?2
+         AND (SELECT count(*) FROM webauthn_credential WHERE user_id = ?2) > 1",
+    )
+    .bind(public_id)
+    .bind(user)
+    .execute(&mut *writer)
+    .await?
+    .rows_affected();
+    if deleted == 1 {
+        return Ok(Removal::Removed);
+    }
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM webauthn_credential WHERE public_id = ? AND user_id = ?)",
+    )
+    .bind(public_id)
+    .bind(user)
+    .fetch_one(writer)
+    .await?;
+    Ok(if exists {
+        Removal::Last
+    } else {
+        Removal::NotFound
+    })
+}

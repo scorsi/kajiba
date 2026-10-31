@@ -597,21 +597,6 @@ export const MOCK_SERVER = {
 
 // ── account (ASSUMED auth service) — mutable, in memory ─────────────────
 
-export const MOCK_PASSKEYS = [
-  {
-    id: "pk_1",
-    name: "YubiKey 5C NFC",
-    created: NOW - 40 * 86400,
-    lastUsed: NOW - 3 * 3600,
-  },
-  {
-    id: "pk_2",
-    name: "YubiKey 5C (backup)",
-    created: NOW - 40 * 86400,
-    lastUsed: NOW - 31 * 86400,
-  },
-];
-
 export const MOCK_TOKENS = [
   {
     id: "tok_ci",

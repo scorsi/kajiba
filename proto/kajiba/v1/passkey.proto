@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package kajiba.v1;
+
+import "google/protobuf/timestamp.proto";
+import "kajiba/v1/options.proto";
+
+// The caller's passkeys (0014, 0084, 0143). Only a browser session may call these
+// methods: a PAT is refused with PERMISSION_DENIED / SESSION_REQUIRED. Passkeys are added
+// by the ceremony under /auth/webauthn/register/.
+service PasskeyService {
+  // The caller's passkeys, oldest first.
+  rpc ListPasskeys(ListPasskeysRequest) returns (ListPasskeysResponse) {
+    option (kajiba.v1.scope) = SCOPE_ADMIN;
+  }
+  // Deletes a passkey of the caller. Needs a step-up of this session less than five
+  // minutes old (PERMISSION_DENIED / STEP_UP_REQUIRED); the last passkey stays
+  // (FAILED_PRECONDITION / LAST_PASSKEY); PASSKEY_NOT_FOUND otherwise. Sessions stay valid.
+  rpc DeletePasskey(DeletePasskeyRequest) returns (DeletePasskeyResponse) {
+    option (kajiba.v1.scope) = SCOPE_ADMIN;
+  }
+}
+
+message ListPasskeysRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListPasskeysResponse {
+  repeated Passkey passkeys = 1;
+  string next_page_token = 2;
+}
+
+message DeletePasskeyRequest {
+  string public_id = 1;
+}
+
+message DeletePasskeyResponse {}
+
+// A passkey's metadata, never its credential or key.
+message Passkey {
+  string public_id = 1;
+  // Empty when none was given.
+  string name = 2;
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp last_used_at = 4;
+}
