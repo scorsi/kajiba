@@ -314,7 +314,9 @@ pkgs.testers.runNixOSTest {
         assert clone_state() == before, (before, clone_state())
         assert as_git("for-each-ref") == forge_refs
         forge.fail(f"runuser -u kajiba-git -- env HOME=/var/empty GIT_CONFIG_GLOBAL=/dev/null git --git-dir={repo_dir} cat-file -e {captured}")
-        client.fail(f"git -C {clone_dir} fetch -q https://forge/alice/demo.git {captured}")
+        # From an empty repository: the clone already has the commit, so git would not ask.
+        client.succeed("git init -q /root/empty", "git -C /root/empty fetch -q https://forge/alice/demo.git main")
+        client.fail(f"git -C /root/empty fetch -q https://forge/alice/demo.git {captured}")
         assert client.succeed(f"git -C {clone_dir} rev-parse HEAD").strip() != captured
 
     with subtest("a change that breaks a check exits non-zero with its logs"):
