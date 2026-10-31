@@ -212,7 +212,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(history.len(), MIGRATOR.iter().count());
-        assert_eq!(history.len(), 12);
+        assert_eq!(history.len(), 13);
         for ((row, migration), version) in history.iter().zip(MIGRATOR.iter()).zip(1..) {
             assert_eq!(row.0, version);
             assert!(row.2);
@@ -357,7 +357,7 @@ mod tests {
                 .fetch_all(&mut writer)
                 .await
                 .unwrap();
-        assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
         readers.close().await;
         writer.close().await.unwrap();
     }
@@ -389,7 +389,7 @@ mod tests {
                 .inspect(|line| assert_eq!(line["event"], "migration-applied"))
                 .map(|line| line["version"].as_i64().unwrap())
                 .collect();
-            assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+            assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
             return;
         }
         kajiba_core::log::init("info").unwrap();
@@ -417,7 +417,7 @@ mod tests {
                 .fetch_all(&mut writer)
                 .await
                 .unwrap();
-        assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
         writer.close().await.unwrap();
     }
 

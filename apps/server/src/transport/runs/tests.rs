@@ -989,6 +989,64 @@ async fn a_replayed_attempt_opens_a_new_section() {
 }
 
 #[tokio::test]
+async fn retention_preserves_offsets_during_a_replayed_run() {
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, ALICE, "alice/ci", &tip)
+        .await
+        .unwrap()
+        .public_id;
+    let progress = Progress::new(&fixture, &runs, &run).await;
+    let lost = progress.attempt(1).await;
+    progress.log(&lost, "one\n").await;
+    let replayed = progress.attempt(2).await;
+    progress.log(&replayed, "two\n").await;
+    let mut follower = watch(&runs, ALICE, &run, 0, true).await.unwrap();
+    assert_eq!(read(&mut follower, 0, 8).await.1, "one\ntwo\n");
+    sqlx::query("UPDATE job_attempt SET finished_at = 0 WHERE public_id = ?")
+        .bind(&lost)
+        .execute(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    for expected in [1, 0] {
+        assert_eq!(
+            crate::db::retention::purge_logs(
+                &mut *fixture.writer.lock().await,
+                &runs.0.state_dir.join("ci/logs"),
+                Duration::from_secs(1),
+                2_000,
+            )
+            .await
+            .unwrap(),
+            expected
+        );
+    }
+    assert!(!runs.log(&lost).exists());
+    // Fresh and reconnecting watchers skip deleted bytes but retain the replay's position.
+    for (offset, data) in [(0, "two\n"), (2, "two\n"), (4, "two\n"), (6, "o\n")] {
+        let mut events = watch(&runs, ALICE, &run, offset, false).await.unwrap();
+        let mut sections = Vec::new();
+        if offset < 4 {
+            sections.push((lost.clone(), 0));
+        }
+        sections.push((replayed.clone(), 4));
+        assert_eq!(
+            read(&mut events, offset.max(4), data.len()).await,
+            (sections, data.into())
+        );
+        assert!(next(&mut events).await.is_none());
+    }
+    progress.log(&replayed, "three\n").await;
+    assert_eq!(read(&mut follower, 8, 6).await, (vec![], "three\n".into()));
+    progress.fail(&run).await;
+    assert!(matches!(
+        next(&mut follower).await,
+        Some(watch_run_response::Event::Finished(_))
+    ));
+    assert!(next(&mut follower).await.is_none());
+}
+
+#[tokio::test]
 async fn watching_needs_a_readable_run() {
     let (fixture, runs) = fixture("").await;
     let tip = head(&fixture.bare("alice/ci").await);

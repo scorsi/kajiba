@@ -203,6 +203,16 @@ pub async fn purge_logs(
             }
             _ => {}
         }
+        sqlx::query(
+            "UPDATE job_attempt SET purged_log_length =
+             (SELECT COALESCE(MAX(offset + length), 0) FROM log_chunk WHERE attempt_id = ?)
+             WHERE id = ?",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| err.to_string())?;
         sqlx::query("DELETE FROM log_chunk WHERE attempt_id = ?")
             .bind(id)
             .execute(&mut *tx)

@@ -82,7 +82,7 @@ async fn ci_valid_rows_columns_nullability_and_indexes() {
         ),
         (
             "job_attempt",
-            "id public_id job_id number runner_id state lease_expires_at exit_code started_at finished_at",
+            "id public_id job_id number runner_id state lease_expires_at exit_code started_at finished_at purged_log_length",
         ),
         (
             "step",

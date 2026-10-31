@@ -130,7 +130,7 @@ impl Runs {
                     attempts(connection, job_id)
                         .await?
                         .pop()
-                        .map(|(attempt, end)| {
+                        .map(|(attempt, end, _)| {
                             current = Some((attempt.public_id.clone(), end));
                             attempt
                         });
@@ -195,17 +195,19 @@ type AttemptRow = (
     i64,
     Option<i64>,
     Option<i64>,
+    i64,
 );
 
-/// A job's attempts in order, each with the end of its indexed log bytes.
+/// A job's attempts in order, with original log lengths and availability.
 async fn attempts(
     connection: &mut SqliteConnection,
     job_id: i64,
-) -> Result<Vec<(Attempt, u64)>, Status> {
+) -> Result<Vec<(Attempt, u64, bool)>, Status> {
     let rows: Vec<AttemptRow> = sqlx::query_as(
         "SELECT job_attempt.public_id, number, state, runner.name, runner.hostname, exit_code,
                 started_at, finished_at,
-                (SELECT MAX(offset + length) FROM log_chunk WHERE attempt_id = job_attempt.id)
+                (SELECT MAX(offset + length) FROM log_chunk WHERE attempt_id = job_attempt.id),
+                purged_log_length
          FROM job_attempt JOIN runner ON runner.id = runner_id
          WHERE job_id = ? ORDER BY number",
     )
@@ -226,7 +228,11 @@ async fn attempts(
                 started_at: time(Some(row.6)),
                 finished_at: time(row.7),
             };
-            (attempt, row.8.unwrap_or(0) as u64)
+            (
+                attempt,
+                row.8.unwrap_or(row.9) as u64,
+                row.8.is_some() || row.9 == 0,
+            )
         })
         .collect())
 }
@@ -555,7 +561,7 @@ impl Runs {
             };
             drop(connection);
             let mut start = 0;
-            for (attempt, length) in sections {
+            for (attempt, length, available) in sections {
                 let stop = start + length;
                 if start < position && stop <= position {
                     start = stop;
@@ -571,6 +577,9 @@ impl Runs {
                     if !send(watch_run_response::Event::Section(section)).await {
                         return Ok(());
                     }
+                }
+                if !available {
+                    position = position.max(stop);
                 }
                 while position < stop {
                     let data = read_at(&path, position - start, (stop - position).min(LOG_PIECE))
