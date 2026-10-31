@@ -1,4 +1,4 @@
-# Server module checks (0015, 0019, 0022), after oroshi's: a full-option configuration
+# Server and runner module checks (0015, 0019, 0022), after oroshi's: a full-option configuration
 # evaluates, its generated file passes `config check` and matches the expected TOML; invalid
 # options are refused at evaluation or at build time.
 {
@@ -7,6 +7,7 @@
   system,
   kajibaServerPackage,
   kajibaGitPackage,
+  kajibaRunnerPackage,
 }:
 let
   inherit (pkgs) lib;
@@ -39,7 +40,10 @@ let
             if native then kajibaGitPackage else inputs.self.packages.${linux}.kajiba-git;
           services.kajiba-runner = {
             enable = true;
-            package = inputs.self.packages.${linux}.kajiba-runner;
+            package = if native then kajibaRunnerPackage else inputs.self.packages.${linux}.kajiba-runner;
+            name = "build-1";
+            url = "https://forge.example.org";
+            tokenFile = "/run/secrets/kajiba-runner-build-1";
           };
           services.kajiba-server = {
             enable = true;
@@ -51,6 +55,16 @@ let
       ++ extras;
     };
   full = {
+    services.kajiba-runner = {
+      hostname = "vm-host.example.org";
+      backends = [ "nix" ];
+      tags = [ "kvm" ];
+      maxJobs = 2;
+      stateDir = "/srv/kajiba-runner";
+      development = true;
+      log.level = "debug";
+      metrics.listen = "127.0.0.1:9432";
+    };
     services.kajiba-git = {
       stateDir = "/srv/kajiba-git";
       log.level = "debug";
@@ -135,6 +149,44 @@ let
         keep = 3;
       };
     };
+  };
+  runnerFileOf = evaluation: evaluation.config.environment.etc."kajiba/runner.toml".source;
+  expectedRunner = (pkgs.formats.toml { }).generate "expected-kajiba-runner.toml" {
+    name = "build-1";
+    url = "https://forge.example.org";
+    token_file = "/run/secrets/kajiba-runner-build-1";
+    hostname = "vm-host.example.org";
+    backends = [ "nix" ];
+    tags = [ "kvm" ];
+    max_jobs = 2;
+    state_dir = "/srv/kajiba-runner";
+    development = true;
+    log.level = "debug";
+    metrics.listen = "127.0.0.1:9432";
+  };
+  # nix-darwin is not an input: evaluate darwinModules.runner against the few options it sets.
+  darwin = lib.evalModules {
+    specialArgs = { inherit pkgs; };
+    modules = [
+      ../darwinModules/runner.nix
+      {
+        options = {
+          launchd.daemons = lib.mkOption { type = lib.types.attrsOf lib.types.anything; };
+          environment.etc = lib.mkOption { type = lib.types.attrsOf lib.types.anything; };
+          nix.package = lib.mkOption {
+            type = lib.types.package;
+            default = pkgs.nix;
+          };
+        };
+        config.services.kajiba-runner = {
+          enable = true;
+          package = kajibaRunnerPackage;
+          name = "build-1";
+          url = "https://forge.example.org";
+          tokenFile = "/run/secrets/kajiba-runner-build-1";
+        };
+      }
+    ];
   };
   configFileOf = evaluation: evaluation.config.environment.etc."kajiba/server.toml".source;
   configFile = extra: configFileOf (evaluate true extra);
@@ -517,12 +569,6 @@ in
           "LogRateLimitIntervalSec"
           "LogRateLimitBurst"
         ]
-        # The runner's existing dynamic identity stays attached to its own unit.
-        && systemd.services.kajiba-runner.serviceConfig.DynamicUser
-        && (systemd.services.kajiba-runner.serviceConfig.User or "kajiba-runner") == "kajiba-runner"
-        && (systemd.services.kajiba-runner.serviceConfig.Group or "kajiba-runner") == "kajiba-runner"
-        &&
-          systemd.services.kajiba-runner.serviceConfig.ExecStart == lib.getExe services.kajiba-runner.package
         && services.kajiba-server.git.stateDir == stateDir
         &&
           services.kajiba-server.persistedPaths == [
@@ -536,6 +582,95 @@ in
         (evaluateWith false [ ])
       ];
     assert (evaluateWith false [ ]).config.services.kajiba-git.metrics.listen == null;
+    # Runner unit (0009, 0015, 0022): fixed identity outside trusted-users, nix and git on PATH.
+    assert lib.all
+      (
+        evaluation:
+        let
+          inherit (evaluation.config)
+            systemd
+            users
+            services
+            environment
+            ;
+          runner = systemd.services.kajiba-runner;
+          unit = runner.serviceConfig;
+          stateDir = services.kajiba-runner.stateDir;
+          configFile = environment.etc."kajiba/runner.toml".source;
+        in
+        users.users.kajiba-runner.isSystemUser
+        && users.users.kajiba-runner.group == "kajiba-runner"
+        && users.groups ? kajiba-runner
+        && !(lib.elem "kajiba-runner" evaluation.config.nix.settings.trusted-users)
+        && !(unit ? DynamicUser)
+        && !(unit ? PrivateUsers)
+        && unit.User == "kajiba-runner"
+        && unit.Group == "kajiba-runner"
+        && unit.ExecStart == "${lib.getExe services.kajiba-runner.package} --config ${configFile}"
+        &&
+          runner.restartTriggers == [
+            configFile
+            services.kajiba-runner.package
+          ]
+        && runner.environment.HOME == stateDir
+        && lib.all (package: lib.elem package runner.path) [
+          evaluation.config.nix.package
+          evaluation.pkgs.git
+          evaluation.pkgs.coreutils
+        ]
+        && unit.ReadWritePaths == [ stateDir ]
+        && unit.StateDirectoryMode == "0700"
+        && unit.UMask == "0077"
+        && unit.ProtectSystem == "strict"
+        && unit.ProtectHome
+        && unit.NoNewPrivileges
+        && unit.CapabilityBoundingSet == ""
+        && lib.elem "AF_UNIX" unit.RestrictAddressFamilies
+        && unit.SocketBindDeny == "any"
+        && lib.elem "multi-user.target" runner.wantedBy
+      )
+      [
+        (evaluate false { })
+        (evaluateWith false [ ])
+      ];
+    assert
+      let
+        full = (evaluate false { }).config;
+        defaults = (evaluateWith false [ ]).config;
+      in
+      full.systemd.services.kajiba-runner.serviceConfig.StateDirectory == [ ]
+      && full.systemd.tmpfiles.settings."10-kajiba-runner"."/srv/kajiba-runner".d.user == "kajiba-runner"
+      && full.systemd.services.kajiba-runner.serviceConfig.SocketBindAllow == [ "tcp:9432" ]
+      && defaults.systemd.services.kajiba-runner.serviceConfig.StateDirectory == [ "kajiba-runner" ]
+      && defaults.systemd.tmpfiles.settings."10-kajiba-runner" == { }
+      && defaults.systemd.services.kajiba-runner.serviceConfig.SocketBindAllow == [ ];
+    assert !(assertionsPass { nix.settings.trusted-users = [ "@kajiba-runner" ]; });
+    assert !(assertionsPass { services.kajiba-runner.metrics.listen = lib.mkForce "0.0.0.0:9432"; });
+    assert
+      !(builtins.tryEval (
+        builtins.deepSeq
+          (runnerFileOf (
+            evaluate true {
+              services.kajiba-runner.tokenFile = lib.mkForce "${builtins.storeDir}/x";
+            }
+          )).drvPath
+          true
+      )).success;
+    # darwinModules.runner: the same options, as a launchd daemon.
+    assert
+      let
+        daemon = darwin.config.launchd.daemons.kajiba-runner.serviceConfig;
+      in
+      daemon.ProgramArguments == [
+        (lib.getExe kajibaRunnerPackage)
+        "--config"
+        "${runnerFileOf darwin}"
+      ]
+      && daemon.UserName == "kajiba-runner"
+      && daemon.GroupName == "kajiba-runner"
+      && daemon.KeepAlive
+      && daemon.EnvironmentVariables.HOME == "/var/lib/kajiba-runner"
+      && lib.hasInfix (builtins.unsafeDiscardStringContext "${pkgs.git}/bin") daemon.EnvironmentVariables.PATH;
     # Dedicated SSH configuration and identity, independent of the host's admin sshd.
     assert lib.all
       (
@@ -761,6 +896,10 @@ in
       };
     pkgs.runCommand "kajiba-module-eval" { } ''
       cmp ${configFile { }} ${expected}
+      cmp ${runnerFileOf (evaluate true { })} ${expectedRunner}
+      # The default runner file holds only the three required fields.
+      [ "$(grep -c = ${runnerFileOf (evaluateWith true [ ])})" = 3 ]
+      cmp ${runnerFileOf darwin} ${runnerFileOf (evaluateWith true [ ])}
       ${lib.getExe kajibaGitPackage} config check ${
         (evaluate true { }).config.environment.etc."kajiba/git.toml".source
       }

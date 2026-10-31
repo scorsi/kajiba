@@ -208,6 +208,7 @@
         inherit inputs pkgs system;
         kajibaServerPackage = config.packages.kajiba-server;
         kajibaGitPackage = config.packages.kajiba-git;
+        kajibaRunnerPackage = config.packages.kajiba-runner;
       }
       // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
         let

@@ -14,5 +14,6 @@ craneLib.buildPackage (
     cargoExtraArgs = "--locked -p kajiba-runner";
     # Tests build Git fixtures for the source cache (0106).
     nativeCheckInputs = [ git ];
+    meta.mainProgram = "kajiba-runner";
   }
 )
