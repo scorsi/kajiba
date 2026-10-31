@@ -225,7 +225,7 @@ mod tests {
         let id = "00000000000000000000000001";
         sqlx::query("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, ?1, 'owner', 'local', 0, 'config', 0)")
             .bind(id).execute(&mut writer).await.unwrap();
-        sqlx::query("INSERT INTO repo (public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at) VALUES (?1, 1, 'demo', 'public', 0, 'main', '', 0)")
+        sqlx::query("INSERT INTO repo (public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at) VALUES (?1, 1, 'demo', 'public', 'off', 'main', '', 0)")
             .bind(id).execute(&mut writer).await.unwrap();
         let registered = temp.0.join(format!("repos/{id}.git"));
         fs::create_dir(&registered).unwrap();

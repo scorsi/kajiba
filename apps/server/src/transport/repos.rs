@@ -6,7 +6,7 @@
 use super::{Health, cursor, local::refused};
 use kajiba_gitstore::{GitStore, Gix};
 use kajiba_proto::v1::{
-    ChangeKind, Commit, EntryKind, FileChange, GetBlobRequest, GetBlobResponse,
+    ChangeKind, CiMode, Commit, EntryKind, FileChange, GetBlobRequest, GetBlobResponse,
     GetCommitDiffRequest, GetCommitDiffResponse, GetRepoRequest, GetRepoResponse, GetTreeRequest,
     GetTreeResponse, ListCommitsRequest, ListCommitsResponse, ListReposRequest, ListReposResponse,
     Mirror, Permission, Repo, Role, TreeEntry, Visibility, get_repo_request,
@@ -294,15 +294,15 @@ pub(super) fn internal(err: sqlx::Error) -> Status {
     Status::internal(format!("repositories: {err}"))
 }
 
-type Row = (i64, String, String, String, String, String, bool, bool);
+type Row = (i64, String, String, String, String, String, String, bool);
 
 const SELECT: &str = "SELECT repo.id, repo.public_id, owner.name, repo.name, repo.description,
-        repo.default_branch, repo.ci_enabled, repo.archived_at IS NOT NULL
+        repo.default_branch, repo.ci_mode, repo.archived_at IS NOT NULL
     FROM repo JOIN user owner ON owner.id = repo.owner_id";
 
 /// The row with its redirects, permissions and mirror configuration.
 async fn message(connection: &mut SqliteConnection, row: Row) -> Result<Repo, sqlx::Error> {
-    let (id, public_id, owner, name, description, default_branch, ci_enabled, archived) = row;
+    let (id, public_id, owner, name, description, default_branch, ci_mode, archived) = row;
     let previous_names = sqlx::query_scalar(
         "SELECT owner_name || '/' || name FROM repo_redirect WHERE repo_id = ? ORDER BY 1",
     )
@@ -354,7 +354,13 @@ async fn message(connection: &mut SqliteConnection, row: Row) -> Result<Repo, sq
         // `public` is the only visibility until private repositories exist (0013).
         visibility: Visibility::Public.into(),
         default_branch,
-        ci_enabled,
+        ci_mode: match ci_mode.as_str() {
+            "off" => CiMode::Off,
+            "manual" => CiMode::Manual,
+            "push" => CiMode::Push,
+            _ => CiMode::Unspecified,
+        }
+        .into(),
         previous_names,
         permissions,
         mirrors,

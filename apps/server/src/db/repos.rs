@@ -205,14 +205,14 @@ async fn apply(
         let current = format!("{}/{}", repo.owner, repo.name);
         let id = if let Some(row) = by_key.get(key.as_str()) {
             sqlx::query(
-                "UPDATE repo SET owner_id = ?1, name = ?2, visibility = 'public', ci_enabled = ?3,
+                "UPDATE repo SET owner_id = ?1, name = ?2, visibility = 'public', ci_mode = ?3,
                         default_branch = ?4, description = ?5, archived_at = NULL
-                 WHERE id = ?6 AND (owner_id != ?1 OR name != ?2 OR ci_enabled != ?3
+                 WHERE id = ?6 AND (owner_id != ?1 OR name != ?2 OR ci_mode != ?3
                         OR default_branch != ?4 OR description != ?5 OR archived_at IS NOT NULL)",
             )
             .bind(owner_id)
             .bind(&repo.name)
-            .bind(repo.ci_enabled)
+            .bind(repo.ci.as_str())
             .bind(&repo.default_branch)
             .bind(&repo.description)
             .bind(row.id)
@@ -233,7 +233,7 @@ async fn apply(
         } else {
             let public_id = new_public_id(&mut tx, now as u128).await.map_err(sql)?;
             let id = sqlx::query_scalar(
-                "INSERT INTO repo (public_id, config_key, owner_id, name, visibility, ci_enabled,
+                "INSERT INTO repo (public_id, config_key, owner_id, name, visibility, ci_mode,
                         default_branch, description, created_at)
                  VALUES (?, ?, ?, ?, 'public', ?, ?, ?, ?) RETURNING id",
             )
@@ -241,7 +241,7 @@ async fn apply(
             .bind(key)
             .bind(owner_id)
             .bind(&repo.name)
-            .bind(repo.ci_enabled)
+            .bind(repo.ci.as_str())
             .bind(&repo.default_branch)
             .bind(&repo.description)
             .bind(now)

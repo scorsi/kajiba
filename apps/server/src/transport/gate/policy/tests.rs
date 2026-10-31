@@ -168,8 +168,8 @@ async fn fixture() -> (State, Gate, Session) {
     let gate = Gate::new(&admin, Default::default());
     let mut writer = gate.writer.lock().await;
     let repo = kajiba_core::new_id().unwrap();
-    sqlx::query("INSERT INTO repo (public_id, owner_id, name, config_key, visibility, ci_enabled, default_branch, description, created_at)
-        SELECT ?, id, 'demo', 'demo', 'public', 0, 'main', '', 0 FROM user WHERE name = 'alice'")
+    sqlx::query("INSERT INTO repo (public_id, owner_id, name, config_key, visibility, ci_mode, default_branch, description, created_at)
+        SELECT ?, id, 'demo', 'demo', 'public', 'off', 'main', '', 0 FROM user WHERE name = 'alice'")
         .bind(&repo).execute(&mut *writer).await.unwrap();
     let generation = kajiba_core::new_id().unwrap();
     gate.admission

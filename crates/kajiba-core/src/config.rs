@@ -280,7 +280,7 @@ pub struct RepoConfig {
     #[serde(default = "default_branch")]
     pub default_branch: String,
     #[serde(default)]
-    pub ci_enabled: bool,
+    pub ci: CiMode,
     /// `<owner>/<name>` pairs, lowercase after `ServerConfig::parse`.
     #[serde(default)]
     pub previous_names: Vec<String>,
@@ -295,6 +295,30 @@ pub struct RepoConfig {
 pub enum Visibility {
     #[default]
     Public,
+}
+
+/// When a repository's CI runs (ADR 0133).
+#[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CiMode {
+    /// No run at all.
+    #[default]
+    Off,
+    /// Manual and worktree runs only; pushes create none.
+    Manual,
+    /// Pushes create runs; manual and worktree runs too.
+    Push,
+}
+
+impl CiMode {
+    /// The `repo.ci_mode` column value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Manual => "manual",
+            Self::Push => "push",
+        }
+    }
 }
 
 /// Ordered from least to most privileged.

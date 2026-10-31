@@ -85,9 +85,9 @@ async fn gzip_budget_is_global_and_released_on_cancellation_and_error() {
     sqlx::raw_sql(
         "INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at)
          VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
-         INSERT INTO repo (public_id, owner_id, name, visibility, ci_enabled,
+         INSERT INTO repo (public_id, owner_id, name, visibility, ci_mode,
                            default_branch, description, created_at)
-         VALUES ('00000000000000000000000002', 1, 'demo', 'public', 0, 'main', '', 0);",
+         VALUES ('00000000000000000000000002', 1, 'demo', 'public', 'off', 'main', '', 0);",
     )
     .execute(&database)
     .await

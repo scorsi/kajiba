@@ -34,7 +34,7 @@ const ROWS: [(&str, &str); 7] = [
 
 async fn populate(writer: &mut SqliteConnection) {
     sqlx::query("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'owner', 'local', 0, 'config', 0), (2, '00000000000000000000000002', 'pusher', 'local', 0, 'runtime', 0);
-        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo'), (2, '00000000000000000000000002', 1, 'other', 'public', 1, 'main', '', 0, 'other')")
+        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 'push', 'main', '', 0, 'demo'), (2, '00000000000000000000000002', 1, 'other', 'public', 'push', 'main', '', 0, 'other')")
         .execute(&mut *writer).await.unwrap();
     for id in 1..=2_i64 {
         sqlx::query("INSERT INTO event (id, public_id, kind, version, occurred_at, principal_kind, correlation_id, payload) VALUES (?1, ?2, 'push', 1, 0, 'system', 'request-1', '{}')")

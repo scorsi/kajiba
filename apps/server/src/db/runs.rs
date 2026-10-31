@@ -226,7 +226,7 @@ pub async fn create_run(
 }
 
 /// The `ci` handler (0010, 0013): a push by a `local` user on a branch or a tag, not a
-/// deletion, of a non-archived repository with CI enabled creates one run. The run is
+/// deletion, of a non-archived repository in CI mode `push` (0133) creates one run. The run is
 /// keyed on the push event (`run.event_id`), so a replay creates nothing.
 pub struct Ci {
     pub now: fn() -> i64,
@@ -260,7 +260,7 @@ impl Handler for Ci {
         }
         let eligible: Option<String> = sqlx::query_scalar(
             "SELECT repo.public_id FROM repo JOIN user ON user.id = ?
-             WHERE repo.id = ? AND repo.archived_at IS NULL AND repo.ci_enabled = 1
+             WHERE repo.id = ? AND repo.archived_at IS NULL AND repo.ci_mode = 'push'
                AND user.kind = 'local'
                AND NOT EXISTS (SELECT 1 FROM run WHERE event_id = ?)",
         )

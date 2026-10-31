@@ -2,7 +2,7 @@
 use crate::client::{self, Api, Error};
 use clap::Subcommand;
 use kajiba_proto::v1::{
-    GetRepoRequest, ListReposRequest, Repo, Role, Visibility, get_repo_request,
+    CiMode, GetRepoRequest, ListReposRequest, Repo, Role, Visibility, get_repo_request,
     repo_service_client::RepoServiceClient,
 };
 use prost_reflect::{DescriptorPool, DynamicMessage};
@@ -131,12 +131,12 @@ fn details(repo: &Repo) -> String {
     field("default branch", repo.default_branch.clone());
     field(
         "ci",
-        if repo.ci_enabled {
-            "enabled"
-        } else {
-            "disabled"
-        }
-        .into(),
+        short(
+            CiMode::try_from(repo.ci_mode)
+                .unwrap_or_default()
+                .as_str_name(),
+            "CI_MODE_",
+        ),
     );
     field("archived", if repo.archived { "yes" } else { "" }.into());
     field("previous names", repo.previous_names.join(", "));

@@ -319,14 +319,15 @@ fn system(name: &str) -> Option<(&str, &str)> {
 }
 
 impl Runs {
-    /// ADR 0114 and 0118: not archived, then the `write` role, then CI enabled.
+    /// ADR 0114 and 0118: not archived, then the `write` role, then CI not `off` (0133).
     async fn may_run(&self, user: i64, repo_id: i64) -> Result<(), Status> {
-        let (archived, ci_enabled): (bool, bool) =
-            sqlx::query_as("SELECT archived_at IS NOT NULL, ci_enabled FROM repo WHERE id = ?")
-                .bind(repo_id)
-                .fetch_one(self.readers()?)
-                .await
-                .map_err(internal)?;
+        let (archived, ci_off): (bool, bool) = sqlx::query_as(
+            "SELECT archived_at IS NOT NULL, ci_mode = 'off' FROM repo WHERE id = ?",
+        )
+        .bind(repo_id)
+        .fetch_one(self.readers()?)
+        .await
+        .map_err(internal)?;
         if archived {
             return Err(refused(
                 tonic::Code::FailedPrecondition,
@@ -344,7 +345,7 @@ impl Runs {
                 "triggering a run needs the write role".into(),
             ));
         }
-        if !ci_enabled {
+        if ci_off {
             return Err(refused(
                 tonic::Code::FailedPrecondition,
                 "CI_DISABLED",

@@ -172,9 +172,9 @@ let
         description
         visibility
         permissions
+        ci
         ;
       default_branch = repo.defaultBranch;
-      ci_enabled = repo.ciEnabled;
       previous_names = repo.previousNames;
       # filterAttrsRecursive does not enter lists.
       mirrors = map (
@@ -507,7 +507,17 @@ in
             };
             visibility = optional types.str "public" "Visibility; only public exists (0013).";
             defaultBranch = optional types.str "main" "Default branch, the bare repository's HEAD.";
-            ciEnabled = optional types.bool "false" "Whether pushes trigger CI (0010).";
+            ci = optional (types.enum [
+              "off"
+              "manual"
+              "push"
+            ]) "off" "When CI runs (0133): off, manual (manual and worktree runs only) or push (pushes too).";
+            # Removed by 0133; only declared so the assertion below can name the replacement.
+            ciEnabled = mkOption {
+              type = types.nullOr types.bool;
+              default = null;
+              visible = false;
+            };
             previousNames = mkOption {
               type = types.listOf types.str;
               default = [ ];
@@ -604,6 +614,10 @@ in
           "kajiba-server"
           "kajiba-git"
         ]
+      ++ lib.mapAttrsToList (key: repo: {
+        assertion = repo.ciEnabled == null;
+        message = "services.kajiba-server.repos.${key}.ciEnabled was removed (0133): write ci = \"push\" for true, ci = \"off\" (the default) for false, or ci = \"manual\".";
+      }) cfg.repos
       ++ map (secret: {
         assertion = safeSecret secret.mode secret.group;
         message = "kajiba-server secret files must not be group-writable, world-accessible or readable by a git-side group (0073).";

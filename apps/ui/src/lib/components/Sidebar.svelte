@@ -5,7 +5,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { RunnerState, logout, type Repo, type Runner, type Viewer } from '#lib/api.ts';
+	import { CiMode, RunnerState, logout, type Repo, type Runner, type Viewer } from '#lib/api.ts';
 	import { commitsHref, repoPath } from '#lib/repo-ui.ts';
 	import Icon, { type IconName } from './Icon.svelte';
 	import RepoSwitcher from './RepoSwitcher.svelte';
@@ -55,7 +55,7 @@
 						label: 'Runs',
 						icon: 'play',
 						active: false,
-						note: current.ciEnabled ? 'soon' : 'off'
+						note: current.ciMode > CiMode.OFF ? 'soon' : 'off'
 					}
 				]
 			: []

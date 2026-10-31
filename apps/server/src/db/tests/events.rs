@@ -18,7 +18,7 @@ pub(super) fn event(public_id: &str) -> NewEvent {
 
 async fn populate(writer: &mut SqliteConnection) {
     sqlx::query("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'owner', 'local', 0, 'config', 0), (2, '00000000000000000000000002', 'pusher', 'local', 0, 'runtime', 0);
-        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 0, 'main', '', 0, 'demo'), (2, '00000000000000000000000002', 1, 'other', 'public', 0, 'main', '', 0, 'other')")
+        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 'off', 'main', '', 0, 'demo'), (2, '00000000000000000000000002', 1, 'other', 'public', 'off', 'main', '', 0, 'other')")
         .execute(writer).await.unwrap();
 }
 

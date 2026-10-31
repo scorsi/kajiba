@@ -142,7 +142,7 @@ pkgs.testers.runNixOSTest {
       repos.demo = {
         owner = "alice";
         description = "CI fixture";
-        ciEnabled = true;
+        ci = "push";
         permissions = {
           writer = "write";
           reader = "read";

@@ -144,7 +144,7 @@ impl Forge {
     /// User `alice` and repository `demo` (public id `…01`) with one pushed run.
     async fn run(&self) -> String {
         self.exec("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
-            INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')").await;
+            INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 'push', 'main', '', 0, 'demo')").await;
         self.run_at(SHA).await
     }
 
@@ -261,7 +261,7 @@ async fn a_stalled_runner_does_not_block_matching_or_lease_expiry() {
     {
         let mut writer = state.health.writer.get().unwrap().lock().await;
         sqlx::raw_sql("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
-            INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')")
+            INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 'push', 'main', '', 0, 'demo')")
             .execute(&mut *writer).await.unwrap();
         let mut tx = writer.begin().await.unwrap();
         for _ in 0..2 {
@@ -361,7 +361,7 @@ async fn a_frozen_runner_does_not_consume_replays_with_a_healthy_alternative() {
     {
         let mut writer = state.health.writer.get().unwrap().lock().await;
         sqlx::raw_sql("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
-            INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')")
+            INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 'push', 'main', '', 0, 'demo')")
             .execute(&mut *writer).await.unwrap();
         let mut tx = writer.begin().await.unwrap();
         crate::db::runs::create_run(
@@ -1323,7 +1323,7 @@ async fn bundles_serve_only_the_current_leased_attempt_of_the_calling_runner() {
     git(&repo, &["update-ref", "refs/contrib/alice/x", &contrib]);
 
     forge.exec("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
-        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')").await;
+        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 'push', 'main', '', 0, 'demo')").await;
     forge.run_at(&second).await;
     let (_sender, mut stream) = forge
         .connect(Some(BUILD_1), hello("build-1"))
@@ -1492,7 +1492,7 @@ async fn a_worktree_attempt_gets_the_base_it_lacks_then_its_stored_bundle() {
     );
 
     forge.exec("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
-        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')").await;
+        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 'push', 'main', '', 0, 'demo')").await;
     let run = {
         let mut writer = forge.state.health.writer.get().unwrap().lock().await;
         let mut tx = writer.begin().await.unwrap();
@@ -1729,7 +1729,7 @@ async fn bundle_transfers_are_bounded_per_runner_and_end_with_their_stream_or_le
     );
     let sha = git(&work, &["rev-parse", "HEAD"]);
     forge.exec("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
-        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')").await;
+        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 'push', 'main', '', 0, 'demo')").await;
     forge.run_at(&sha).await;
     let (_sender, mut stream) = forge
         .connect(Some(BUILD_1), hello("build-1"))

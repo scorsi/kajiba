@@ -10,9 +10,9 @@ use std::{sync::Arc, time::Duration};
 use tonic::Code;
 
 /// `alice` owns `ci` (CI on, `bob` writes) and `off` (CI off); `bob` owns `zeta`.
-const REPOS: &str = "[repos.ci]\nowner='alice'\ndescription=''\nci_enabled=true\n\
+const REPOS: &str = "[repos.ci]\nowner='alice'\ndescription=''\nci='push'\n\
      permissions.bob='write'\n[repos.off]\nowner='alice'\ndescription=''\n\
-     [repos.zeta]\nowner='bob'\ndescription=''\nci_enabled=true\n";
+     [repos.zeta]\nowner='bob'\ndescription=''\nci='push'\n";
 const ALICE: i64 = 1;
 const BOB: i64 = 2;
 
@@ -305,7 +305,7 @@ async fn base(runs: &Runs, user: i64, spec: WorktreeRunSpec) -> Result<Vec<Strin
 #[tokio::test]
 async fn worktree_base_lists_branch_and_tag_tips_only() {
     let (fixture, runs) =
-        fixture("[repos.empty]\nowner='alice'\ndescription=''\nci_enabled=true\n").await;
+        fixture("[repos.empty]\nowner='alice'\ndescription=''\nci='push'\n").await;
     fixture
         .fill(
             "bob/zeta",
@@ -342,6 +342,20 @@ async fn worktree_base_lists_branch_and_tag_tips_only() {
         base(&runs, ALICE, spec("alice/empty")).await.unwrap(),
         Vec::<String>::new()
     );
+}
+
+/// ADR 0133: CI mode `manual` admits manual and worktree runs; `off` refuses both above.
+#[tokio::test]
+async fn manual_ci_admits_triggered_and_worktree_runs() {
+    let (fixture, runs) =
+        fixture("[repos.hand]\nowner='alice'\ndescription=''\nci='manual'\n").await;
+    fixture
+        .fill("alice/hand", &[("flake.nix", "{}\n")], &[])
+        .await;
+    let tip = head(&fixture.bare("alice/hand").await);
+    let run = trigger(&runs, ALICE, "alice/hand", &tip).await.unwrap();
+    assert_eq!(run.trigger(), RunTrigger::Manual);
+    base(&runs, ALICE, spec("alice/hand")).await.unwrap();
 }
 
 #[tokio::test]

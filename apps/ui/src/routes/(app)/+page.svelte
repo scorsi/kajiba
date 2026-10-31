@@ -7,7 +7,7 @@
 	import { allRepos } from '#lib/loaders.ts';
 	import { repoPath } from '#lib/repo-ui.ts';
 	import { resource } from '#lib/resource.svelte.ts';
-	import type { Repo } from '#lib/api.ts';
+	import { CiMode, type Repo } from '#lib/api.ts';
 
 	const repos = resource(() => allRepos());
 	let filter = $state('');
@@ -98,7 +98,7 @@
 										{r.description || '—'}
 									</span>
 									<span class="flex items-center gap-3 text-xs text-fg-subtle">
-										{#if r.ciEnabled}<span class="flex items-center gap-1" title="CI enabled"
+										{#if r.ciMode > CiMode.OFF}<span class="flex items-center gap-1" title="CI enabled"
 												><Icon name="play" size={12} />CI</span
 											>{/if}
 										{#if r.mirrors.some((m) => m.enabled)}<span

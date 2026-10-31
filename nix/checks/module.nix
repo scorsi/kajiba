@@ -134,7 +134,7 @@ let
         description = "A demonstration repository";
         visibility = "public";
         defaultBranch = "trunk";
-        ciEnabled = true;
+        ci = "push";
         previousNames = [ "alice/demo" ];
         permissions.alice = "admin";
         mirrors = [
@@ -289,7 +289,7 @@ let
       description = "A demonstration repository";
       visibility = "public";
       default_branch = "trunk";
-      ci_enabled = true;
+      ci = "push";
       previous_names = [ "alice/demo" ];
       permissions.alice = "admin";
       mirrors = [
@@ -328,6 +328,15 @@ in
   # As in oroshi, discard the Linux toplevel context so Darwin never builds it.
   module-eval =
     assert assertionsPass { };
+    # 0133: every CI mode evaluates, a typo does not, and the removed boolean names its replacement.
+    assert lib.all (ci: assertionsPass { services.kajiba-server.repos.tools = { inherit ci; }; }) [
+      "off"
+      "manual"
+      "push"
+    ];
+    assert evaluationFails { services.kajiba-server.repos.tools.ci = "on"; };
+    assert lib.any (a: !a.assertion && lib.hasInfix ''ci = "push" for true'' a.message)
+      (evaluate false { services.kajiba-server.repos.tools.ciEnabled = true; }).config.assertions;
     assert lib.all
       (
         mode:

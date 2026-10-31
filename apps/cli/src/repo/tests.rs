@@ -3,7 +3,7 @@ use crate::client::{
     connect,
     tests::{Fake, TOKEN},
 };
-use kajiba_proto::v1::{Mirror, Permission};
+use kajiba_proto::v1::{CiMode, Mirror, Permission};
 
 fn repos() -> Vec<Repo> {
     vec![
@@ -14,7 +14,7 @@ fn repos() -> Vec<Repo> {
             description: "Demo repository".into(),
             visibility: Visibility::Public.into(),
             default_branch: "main".into(),
-            ci_enabled: true,
+            ci_mode: CiMode::Push.into(),
             permissions: vec![Permission {
                 user: "bob".into(),
                 role: Role::Write.into(),
@@ -32,6 +32,7 @@ fn repos() -> Vec<Repo> {
             name: "old".into(),
             visibility: Visibility::Public.into(),
             default_branch: "main".into(),
+            ci_mode: CiMode::Off.into(),
             previous_names: vec!["alice/older".into()],
             archived: true,
             ..Default::default()
@@ -87,6 +88,7 @@ async fn list_json_is_protojson() {
         serde_json::json!({
             "publicId": "01JBOLD0000000000000000000",
             "owner": "alice",
+            "ciMode": "CI_MODE_OFF",
             "name": "old",
             "visibility": "VISIBILITY_PUBLIC",
             "defaultBranch": "main",
@@ -105,7 +107,7 @@ async fn get_text_and_json() {
         description: Demo repository\n\
         visibility: public\n\
         default branch: main\n\
-        ci: enabled\n\
+        ci: push\n\
         permissions: bob write\n\
         mirror: https://example.org/demo.git (credential upstream) (disabled)\n";
     assert_eq!(output(&url, get("alice/demo"), false).await.unwrap(), text);
@@ -124,7 +126,6 @@ async fn get_text_and_json() {
   "description": "Demo repository",
   "visibility": "VISIBILITY_PUBLIC",
   "defaultBranch": "main",
-  "ciEnabled": true,
   "permissions": [
     {
       "user": "bob",
@@ -136,7 +137,8 @@ async fn get_text_and_json() {
       "remoteUrl": "https://example.org/demo.git",
       "credential": "upstream"
     }
-  ]
+  ],
+  "ciMode": "CI_MODE_PUSH"
 }
 "#
     );
@@ -160,7 +162,7 @@ async fn archived_and_redirected_repositories_as_the_server_returns_them() {
          id: 01JBOLD0000000000000000000\n\
          visibility: public\n\
          default branch: main\n\
-         ci: disabled\n\
+         ci: off\n\
          archived: yes\n\
          previous names: alice/older\n"
     );

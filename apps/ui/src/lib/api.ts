@@ -69,6 +69,14 @@ export enum Role {
   ADMIN = 3,
 }
 
+/** When the repository's CI runs (ADR 0133). */
+export enum CiMode {
+  UNSPECIFIED = 0,
+  OFF = 1,
+  MANUAL = 2,
+  PUSH = 3,
+}
+
 export enum EntryKind {
   UNSPECIFIED = 0,
   BLOB = 1,
@@ -103,7 +111,7 @@ export interface Repo {
   description: string;
   /** Full ref, e.g. `refs/heads/main`. */
   defaultBranch: string;
-  ciEnabled: boolean;
+  ciMode: CiMode;
   previousNames: string[];
   permissions: Permission[];
   mirrors: Mirror[];
@@ -700,7 +708,7 @@ function toRepo(m: MockRepo): Repo {
     name: m.name,
     description: m.description,
     defaultBranch: m.defaultBranch,
-    ciEnabled: m.ciEnabled,
+    ciMode: { off: CiMode.OFF, manual: CiMode.MANUAL, push: CiMode.PUSH }[m.ci],
     previousNames: [...m.previousNames],
     permissions: m.permissions.map((p) => ({
       user: p.user,

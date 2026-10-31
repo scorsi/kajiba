@@ -4,7 +4,7 @@ use sqlx::Row;
 const ROWS: [(&str, &str); 4] = [
     (
         "repo",
-        "INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (?1, ?2, ?1, 'demo', 'public', 0, 'main', '', 0, 'key' || ?1)",
+        "INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES (?1, ?2, ?1, 'demo', 'public', 'off', 'main', '', 0, 'key' || ?1)",
     ),
     (
         "repo_redirect",
@@ -64,7 +64,7 @@ async fn repositories_valid_rows_nullability_and_mirror_queue_index() {
             .unwrap();
         let expected = match table {
             "repo" => {
-                "id public_id owner_id name visibility ci_enabled default_branch description created_at config_key archived_at"
+                "id public_id owner_id name visibility default_branch description created_at config_key archived_at ci_mode"
             }
             "repo_redirect" => "id owner_name name repo_id created_at",
             "repo_permission" => "user_id repo_id role",
@@ -180,8 +180,8 @@ async fn repositories_checks_refuse_invalid_values() {
         "UPDATE repo_redirect SET owner_name = 'Owner2' WHERE id = 2",
         "UPDATE repo_redirect SET name = 'Old' WHERE id = 2",
         "UPDATE repo SET visibility = 'private' WHERE id = 2",
-        "UPDATE repo SET ci_enabled = -1 WHERE id = 2",
-        "UPDATE repo SET ci_enabled = 2 WHERE id = 2",
+        "UPDATE repo SET ci_mode = 'on' WHERE id = 2",
+        "UPDATE repo SET ci_mode = 1 WHERE id = 2",
         "UPDATE repo_permission SET role = 'owner' WHERE user_id = 2",
         "UPDATE mirror SET enabled = -1 WHERE id = 2",
         "UPDATE mirror SET enabled = 2 WHERE id = 2",
@@ -192,7 +192,8 @@ async fn repositories_checks_refuse_invalid_values() {
         refuses(&mut writer, sql, "275").await;
     }
     for sql in [
-        "UPDATE repo SET ci_enabled = 1 WHERE id = 2",
+        "UPDATE repo SET ci_mode = 'manual' WHERE id = 2",
+        "UPDATE repo SET ci_mode = 'push' WHERE id = 2",
         "UPDATE repo_permission SET role = 'write' WHERE user_id = 2",
         "UPDATE repo_permission SET role = 'admin' WHERE user_id = 2",
         "UPDATE mirror SET enabled = 0, redo = 1, state = 'queued', attempts = 1 WHERE id = 2",
@@ -321,7 +322,7 @@ async fn declared_keys_are_unique_and_archived_rows_keep_their_names() {
     .await;
     refuses(
         &mut writer,
-        "INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (3, '00000000000000000000000003', 1, 'demo', 'public', 0, 'main', '', 0, 'key3')",
+        "INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES (3, '00000000000000000000000003', 1, 'demo', 'public', 'off', 'main', '', 0, 'key3')",
         "2067",
     )
     .await;

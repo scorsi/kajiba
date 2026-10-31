@@ -65,13 +65,15 @@ message ListReposResponse {
 
 // The declared fields of a repository (0026).
 message Repo {
+  reserved 7;
+  reserved "ci_enabled";
   string public_id = 1;
   string owner = 2;
   string name = 3;
   string description = 4;
   Visibility visibility = 5;
   string default_branch = 6;
-  bool ci_enabled = 7;
+  CiMode ci_mode = 12;
   // <owner>/<name> pairs that redirect to this repository.
   repeated string previous_names = 8;
   // Declared permissions; the owner is admin implicitly.
@@ -79,6 +81,17 @@ message Repo {
   repeated Mirror mirrors = 10;
   // Removed from the configuration: read-only, no git transport or /raw/.
   bool archived = 11;
+}
+
+// When the repository's CI runs (0133).
+enum CiMode {
+  CI_MODE_UNSPECIFIED = 0;
+  // No run at all.
+  CI_MODE_OFF = 1;
+  // Manual and worktree runs only; pushes create none.
+  CI_MODE_MANUAL = 2;
+  // Pushes create runs; manual and worktree runs too.
+  CI_MODE_PUSH = 3;
 }
 
 enum Visibility {

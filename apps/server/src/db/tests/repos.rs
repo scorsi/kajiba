@@ -143,7 +143,7 @@ async fn creates_declared_repositories_and_noop_rerun_writes_nothing() {
     let mut state = State::new().await;
     state
         .apply(&format!(
-            "{DEMO}[repos.tools]\nowner='bob'\nname='Tools'\ndescription=''\ndefault_branch='trunk'\nci_enabled=true\n"
+            "{DEMO}[repos.tools]\nowner='bob'\nname='Tools'\ndescription=''\ndefault_branch='trunk'\nci='push'\n"
         ))
         .await
         .unwrap();
@@ -187,7 +187,7 @@ async fn creates_declared_repositories_and_noop_rerun_writes_nothing() {
     let before = changes(&mut state.writer).await;
     state
         .apply(&format!(
-            "{DEMO}[repos.tools]\nowner='bob'\nname='tools'\ndescription=''\ndefault_branch='trunk'\nci_enabled=true\n"
+            "{DEMO}[repos.tools]\nowner='bob'\nname='tools'\ndescription=''\ndefault_branch='trunk'\nci='push'\n"
         ))
         .await
         .unwrap();

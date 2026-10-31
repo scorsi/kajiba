@@ -14,8 +14,8 @@ const SHA: &str = "1111111111111111111111111111111111111111";
 /// User 1, repository 1 and runners 1 (`build-1`) and 2 (`build-2`).
 async fn populate(writer: &mut SqliteConnection) {
     sqlx::query("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
-        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES
-        (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo');
+        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES
+        (1, '00000000000000000000000001', 1, 'demo', 'public', 'push', 'main', '', 0, 'demo');
         INSERT INTO runner (id, public_id, name, capabilities, version, connected) VALUES
         (1, '00000000000000000000000001', 'build-1', '{}', '', 0),
         (2, '00000000000000000000000002', 'build-2', '{}', '', 0)")

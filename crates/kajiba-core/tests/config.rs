@@ -1,6 +1,8 @@
 use std::{path::Path, time::Duration};
 
-use kajiba_core::config::{Arch, Backend, Os, Role, RunnerConfig, Scope, ServerConfig, Visibility};
+use kajiba_core::config::{
+    Arch, Backend, CiMode, Os, Role, RunnerConfig, Scope, ServerConfig, Visibility,
+};
 
 const SERVER: &str = include_str!("fixtures/server.toml");
 const RUNNER: &str = include_str!("fixtures/runner.toml");
@@ -14,7 +16,7 @@ name = "Demo"
 description = "A demonstration repository"
 visibility = "public"
 default_branch = "trunk"
-ci_enabled = true
+ci = "push"
 previous_names = ["alice/old-demo", "Bob/Demo"]
 permissions = { bob = "write", ALICE = "admin" }
 
@@ -1162,7 +1164,7 @@ fn a_full_repository_example_loads_with_defaults_and_normalized_names() {
     assert_eq!(demo.description, "A demonstration repository");
     assert_eq!(demo.visibility, Visibility::Public);
     assert_eq!(demo.default_branch, "trunk");
-    assert!(demo.ci_enabled);
+    assert_eq!(demo.ci, CiMode::Push);
     assert_eq!(demo.previous_names, ["alice/old-demo", "bob/demo"]);
     assert_eq!(demo.permissions["bob"], Role::Write);
     assert_eq!(demo.permissions["alice"], Role::Admin);
@@ -1174,10 +1176,25 @@ fn a_full_repository_example_loads_with_defaults_and_normalized_names() {
     assert_eq!(tools.name, "tools");
     assert_eq!(tools.visibility, Visibility::Public);
     assert_eq!(tools.default_branch, "main");
-    assert!(!tools.ci_enabled);
+    assert_eq!(tools.ci, CiMode::Off);
     assert!(tools.previous_names.is_empty() && tools.permissions.is_empty());
     assert!(tools.mirrors.is_empty());
     assert!(ServerConfig::parse(MINIMAL).unwrap().repos.is_empty());
+    // ADR 0133: the three modes; the former boolean and other values are refused.
+    for (value, mode) in [
+        ("off", CiMode::Off),
+        ("manual", CiMode::Manual),
+        ("push", CiMode::Push),
+    ] {
+        let input = format!("{SERVER}{REPOS}").replace("ci = \"push\"", &format!("ci = '{value}'"));
+        assert_eq!(ServerConfig::parse(&input).unwrap().repos["demo"].ci, mode);
+    }
+    for (replacement, named) in [("ci_enabled = true", "ci_enabled"), ("ci = 'on'", "on")] {
+        server_error(
+            &format!("{SERVER}{REPOS}").replace("ci = \"push\"", replacement),
+            named,
+        );
+    }
     for header in ["[repos.tools]", "[[repos.demo.mirrors]]"] {
         let input =
             format!("{SERVER}{REPOS}").replacen(header, &format!("{header}\ntypo = true"), 1);

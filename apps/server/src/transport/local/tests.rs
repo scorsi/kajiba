@@ -304,8 +304,8 @@ async fn list_repos_maps_ids_to_names_by_pages_and_marks_archived() {
     let local = bind(&dir.socket(), Arc::default()).unwrap();
     let admin = admin(&dir.0, "[users.alice]\n[users.bob]").await;
     sqlx::query(
-        "INSERT INTO repo (public_id, config_key, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, archived_at)
-         SELECT column1, column2, (SELECT id FROM user WHERE name = column3), column2, 'public', 0, 'main', '', 0, column4
+        "INSERT INTO repo (public_id, config_key, owner_id, name, visibility, ci_mode, default_branch, description, created_at, archived_at)
+         SELECT column1, column2, (SELECT id FROM user WHERE name = column3), column2, 'public', 'off', 'main', '', 0, column4
          FROM (VALUES ('00000000000000000000000001', 'zeta', 'bob', NULL),
                       ('00000000000000000000000002', 'demo', 'alice', 5),
                       ('00000000000000000000000003', 'tools', 'alice', NULL))",
@@ -517,8 +517,8 @@ async fn retention_deletes_old_logs_on_demand() {
     let dir = SocketDir::new();
     let local = bind(&dir.socket(), Arc::default()).unwrap();
     let admin = admin(&dir.0, "[users.alice]").await;
-    sqlx::query("INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES
-        (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo');
+    sqlx::query("INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES
+        (1, '00000000000000000000000001', 1, 'demo', 'public', 'push', 'main', '', 0, 'demo');
         INSERT INTO runner (id, public_id, name, capabilities, version, connected) VALUES (1, '00000000000000000000000001', 'build-1', '{}', '', 0);
         INSERT INTO run (id, public_id, repo_id, sha, trigger, state, created_at) VALUES (1, '00000000000000000000000001', 1, 'a', 'manual', 'failed', 0);
         INSERT INTO job (id, public_id, run_id, name, requirements, replayable, max_attempts, state, created_at) VALUES (1, '00000000000000000000000001', 1, 'flake-check', '{}', 1, 3, 'failed', 0);

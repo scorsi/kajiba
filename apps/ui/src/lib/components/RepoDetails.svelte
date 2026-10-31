@@ -1,6 +1,6 @@
 <!-- Read-only repository facts, all declared in the server configuration. -->
 <script lang="ts">
-	import type { Repo } from '#lib/api.ts';
+	import { CiMode, type Repo } from '#lib/api.ts';
 	import { refShortName } from '#lib/format.ts';
 	import { ROLE_LABEL } from '#lib/repo-ui.ts';
 	import Icon from './Icon.svelte';
@@ -16,7 +16,9 @@
 		<dt class="text-fg-subtle">Default</dt>
 		<dd class="font-mono text-xs leading-5">{refShortName(repo.defaultBranch)}</dd>
 		<dt class="text-fg-subtle">CI</dt>
-		<dd>{repo.ciEnabled ? 'Enabled' : 'Off'}</dd>
+		<dd>
+			{repo.ciMode === CiMode.PUSH ? 'On push' : repo.ciMode === CiMode.MANUAL ? 'Manual' : 'Off'}
+		</dd>
 		{#if repo.previousNames.length}
 			<dt class="text-fg-subtle">Formerly</dt>
 			<dd class="font-mono text-xs leading-5">{repo.previousNames.join(', ')}</dd>

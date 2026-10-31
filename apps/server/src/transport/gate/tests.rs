@@ -1432,11 +1432,11 @@ async fn session_exit_answers_the_runs_its_push_created() {
     };
     assert_eq!(<crate::db::runs::Ci as Handler>::NAME, "ci");
     // One push: admitted, applied by a stand-in for receive-pack, then its session exits.
-    let push = |ci_enabled: bool| {
+    let push = |ci_mode: &'static str| {
         let (admin, gate, alice) = (&admin, &gate, &alice);
         async move {
-            sqlx::query("UPDATE repo SET ci_enabled = ?")
-                .bind(ci_enabled)
+            sqlx::query("UPDATE repo SET ci_mode = ?")
+                .bind(ci_mode)
                 .execute(&mut *admin.writer.lock().await)
                 .await
                 .unwrap();
@@ -1511,7 +1511,7 @@ async fn session_exit_answers_the_runs_its_push_created() {
         }
     };
     // Nothing takes the events: the answer comes empty after the bound.
-    let (runs, waited) = push(true).await;
+    let (runs, waited) = push("push").await;
     assert!(runs.is_empty());
     assert!(waited >= PUSH_RUNS_WAIT, "{waited:?}");
     // The `ci` handler catches up, and keeps up from then on.
@@ -1525,7 +1525,7 @@ async fn session_exit_answers_the_runs_its_push_created() {
         }
     };
     let pushes = async {
-        let (runs, _) = push(true).await;
+        let (runs, _) = push("push").await;
         let created: String =
             sqlx::query_scalar("SELECT public_id FROM run ORDER BY id DESC LIMIT 1")
                 .fetch_one(&mut *admin.writer.lock().await)
@@ -1538,7 +1538,7 @@ async fn session_exit_answers_the_runs_its_push_created() {
             [(created.as_str(), "refs/heads/main")]
         );
         // CI off: no run, and no wait.
-        let (runs, waited) = push(false).await;
+        let (runs, waited) = push("off").await;
         assert!(runs.is_empty());
         assert!(waited < PUSH_RUNS_WAIT, "{waited:?}");
     };

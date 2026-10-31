@@ -208,7 +208,7 @@ pub(in crate::transport) const DEMO: &str = "[repos.demo]\nowner='alice'\ndescri
      mirrors=[{remote_url='https://example.org/demo.git', credential='github'}]\n";
 const TOOLS: &str =
     "[repos.tools]\nowner='alice'\ndescription='Tools'\nprevious_names=['bob/tools']\n";
-const ZETA: &str = "[repos.zeta]\nowner='bob'\ndescription=''\nci_enabled=true\n";
+const ZETA: &str = "[repos.zeta]\nowner='bob'\ndescription=''\nci='push'\n";
 
 async fn get(repos: &Repos, repo: get_repo_request::Repo) -> Result<Repo, Status> {
     repos
@@ -251,7 +251,7 @@ async fn get_returns_declared_fields_by_id_name_and_redirect_archived_included()
             description: "Demo".into(),
             visibility: Visibility::Public.into(),
             default_branch: "main".into(),
-            ci_enabled: false,
+            ci_mode: CiMode::Off.into(),
             previous_names: vec!["alice/old".into()],
             permissions: vec![Permission {
                 user: "bob".into(),
@@ -365,7 +365,7 @@ async fn list_pages_by_name_stay_stable_under_inserts_and_mark_archived() {
         all.repos.iter().map(|r| r.archived).collect::<Vec<_>>(),
         [false, true, false]
     );
-    assert!(all.repos[2].ci_enabled);
+    assert_eq!(all.repos[2].ci_mode(), CiMode::Push);
 
     let first = list(&fixture.repos, 1, String::new()).await;
     assert_eq!(names(&first.repos), ["alice/demo"]);
@@ -479,9 +479,9 @@ async fn blob_path_budget_includes_the_filename() {
     let fixture = Fixture::new("").await;
     let public_id = "00000000000000000000000001";
     sqlx::query(
-        "INSERT INTO repo (public_id, owner_id, name, visibility, ci_enabled,
+        "INSERT INTO repo (public_id, owner_id, name, visibility, ci_mode,
                            default_branch, description, created_at)
-         SELECT ?, id, 'demo', 'public', 0, 'main', '', 0 FROM user WHERE name = 'alice'",
+         SELECT ?, id, 'demo', 'public', 'off', 'main', '', 0 FROM user WHERE name = 'alice'",
     )
     .bind(public_id)
     .execute(&mut *fixture.writer.lock().await)

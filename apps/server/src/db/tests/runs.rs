@@ -9,14 +9,17 @@ use kajiba_gitstore::{GitStore, Gix};
 const ZERO: &str = "0000000000000000000000000000000000000000";
 const SHA: &str = "1111111111111111111111111111111111111111";
 
-/// Users 1 (local) and 2 (external); repositories 1 (CI on), 2 (CI off), 3 (CI on, archived).
+/// Users 1 (local) and 2 (external); repositories 1 (CI on push), 2 (CI off), 3 (CI on push,
+/// archived), 4 (CI manual, 0133).
+const POPULATE: &str = "INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0), (2, '00000000000000000000000002', 'guest', 'external', 0, 'runtime', 0);
+        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key, archived_at) VALUES
+        (1, '00000000000000000000000001', 1, 'demo', 'public', 'push', 'main', '', 0, 'demo', NULL),
+        (2, '00000000000000000000000002', 1, 'quiet', 'public', 'off', 'main', '', 0, 'quiet', NULL),
+        (3, '00000000000000000000000003', 1, 'old', 'public', 'push', 'main', '', 0, 'old', 5),
+        (4, '00000000000000000000000004', 1, 'hand', 'public', 'manual', 'main', '', 0, 'hand', NULL)";
+
 async fn populate(writer: &mut SqliteConnection) {
-    sqlx::query("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0), (2, '00000000000000000000000002', 'guest', 'external', 0, 'runtime', 0);
-        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key, archived_at) VALUES
-        (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo', NULL),
-        (2, '00000000000000000000000002', 1, 'quiet', 'public', 0, 'main', '', 0, 'quiet', NULL),
-        (3, '00000000000000000000000003', 1, 'old', 'public', 1, 'main', '', 0, 'old', 5)")
-        .execute(writer).await.unwrap();
+    sqlx::query(POPULATE).execute(writer).await.unwrap();
 }
 
 async fn push(
@@ -134,6 +137,7 @@ async fn ci_handler_runs_only_trusted_pushes_once() {
         (Some(2), 1, "refs/heads/main", SHA),
         (Some(1), 2, "refs/heads/main", SHA),
         (Some(1), 3, "refs/heads/main", SHA),
+        (Some(1), 4, "refs/heads/main", SHA),
     ] {
         push(&mut writer, user, repo, reference, new).await;
     }
@@ -363,7 +367,13 @@ async fn migration_12_keeps_ci_rows_and_admits_worktree_runs() {
         ..MIGRATOR
     };
     migrate(&mut writer, &before).await.unwrap();
-    populate(&mut writer).await;
+    // The boolean of migration 3; migration 14 maps it to the CI mode (0133).
+    let boolean = POPULATE
+        .replace("ci_mode", "ci_enabled")
+        .replace("'push'", "1")
+        .replace("'off'", "0")
+        .replace(",\n        (4, '00000000000000000000000004', 1, 'hand', 'public', 'manual', 'main', '', 0, 'hand', NULL)", "");
+    sqlx::query(&boolean).execute(&mut writer).await.unwrap();
     let event = push(&mut writer, Some(1), 1, "refs/heads/main", SHA).await;
     sqlx::query(&format!("INSERT INTO runner (id, public_id, name, capabilities, version, connected) VALUES (1, '00000000000000000000000001', 'build-1', '{{}}', '0.1.0', 1);
         INSERT INTO run (id, public_id, repo_id, sha, ref, trigger, event_id, triggered_by, state, created_at, failure_reason) VALUES (1, '00000000000000000000000001', 1, '{SHA}', 'refs/heads/main', 'push', {event}, 1, 'failed', 7, 'exit status 1');
@@ -376,6 +386,11 @@ async fn migration_12_keeps_ci_rows_and_admits_worktree_runs() {
         .await
         .unwrap();
     migrate(&mut writer, &MIGRATOR).await.unwrap();
+    let modes: Vec<String> = sqlx::query_scalar("SELECT ci_mode FROM repo ORDER BY id")
+        .fetch_all(&mut writer)
+        .await
+        .unwrap();
+    assert_eq!(modes, ["push", "off", "push"]);
 
     for (table, rows) in [
         ("run", 1),

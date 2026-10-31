@@ -355,7 +355,7 @@ export interface MockRepo {
   name: string;
   description: string;
   defaultBranch: string;
-  ciEnabled: boolean;
+  ci: "off" | "manual" | "push";
   previousNames: string[];
   permissions: { user: string; role: "read" | "write" | "admin" }[];
   mirrors: { remoteUrl: string; credential: string; enabled: boolean }[];
@@ -373,7 +373,7 @@ export const MOCK_REPOS: MockRepo[] = [
     name: "kajiba",
     description: "A small, declarative, self-hosted git forge.",
     defaultBranch: "refs/heads/main",
-    ciEnabled: true,
+    ci: "push",
     previousNames: ["forge"],
     permissions: [
       { user: "alice", role: "admin" },
@@ -411,7 +411,7 @@ export const MOCK_REPOS: MockRepo[] = [
     name: "infra",
     description: "My homelab: nix-darwin host and NixOS guests.",
     defaultBranch: "refs/heads/main",
-    ciEnabled: true,
+    ci: "push",
     previousNames: [],
     permissions: [{ user: "alice", role: "admin" }],
     mirrors: [
@@ -432,7 +432,7 @@ export const MOCK_REPOS: MockRepo[] = [
     name: "hikouki",
     description: "Starship-like toolkit for Claude Code.",
     defaultBranch: "refs/heads/main",
-    ciEnabled: false,
+    ci: "off",
     previousNames: [],
     permissions: [{ user: "alice", role: "admin" }],
     mirrors: [
@@ -453,7 +453,7 @@ export const MOCK_REPOS: MockRepo[] = [
     name: "scratch",
     description: "",
     defaultBranch: "refs/heads/main",
-    ciEnabled: false,
+    ci: "off",
     previousNames: [],
     permissions: [{ user: "alice", role: "admin" }],
     mirrors: [],
@@ -468,7 +468,7 @@ export const MOCK_REPOS: MockRepo[] = [
     name: "dotfiles",
     description: "Old dotfiles, superseded by infra.",
     defaultBranch: "refs/heads/master",
-    ciEnabled: false,
+    ci: "off",
     previousNames: [],
     permissions: [{ user: "alice", role: "admin" }],
     mirrors: [
@@ -489,7 +489,7 @@ export const MOCK_REPOS: MockRepo[] = [
     name: "notes",
     description: "Scratch notes.",
     defaultBranch: "refs/heads/main",
-    ciEnabled: false,
+    ci: "off",
     previousNames: [],
     permissions: [
       { user: "mika", role: "admin" },

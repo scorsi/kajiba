@@ -100,8 +100,8 @@ async fn credentials(writer: &mut SqliteConnection) {
          SELECT '00000000000000000000000098', id, 'declared', zeroblob(32), 'admin', 'config', 0, NULL FROM user WHERE name = 'alice';
          INSERT INTO api_token (public_id, user_id, name, token_hash, scopes, source, created_at, revoked_at)
          SELECT '00000000000000000000000097', id, 'old', X'01', 'repo:read', 'runtime', 0, 42 FROM user WHERE name = 'alice';
-         INSERT INTO repo (public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at)
-         SELECT public_id, id, 'demo', 'public', 0, 'main', 'kept', 0 FROM user WHERE name = 'alice';
+         INSERT INTO repo (public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at)
+         SELECT public_id, id, 'demo', 'public', 'off', 'main', 'kept', 0 FROM user WHERE name = 'alice';
          INSERT INTO ssh_key (public_id, user_id, usage, key_type, public_key, fingerprint, source, created_at)
          SELECT public_id, id, 'auth', 'ssh-ed25519', 'opaque', 'SHA256:opaque', 'config', 0 FROM user WHERE name = 'alice';
          INSERT INTO webauthn_credential (public_id, user_id, credential_id, passkey, name, created_at)

@@ -112,7 +112,7 @@ async fn readiness_tracks_missing_mismatched_connected_and_restarted_daemon() {
     );
     let admin =
         crate::transport::local::tests::admin(&state.health.state_dir, "[users.alice]").await;
-    sqlx::query("INSERT INTO repo (public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at) VALUES ('00000000000000000000000001', 1, 'demo', 'public', 0, 'main', '', 0)")
+    sqlx::query("INSERT INTO repo (public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at) VALUES ('00000000000000000000000001', 1, 'demo', 'public', 'off', 'main', '', 0)")
         .execute(&mut *admin.writer.lock().await).await.unwrap();
     let admission = admin.gate.clone();
     let monitor = tokio::spawn({
