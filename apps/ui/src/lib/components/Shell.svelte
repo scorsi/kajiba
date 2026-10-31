@@ -17,7 +17,6 @@
 		logout,
 		listCommits,
 		listRunners,
-		listRuns,
 		type Run
 	} from '#lib/api.ts';
 	import Icon from '#lib/components/Icon.svelte';
@@ -26,7 +25,7 @@
 	import StateView from '#lib/components/StateView.svelte';
 	import ThemeToggle from '#lib/components/ThemeToggle.svelte';
 	import { relativeTime, toDate } from '#lib/format.ts';
-	import { allRepos } from '#lib/loaders.ts';
+	import { allRepos, recentRuns } from '#lib/loaders.ts';
 	import { resource } from '#lib/resource.svelte.ts';
 
 	let { location, children }: { location?: string; children: Snippet } = $props();
@@ -95,7 +94,7 @@
 		if (!drawerOpen) return undefined;
 		const list = await allRepos();
 		const [runs, logs] = await Promise.all([
-			listRuns({ pageSize: 200 }).then((r) => r.runs),
+			recentRuns(3),
 			Promise.all(
 				list.map((r) =>
 					listCommits({ repo: `${r.owner}/${r.name}`, revision: r.defaultBranch, want: 120 })

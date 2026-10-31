@@ -10,7 +10,6 @@ import {
   listMirrorStatus,
   listRefs,
   listRunners,
-  listRuns,
   type Commit,
   type MirrorStatus,
   type Repo,
@@ -18,7 +17,7 @@ import {
   type Runner,
 } from "#lib/api.ts";
 import { refShortName, toDate } from "#lib/format.ts";
-import { allRepos } from "#lib/loaders.ts";
+import { allRepos, recentRuns } from "#lib/loaders.ts";
 
 export interface RepoActivity {
   repo: Repo;
@@ -40,7 +39,7 @@ export interface Forge {
 export async function loadForge(): Promise<Forge> {
   const [repos, runs, runners, mirrors] = await Promise.all([
     allRepos(),
-    listRuns({ pageSize: 200 }).then((r) => r.runs),
+    recentRuns(50),
     listRunners().then((r) => r.runners),
     listMirrorStatus().then((m) => m.mirrors),
   ]);

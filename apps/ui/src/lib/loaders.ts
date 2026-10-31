@@ -25,6 +25,26 @@ export function allRepos(): Promise<api.Repo[]> {
   return repoCache;
 }
 
+/** The newest runs of every readable repository, newest first (there is no forge-wide `ListRuns`). */
+export async function recentRuns(perRepo: number): Promise<api.Run[]> {
+  const repos = await allRepos();
+  const per = await Promise.all(
+    repos.map((r) =>
+      api
+        .listRuns({ repo: `${r.owner}/${r.name}`, pageSize: perRepo })
+        .then((l) => l.runs)
+        .catch(() => [] as api.Run[]),
+    ),
+  );
+  return per
+    .flat()
+    .sort(
+      (a, b) =>
+        Number(b.createTime?.seconds ?? 0n) -
+        Number(a.createTime?.seconds ?? 0n),
+    );
+}
+
 /** `GetRepo` resolves previous names: the view redirects to the current one. */
 export async function findRepo(owner: string, name: string) {
   const repo = await api.getRepo({ name: `${owner}/${name}` });

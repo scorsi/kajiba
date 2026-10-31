@@ -972,12 +972,20 @@ impl RunService for Runs {
             0 => String::new(),
             n => format!(" AND run.state IN ({})", vec!["?"; n].join(", ")),
         };
+        let filter = if request.r#ref.is_empty() {
+            filter
+        } else {
+            format!("{filter} AND run.ref = ?")
+        };
         let sql = format!(
             "{SELECT} WHERE run.repo_id = ? AND run.id < ?{filter} ORDER BY run.id DESC LIMIT ?"
         );
         let mut query = sqlx::query_as(&sql).bind(repo_id).bind(after);
         for state in &states {
             query = query.bind(state);
+        }
+        if !request.r#ref.is_empty() {
+            query = query.bind(&request.r#ref);
         }
         let mut connection = self.readers()?.begin().await.map_err(internal)?;
         let mut rows: Vec<Row> = query

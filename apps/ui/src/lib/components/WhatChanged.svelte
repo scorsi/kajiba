@@ -27,7 +27,7 @@
 			{:else if data.lastGreen}
 				<span class="font-mono">{branch}</span> was green at
 				<a href={runHref(data.lastGreen.id)} class="font-mono text-link hover:underline"
-					>#{data.lastGreen.id}</a
+					>#{data.lastGreen.short}</a
 				>, {relativeTime(toDate(data.lastGreen.createTime))}. {data.since.length} commit{data.since
 					.length > 1
 					? 's'
@@ -52,7 +52,7 @@
 		</ul>
 		{#if prev && prev.id !== data.lastGreen?.id && run.state !== RunState.SUCCEEDED}
 			<p class="mt-2 text-xs text-fg-subtle">
-				The run before, <a href={runHref(prev.id)} class="font-mono hover:underline">#{prev.id}</a>,
+				The run before, <a href={runHref(prev.id)} class="font-mono hover:underline">#{prev.short}</a>,
 				{RUN_LABEL[prev.state]} too.
 			</p>
 		{/if}

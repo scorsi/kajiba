@@ -172,6 +172,7 @@ pub async fn run(
                         page_size: (limit as usize - found.len()).min(200) as i32,
                         page_token,
                         states: states.iter().map(|&state| state.into()).collect(),
+                        ..Default::default()
                     })
                     .await,
                 )?;

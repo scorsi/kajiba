@@ -18,6 +18,12 @@ import { createGrpcWebTransport } from "@connectrpc/connect-web";
 import { AuthService } from "./gen/kajiba/v1/auth_pb.ts";
 import { Scope } from "./gen/kajiba/v1/options_pb.ts";
 import {
+  RunService,
+  RunState as RunStateMessage,
+  type Attempt as AttemptMessage,
+  type Run as RunMessage,
+} from "./gen/kajiba/v1/run_pb.ts";
+import {
   RepoService,
   type Commit as CommitMessage,
   type Repo as RepoMessage,
@@ -34,10 +40,7 @@ import {
   MOCK_REPOS,
   MOCK_SERVER,
   MOCK_RUNNERS,
-  MOCK_RUNS,
   MOCK_DISK_BYTES,
-  CHECKS,
-  mockRunLog,
 } from "./mock";
 
 // ── Types (shape of protobuf-es generated messages) ─────────────────────
@@ -703,7 +706,7 @@ export async function completeEnrollment(req: {
   return getViewer();
 }
 
-// ── ASSUMED: CI runs ────────────────────────────────────────────────────
+// ── RunService ──────────────────────────────────────────────────────────
 
 export enum RunState {
   UNSPECIFIED = 0,
@@ -714,110 +717,182 @@ export enum RunState {
   CANCELLED = 5,
 }
 
+/** One attempt of the run's job: a replayed attempt is a new step. */
 export interface RunStep {
   name: string;
   state: RunState;
   durationSeconds: number;
-  /** ASSUMED: sub-steps known in advance (the flake checks a `nix flake check` step builds, from evaluation). */
+  /** Flake checks of the step, when known (not sent by the server yet). */
   checks?: string[];
+}
+
+export interface RunFailure {
+  /** The failing check when the runner knows it; often empty. */
+  check: string;
+  /** E.g. `exit status 1`, `lease-expired`. */
+  reason: string;
+  lastLines: string[];
 }
 
 export interface Run {
   id: string;
+  /** The public id shortened for display. */
+  short: string;
   repo: RepoRef;
-  /** Full ref the run was triggered for. */
+  /** Full ref the run was triggered for; empty for a manual or worktree run. */
   ref: string;
   commitId: string;
   state: RunState;
   createTime?: Timestamp;
   /** Elapsed so far while running. */
   durationSeconds: number;
+  /** Declared name of the runner of the latest attempt; empty before one. */
   runner: string;
-  trigger: "push" | "manual";
+  runnerHostname: string;
+  trigger: "push" | "manual" | "worktree";
+  /** The user who pushed or triggered; empty for an import. */
+  triggeredBy: string;
+  /** Why no runner takes the job (ADR 0109); empty otherwise. */
+  pendingReason: string;
+  failure?: RunFailure;
+  /** One step per known attempt; a run not assigned yet has one queued step. */
   steps: RunStep[];
 }
 
-const RUN_STATE = {
-  queued: RunState.QUEUED,
-  running: RunState.RUNNING,
-  succeeded: RunState.SUCCEEDED,
-  failed: RunState.FAILED,
-  cancelled: RunState.CANCELLED,
-} as const;
+const runs = createClient(RunService, transport);
 
-function toRun(r: (typeof MOCK_RUNS)[number]): Run {
+/** Run ids are 26 characters, the leading ones being the time: show the random tail. */
+const shortRunId = (id: string) => id.slice(-8).toLowerCase();
+
+const seconds = (t?: { seconds: bigint }) => (t ? Number(t.seconds) : 0);
+
+/** Elapsed seconds from start to finish, or to now while unfinished. */
+function elapsed(
+  started?: { seconds: bigint },
+  finished?: { seconds: bigint },
+): number {
+  if (!started) return 0;
+  const end = finished ? seconds(finished) : Date.now() / 1000;
+  return Math.max(0, Math.round(end - seconds(started)));
+}
+
+// Lost = the runner vanished: a failure of the attempt.
+const ATTEMPT_STATE = [
+  RunState.UNSPECIFIED,
+  RunState.RUNNING,
+  RunState.SUCCEEDED,
+  RunState.FAILED,
+  RunState.CANCELLED,
+  RunState.FAILED,
+];
+const TRIGGER = [undefined, "push", "manual", "worktree"] as const;
+
+function toStep(a: AttemptMessage): RunStep {
   return {
-    id: r.id,
-    repo: r.repo,
-    ref: r.ref,
-    commitId: r.commitId,
-    state: RUN_STATE[r.state],
-    createTime: { seconds: BigInt(r.created), nanos: 0 },
-    durationSeconds: r.duration,
-    runner: r.runner,
-    trigger: r.trigger,
-    steps: r.steps.map((s, i) => ({
-      name: s.name,
-      state: RUN_STATE[s.state],
-      durationSeconds: s.duration,
-      checks:
-        i === 2 && r.steps[1].state === "succeeded" ? [...CHECKS] : undefined,
-    })),
+    name: `attempt ${a.number}`,
+    state: ATTEMPT_STATE[a.state] ?? RunState.UNSPECIFIED,
+    durationSeconds: elapsed(a.startedAt, a.finishedAt),
   };
 }
 
-/** ASSUMED `ListRuns` — newest first, optionally for one repository and ref. */
-export async function listRuns(
-  req: { repo?: RepoRef; ref?: string; pageSize?: number } = {},
-) {
-  await mockGate();
-  const runs: Run[] = MOCK_RUNS.filter(
-    (r) =>
-      (!req.repo || r.repo === req.repo) && (!req.ref || r.ref === req.ref),
-  )
-    .sort((a, b) => b.created - a.created)
-    .slice(0, req.pageSize ?? 50)
-    .map(toRun);
-  return { runs };
+function toRun(m: RunMessage, repo: RepoRef): Run {
+  const attempt = m.job?.currentAttempt;
+  return {
+    id: m.publicId,
+    short: shortRunId(m.publicId),
+    repo,
+    ref: m.ref,
+    commitId: m.sha,
+    state: m.state as number as RunState,
+    createTime: m.createdAt,
+    durationSeconds: elapsed(m.startedAt, m.finishedAt),
+    runner: attempt?.runner ?? "",
+    runnerHostname: attempt?.runnerHostname ?? "",
+    trigger: TRIGGER[m.trigger] ?? "push",
+    triggeredBy: m.triggeredBy,
+    pendingReason: m.job?.pendingReason ?? "",
+    failure: m.failure && {
+      check: m.failure.check,
+      reason: m.failure.reason,
+      lastLines: m.failure.lastLogLines,
+    },
+    steps: attempt
+      ? [toStep(attempt)]
+      : [
+          {
+            name: m.job?.name || "check",
+            state:
+              m.state === RunStateMessage.CANCELLED
+                ? RunState.CANCELLED
+                : RunState.QUEUED,
+            durationSeconds: 0,
+          },
+        ],
+  };
 }
 
-/** ASSUMED `GetRun` — one run by id. NotFound if unknown or not visible. */
+/** A repository's runs, newest first; `ref` is an exact full ref (ADR 0138). */
+export async function listRuns(req: {
+  repo: RepoRef;
+  ref?: string;
+  pageSize?: number;
+  pageToken?: string;
+}) {
+  const res = await runs.listRuns({
+    repo: req.repo,
+    ref: req.ref ?? "",
+    pageSize: req.pageSize ?? 50,
+    pageToken: req.pageToken ?? "",
+  });
+  return {
+    runs: res.runs.map((r) => toRun(r, req.repo)),
+    nextPageToken: res.nextPageToken,
+  };
+}
+
+/** One run by public id; NotFound if unknown or its repository is unreadable. */
 export async function getRun(req: { id: string }): Promise<Run> {
-  await mockGate();
-  const r = MOCK_RUNS.find((x) => x.id === req.id);
-  if (!r) throw new ApiError(Code.NotFound, `run #${req.id} not found`);
-  return toRun(r);
+  const { run } = await runs.getRun({ run: req.id });
+  if (!run) throw new ApiError(Code.Unknown, "empty GetRun answer");
+  const { repo } = await repos.getRepo({
+    repo: { case: "publicId", value: run.repoPublicId },
+  });
+  return toRun(run, repo ? `${repo.owner}/${repo.name}` : run.repoPublicId);
 }
 
 export interface RunLogLine {
-  /** Seconds since the step started. */
+  /** Seconds since the step started (the server does not time lines: 0). */
   offsetSeconds: number;
   text: string;
-  /** `cmd` = a command the runner echoed before running it. */
+  /** `err` = an `error:` line; `cmd` = a command the runner echoed. */
   stream: "out" | "err" | "cmd";
   /** Flake check (derivation) this line belongs to, when known. */
   group?: string;
 }
 
-/**
- * ASSUMED `GetRunLog` — the log of one step. A running step returns what is
- * there so far (`complete: false`); a real client would stream it
- * (server-streaming RPC) and append.
- */
-export async function getRunLog(req: { id: string; step: number }) {
-  await mockGate();
-  const r = MOCK_RUNS.find((x) => x.id === req.id);
-  if (!r) throw new ApiError(Code.NotFound, `run #${req.id} not found`);
-  const { lines, complete } = mockRunLog(r, req.step);
-  return {
-    lines: lines.map<RunLogLine>((l) => ({
-      offsetSeconds: l.t,
-      text: l.text,
-      stream: l.stream,
-      group: l.group,
-    })),
-    complete,
-  };
+/** The stored log of a run, cut into its attempts (the live stream is task 5). */
+export async function getRunLog(req: { id: string }) {
+  const decoder = new TextDecoder();
+  const attempts: { step: RunStep; text: string }[] = [];
+  for await (const m of runs.watchRun({ run: req.id, follow: false })) {
+    if (m.event.case === "section" && m.event.value.attempt)
+      attempts.push({ step: toStep(m.event.value.attempt), text: "" });
+    else if (m.event.case === "log")
+      attempts.at(-1)!.text += decoder.decode(m.event.value.data, {
+        stream: true,
+      });
+  }
+  return attempts.map(({ step, text }) => ({
+    step,
+    lines: text
+      .split("\n")
+      .filter((l, i, all) => l || i < all.length - 1)
+      .map<RunLogLine>((l) => ({
+        offsetSeconds: 0,
+        text: l,
+        stream: /^error\b/.test(l) ? "err" : "out",
+      })),
+  }));
 }
 
 // ── mock internals

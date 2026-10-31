@@ -229,7 +229,7 @@
 	<!-- Pipelines -->
 	{#snippet pipeSummary()}
 		{#each running as r (r.id)}<span class="flex items-center gap-1.5"
-				><RunBadge state={r.state} size={10} /><span class="text-fg-muted">{r.repo} #{r.id}</span
+				><RunBadge state={r.state} size={10} /><span class="text-fg-muted">{r.repo} #{r.short}</span
 				></span
 			>{/each}
 		<span class={failures.length ? 'text-danger' : ''}>{failures.length} failed · 7 days</span>
@@ -246,7 +246,7 @@
 							class="flex items-center gap-2 rounded-md border border-border bg-bg px-3 py-2 text-[0.8125rem] hover:border-border-strong"
 						>
 							<RunBadge state={r.state} label />
-							<span class="font-mono text-xs text-fg-muted">{r.repo} #{r.id}</span>
+							<span class="font-mono text-xs text-fg-muted">{r.repo} #{r.short}</span>
 							<span class="ml-auto flex w-32 gap-0.5" aria-hidden="true"
 								>{#each r.steps as s (s.name)}<span
 										class="h-1 flex-1 rounded-full {s.state === RunState.SUCCEEDED
@@ -271,7 +271,7 @@
 									href="/-/runs/{r.id}"
 									class="flex items-center gap-2 rounded-sm px-1 py-0.5 hover:bg-surface-2"
 									><RunBadge state={r.state} size={11} /><span
-										class="font-mono text-xs text-fg-muted">{r.repo} #{r.id}</span
+										class="font-mono text-xs text-fg-muted">{r.repo} #{r.short}</span
 									><span class="truncate text-xs text-fg-subtle"
 										>{r.steps.find((s) => s.state === RunState.FAILED)?.name}</span
 									><span class="ml-auto text-xs text-fg-subtle"

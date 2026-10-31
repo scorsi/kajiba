@@ -712,6 +712,47 @@ async fn runs_are_listed_newest_first_by_cursor() {
         refusal(status),
         (Code::InvalidArgument, "INVALID_FIELD".into())
     );
+
+    // Filtered by exact ref, with states and pagination; an unknown ref is an empty page.
+    sqlx::query("UPDATE run SET ref = 'refs/heads/main' WHERE public_id IN (?, ?)")
+        .bind(&created[0])
+        .bind(&created[1])
+        .execute(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    let on = |r#ref: &str, states: Vec<RunState>, page_size: i32, page_token: String| {
+        runs.list_runs(as_user(
+            ALICE,
+            ListRunsRequest {
+                repo: "alice/ci".into(),
+                r#ref: r#ref.into(),
+                states: states.into_iter().map(i32::from).collect(),
+                page_size,
+                page_token,
+            },
+        ))
+    };
+    let main = |states, size, token| on("refs/heads/main", states, size, token);
+    let first = main(vec![], 1, String::new()).await.unwrap().into_inner();
+    assert_eq!(ids(&first.runs), [created[1].clone()]);
+    let second = main(vec![], 1, first.next_page_token)
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ids(&second.runs), [created[0].clone()]);
+    assert!(second.next_page_token.is_empty());
+    let failed = main(vec![RunState::Failed], 0, String::new())
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ids(&failed.runs), [created[1].clone()]);
+    for unknown in ["refs/heads/nope", "main"] {
+        let page = on(unknown, vec![], 0, String::new())
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(page.runs.is_empty() && page.next_page_token.is_empty());
+    }
 }
 
 #[tokio::test]

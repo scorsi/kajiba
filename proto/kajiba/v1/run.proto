@@ -76,6 +76,9 @@ message ListRunsRequest {
   // Only runs in one of these states; empty for all. INVALID_FIELD for an unknown or
   // unspecified state (ADR 0131).
   repeated RunState states = 4;
+  // Only runs of this exact full ref (`refs/heads/main`); empty for all. Manual and
+  // worktree runs have no ref and match none (ADR 0138).
+  string ref = 5;
 }
 
 message ListRunsResponse {

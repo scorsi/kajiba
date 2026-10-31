@@ -221,7 +221,7 @@
 							{:else if e.kind === 'ci'}
 								<p class="text-fg-muted">
 									Run <a href={runHref(e.run.id)} class="font-mono text-xs text-fg hover:underline"
-										>#{e.run.id}</a
+										>#{e.run.short}</a
 									>
 									<span class="text-danger">failed</span>
 									{#if repoHref}in {@render repoName(e.repo)}{/if}

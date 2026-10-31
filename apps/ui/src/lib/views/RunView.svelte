@@ -17,6 +17,14 @@
 	import WhatChanged from '#lib/components/WhatChanged.svelte';
 	import { clock, runHref, type RunPage } from '#lib/data/run.ts';
 
+	// Why a queued run waits, in words (ADR 0109).
+	const PENDING: Record<string, string> = {
+		'no-connected-runner': 'Waiting: no runner is connected.',
+		'backend-unavailable': 'Waiting: no connected runner offers the backend this run needs.',
+		'tags-unmatched': 'Waiting: no runner has the tags this run requires.',
+		'runners-busy': 'Waiting: every matching runner is busy.'
+	};
+
 	let { data }: { data: RunPage } = $props();
 	const run = $derived(data.run);
 
@@ -78,7 +86,7 @@
 		<p class="text-xs tracking-wide text-fg-subtle uppercase">▾ Pulse</p>
 		<div class="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
 			<h1 class="text-2xl font-semibold tracking-tight">
-				Run <span class="font-mono">#{run.id}</span>
+				Run <span class="font-mono" title={run.id}>#{run.short}</span>
 			</h1>
 			<span class="flex items-center gap-1.5 text-[0.9375rem]"
 				><RunBadge state={run.state} size={14} label /><span class="text-fg-muted"
@@ -89,6 +97,24 @@
 			>
 		</div>
 		<RunMeta {data} class="mt-2" />
+		{#if run.pendingReason && run.state === RunState.QUEUED}
+			<p class="mt-3 text-[0.8125rem] text-fg-muted" data-pending={run.pendingReason}>
+				{PENDING[run.pendingReason] ?? run.pendingReason}
+			</p>
+		{/if}
+		{#if run.failure}
+			<div class="mt-3 rounded-md border border-danger/40 bg-bg px-3 py-2" data-failure>
+				<p class="text-[0.8125rem]">
+					<span class="text-danger">Failed</span>
+					{#if run.failure.check}in <span class="font-mono">{run.failure.check}</span>{/if}
+					{#if run.failure.reason}<span class="text-fg-muted">· {run.failure.reason}</span>{/if}
+				</p>
+				{#if run.failure.lastLines.length}<pre
+						class="mt-2 max-h-40 overflow-auto font-mono text-xs break-words whitespace-pre-wrap text-fg-muted">{run.failure.lastLines.join(
+							'\n'
+						)}</pre>{/if}
+			</div>
+		{/if}
 
 		<!-- step timeline -->
 		<figure class="mt-5">
@@ -145,7 +171,7 @@
 							? 'ring-1 ring-fg'
 							: ''}"
 						aria-current={r.id === run.id ? 'page' : undefined}
-						title="#{r.id} · {RUN_LABEL[r.state]} · {clock(r.durationSeconds)} · {relativeTime(
+						title="#{r.short} · {RUN_LABEL[r.state]} · {clock(r.durationSeconds)} · {relativeTime(
 							toDate(r.createTime)
 						)}"><RunBadge state={r.state} size={11} /></a
 					>
@@ -155,7 +181,7 @@
 				<span
 					>last green <a
 						href={runHref(data.lastGreen.id)}
-						class="font-mono text-link hover:underline">#{data.lastGreen.id}</a
+						class="font-mono text-link hover:underline">#{data.lastGreen.short}</a
 					>
 					{relativeTime(toDate(data.lastGreen.createTime))}</span
 				>
@@ -167,7 +193,7 @@
 	<BandStrip label="What changed" open={changedOpen} href={changedHref}>
 		{#if data.lastGreen && run.state !== RunState.SUCCEEDED}<span
 				>{data.since.length} commit{data.since.length > 1 ? 's' : ''} since
-				<span class="font-mono">#{data.lastGreen.id}</span></span
+				<span class="font-mono">#{data.lastGreen.short}</span></span
 			>{/if}
 		<span class="tabular">{data.changes.length} files</span>
 	</BandStrip>

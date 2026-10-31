@@ -392,7 +392,7 @@
 	>
 		<div class="flex items-center gap-2 text-[0.8125rem]">
 			<RunBadge state={r.state} label />
-			<span class="font-mono text-xs text-fg-muted">#{r.id}</span>
+			<span class="font-mono text-xs text-fg-muted">#{r.short}</span>
 			<span class="tabular ml-auto text-xs text-fg-subtle">{dur(r.durationSeconds)}</span>
 		</div>
 		<p class="mt-1 truncate text-xs text-fg-muted">
@@ -410,7 +410,7 @@
 				<span class="font-medium text-fg">{repo?.owner} / {repo?.name}</span>
 				<span>last change {relativeTime(toDate(log.data?.[0]?.commitTime))}</span>
 				{#if current && ciOn}<span class="flex items-center gap-1"
-						><RunBadge state={current.state} size={10} />#{current.id}</span
+						><RunBadge state={current.state} size={10} />#{current.short}</span
 					>{/if}
 				{#if mirror}<span class={mirror.ok ? '' : 'text-danger'}>{mirror.t}</span>{/if}
 			{/snippet}
@@ -607,7 +607,7 @@
 			{#snippet pipeSummary()}
 				{#if current}<span class="flex items-center gap-1.5"
 						><RunBadge state={current.state} size={10} /><span class="text-fg-muted"
-							>#{current.id} {RUN_LABEL[current.state]}</span
+							>#{current.short} {RUN_LABEL[current.state]}</span
 						>
 						· {dur(current.durationSeconds)}</span
 					>{/if}
@@ -631,7 +631,7 @@
 										>
 											<span class="flex items-center gap-1.5"
 												><RunBadge state={r.state} size={11} /><span class="font-mono text-fg-muted"
-													>#{r.id}</span
+													>#{r.short}</span
 												><span class="tabular ml-auto text-fg-subtle">{dur(r.durationSeconds)}</span
 												></span
 											>
@@ -698,7 +698,7 @@
 				{#if runByCommit.get(at)}{@const r = runByCommit.get(at)!}<a
 						href="/-/runs/{r.id}"
 						class="flex items-center gap-1 text-fg-muted hover:underline"
-						><RunBadge state={r.state} size={11} />CI #{r.id}</a
+						><RunBadge state={r.state} size={11} />CI #{r.short}</a
 					>{/if}
 				<a
 					href={hrefFor({ at: null })}

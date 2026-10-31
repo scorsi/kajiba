@@ -286,7 +286,7 @@
 											<span
 												class="mt-1.5 flex gap-0.5"
 												role="img"
-												aria-label="Steps of run #{run.id}"
+												aria-label="Steps of run #{run.short}"
 												>{#each run.steps as st (st.name)}<span
 														class="h-1 flex-1 rounded-full {stepClass(st.state)}"
 														title="{st.name} · {RUN_LABEL[st.state]}"
@@ -301,7 +301,7 @@
 										<span class="text-fg-subtle"
 											>idle{#if s.runs[0]}{' · last run '}
 												<a href="/-/runs/{s.runs[0].id}" class="font-mono hover:underline"
-													>#{s.runs[0].id}</a
+													>#{s.runs[0].short}</a
 												>
 												{relativeTime(toDate(s.runs[0].createTime))}{/if}</span
 										>

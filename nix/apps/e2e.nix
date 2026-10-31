@@ -15,7 +15,11 @@
   playwright-driver,
   kajibaServer,
   kajibaGit,
+  kajibaRunner,
+  kajibaCli,
   kajibaUi,
+  # The test CA of the runner channel (nix/tests/svid.nix): forge/ and runner/ SVIDs, bundle.pem.
+  svidCa,
 }:
 let
   # The suite with its node_modules (same lockfile and pnpm store as kajiba-ui).
@@ -52,6 +56,8 @@ writeShellApplication {
     nodejs
     kajibaServer
     kajibaGit
+    kajibaRunner
+    kajibaCli
   ];
   text = ''
     port="''${KAJIBA_E2E_PORT:-18080}"
@@ -69,6 +75,19 @@ writeShellApplication {
     user="$(id -un)"
     mkdir -p "$dir/run" "$dir/run-git" "$dir/hooks"
 
+    # The runner channel's identities: the test CA's SVIDs copied under 0600 keys (the runner
+    # refuses a key readable by others).
+    rport="''${KAJIBA_E2E_RUNNER_PORT:-18443}"
+    pat="kjb_$(head -c 32 /dev/urandom | basenc --base64url | tr -d '=')"
+    case "$(uname -m)" in arm64 | aarch64) arch=aarch64 ;; *) arch=x86_64 ;; esac
+    case "$(uname -s)" in Darwin) os=darwin ;; *) os=linux ;; esac
+    mkdir -p "$dir/svid/forge" "$dir/svid/runner"
+    cp ${svidCa}/bundle.pem "$dir/svid/bundle.pem"
+    for unit in forge runner; do
+      cp ${svidCa}/$unit/svid.pem ${svidCa}/$unit/key.pem "$dir/svid/$unit/"
+      chmod 600 "$dir/svid/$unit/svid.pem" "$dir/svid/$unit/key.pem"
+    done
+
     cat > "$dir/server.toml" <<EOF
     state_dir = "$dir/server"
     run_dir = "$dir/run"
@@ -83,10 +102,23 @@ writeShellApplication {
     session_ttl = "1m"
     [users.alice]
     is_admin = true
+    [users.alice.tokens.ci]
+    sha256 = "$(printf %s "$pat" | sha256sum | cut -d' ' -f1)"
+    scopes = ["repo:read", "ci:trigger"]
     [users.reader]
+    [runner_listener]
+    listen = "127.0.0.1:$rport"
+    trust_domain = "example.org"
+    svid_file = "$dir/svid/forge/svid.pem"
+    key_file = "$dir/svid/forge/key.pem"
+    bundle_file = "$dir/svid/bundle.pem"
+    [runners.e2e]
+    spiffe_id = "spiffe://example.org/runner/kajiba-runner"
+    capabilities = { arch = "$arch", os = "$os" }
     [repos.demo]
     owner = "alice"
     description = "Demo repository"
+    ci = "manual"
     permissions.reader = "read"
     EOF
     cat > "$dir/git.toml" <<EOF
@@ -113,6 +145,8 @@ writeShellApplication {
       tail -n 50 "$dir/git.log" >&2
       echo "--- kajiba-server" >&2
       tail -n 50 "$dir/server.log" >&2
+      echo "--- kajiba-runner" >&2
+      tail -n 50 "$dir/runner.log" >&2 || true
     }
     ready=
     for _ in $(seq 60); do
@@ -149,6 +183,58 @@ writeShellApplication {
     git -C "$fixture" switch --quiet main
     git clone --quiet --bare "$fixture" "$dir/fixture.git"
     kajiba-server admin --socket "$dir/run/local.sock" import alice/demo "$dir/fixture.git" >/dev/null
+    main_sha="$(git -C "$fixture" rev-parse main)"
+    KAJIBA_E2E_FEATURE_SHA="$(git -C "$fixture" rev-parse feature)"
+    export KAJIBA_E2E_FEATURE_SHA
+
+    # CI without a Nix sandbox: a fake `nix` first on the runner's PATH answers the host check
+    # and `flake check` with scripted, timed output; the feature branch's tip fails.
+    mkdir -p "$dir/bin"
+    cat > "$dir/bin/nix" <<'EOF'
+    #!/bin/sh
+    if [ "$1 $2" = "config show" ]; then
+      echo '{"sandbox":{"value":true},"accept-flake-config":{"value":false},"trusted-users":{"value":["root"]},"build-users-group":{"value":""}}'
+      exit 0
+    fi
+    for ref; do :; done
+    echo "evaluating flake ''${ref%%\?*}"
+    sleep 1
+    echo "building 'fmt'"
+    sleep 1
+    if [ "''${ref##*rev=}" = "$KAJIBA_E2E_FEATURE_SHA" ]; then
+      echo "error: build of '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-fmt.drv' failed"
+      exit 1
+    fi
+    echo "all checks passed"
+    EOF
+    chmod +x "$dir/bin/nix"
+    printf 'http://localhost:%s\n%s\n' "$port" "$pat" > "$dir/token"
+    export KAJIBA_E2E_TOKEN_FILE="$dir/token"
+
+    cat > "$dir/runner.toml" <<EOF
+    name = "e2e"
+    url = "https://127.0.0.1:$rport"
+    hostname = "e2e-host"
+    backends = ["nix"]
+    max_jobs = 1
+    state_dir = "$dir/runner"
+    [tls]
+    trust_domain = "example.org"
+    server_id = "spiffe://example.org/forge/kajiba-server"
+    svid_file = "$dir/svid/runner/svid.pem"
+    key_file = "$dir/svid/runner/key.pem"
+    bundle_file = "$dir/svid/bundle.pem"
+    EOF
+    # A run queued while no runner is connected; the runner starts when the suite asks for it
+    # (it creates $dir/start-runner), then takes that run first.
+    KAJIBA_E2E_PENDING_RUN="$(kajiba --token-file "$dir/token" --development ci run --detach alice/demo "$main_sha")"
+    export KAJIBA_E2E_PENDING_RUN
+    export KAJIBA_E2E_START_RUNNER="$dir/start-runner"
+    (
+      while [ ! -e "$dir/start-runner" ]; do sleep 0.2; done
+      PATH="$dir/bin:$PATH" exec kajiba-runner --config "$dir/runner.toml" 2> "$dir/runner.log"
+    ) &
+    pids+=("$!")
 
     export KAJIBA_E2E_URL="http://localhost:$port"
     export KAJIBA_E2E_ADMIN_SOCKET="$dir/run/local.sock"

@@ -67,7 +67,10 @@
           pkgs.callPackage ./apps/e2e.nix {
             kajibaServer = config.packages.kajiba-server;
             kajibaGit = config.packages.kajiba-git;
+            kajibaRunner = config.packages.kajiba-runner;
+            kajibaCli = config.packages.kajiba-cli;
             kajibaUi = config.packages.kajiba-ui;
+            svidCa = (import ./tests/svid.nix { inherit pkgs; }).ca;
           }
         );
         meta.description = "Playwright e2e suite against both daemons (CI job e2e)";

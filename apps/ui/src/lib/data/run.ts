@@ -50,19 +50,27 @@ const median = (xs: number[]) => {
 
 export async function loadRun(id: string): Promise<RunPage> {
   const run = await getRun({ id });
-  const [repos, history, commits, diff, logs] = await Promise.all([
+  const worktree = run.trigger === "worktree";
+  const [repos, history, commits, diff, attempts] = await Promise.all([
     allRepos(),
     listRuns({ repo: run.repo, ref: run.ref, pageSize: 40 }).then(
       (r) => r.runs,
     ),
-    listCommits({ repo: run.repo, revision: run.commitId, pageSize: 60 })
-      .then((r) => r.commits)
-      .catch(() => [] as Commit[]),
-    getCommitDiff({ repo: run.repo, revision: run.commitId })
-      .then((d) => d.changes)
-      .catch(() => [] as Change[]),
-    Promise.all(run.steps.map((_, step) => getRunLog({ id, step }))),
+    // A worktree run's commit is a local one the forge may not have.
+    worktree
+      ? ([] as Commit[])
+      : listCommits({ repo: run.repo, revision: run.commitId, pageSize: 60 })
+          .then((r) => r.commits)
+          .catch(() => [] as Commit[]),
+    worktree
+      ? ([] as Change[])
+      : getCommitDiff({ repo: run.repo, revision: run.commitId })
+          .then((d) => d.changes)
+          .catch(() => [] as Change[]),
+    getRunLog({ id }),
   ]);
+  // One step per attempt in the stored log (a replayed attempt is a new column).
+  if (attempts.length) run.steps = attempts.map((a) => a.step);
   const created = (r: Run) => Number(r.createTime?.seconds ?? 0n);
   const lastGreen = history.find(
     (r) =>
@@ -96,10 +104,12 @@ export async function loadRun(id: string): Promise<RunPage> {
     history,
     lastGreen,
     since,
-    usual: run.steps.map((_, i) =>
-      median(green.map((r) => r.steps[i]?.durationSeconds ?? 0)),
-    ),
-    logs,
+    // The browser's median of the ref's recent succeeded runs, for every attempt.
+    usual: run.steps.map(() => median(green.map((r) => r.durationSeconds))),
+    logs: run.steps.map((_, i) => ({
+      lines: attempts[i]?.lines ?? [],
+      complete: run.state !== RunState.RUNNING || i < run.steps.length - 1,
+    })),
   };
 }
 

@@ -49,7 +49,7 @@
 		{#each a.branches as b (b.key)}
 			<a href="/-/runs/{b.run.id}" class="flex items-center gap-1.5 text-danger hover:underline"
 				><RunBadge state={RunState.FAILED} size={10} /><span class="font-mono">{b.key}</span>
-				{b.branch} failing · #{b.run.id}</a
+				{b.branch} failing · #{b.run.short}</a
 			>
 		{/each}
 		{#each a.mirrors as m (m.repo + m.remoteUrl)}
