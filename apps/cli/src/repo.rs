@@ -41,7 +41,10 @@ pub async fn run(command: Command, api: Api, json: bool, out: &mut dyn Write) ->
                 page_token = page.next_page_token;
             }
             if json {
-                let list = all.iter().map(protojson).collect::<Result<Vec<_>, _>>()?;
+                let list = all
+                    .iter()
+                    .map(|repo| protojson("kajiba.v1.Repo", repo))
+                    .collect::<Result<Vec<_>, _>>()?;
                 pretty(serde_json::to_string_pretty(&list))?
             } else {
                 all.iter().map(line).collect()
@@ -57,7 +60,10 @@ pub async fn run(command: Command, api: Api, json: bool, out: &mut dyn Write) ->
                 .repo
                 .ok_or_else(|| Error("the forge answered no repository".into()))?;
             if json {
-                pretty(serde_json::to_string_pretty(&protojson(&found)?))?
+                pretty(serde_json::to_string_pretty(&protojson(
+                    "kajiba.v1.Repo",
+                    &found,
+                )?))?
             } else {
                 details(&found)
             }
@@ -68,19 +74,22 @@ pub async fn run(command: Command, api: Api, json: bool, out: &mut dyn Write) ->
 }
 
 /// protojson (camelCase field names, enum names) through the descriptor set.
-fn protojson(repo: &Repo) -> Result<DynamicMessage, Error> {
+pub(crate) fn protojson(
+    name: &str,
+    message: &impl prost::Message,
+) -> Result<DynamicMessage, Error> {
     let failed = |err: String| Error(format!("protojson: {err}"));
     let pool = DescriptorPool::decode(kajiba_proto::FILE_DESCRIPTOR_SET)
         .map_err(|err| failed(err.to_string()))?;
     let descriptor = pool
-        .get_message_by_name("kajiba.v1.Repo")
-        .ok_or_else(|| failed("kajiba.v1.Repo is not in the descriptor set".into()))?;
-    DynamicMessage::decode(descriptor, prost::Message::encode_to_vec(repo).as_slice())
+        .get_message_by_name(name)
+        .ok_or_else(|| failed(format!("{name} is not in the descriptor set")))?;
+    DynamicMessage::decode(descriptor, message.encode_to_vec().as_slice())
         .map_err(|err| failed(err.to_string()))
 }
 
 /// Serialized from the messages themselves: a `serde_json::Value` would sort the fields.
-fn pretty(json: serde_json::Result<String>) -> Result<String, Error> {
+pub(crate) fn pretty(json: serde_json::Result<String>) -> Result<String, Error> {
     json.map(|json| json + "\n")
         .map_err(|err| Error(format!("protojson: {err}")))
 }

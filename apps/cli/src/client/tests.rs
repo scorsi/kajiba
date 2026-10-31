@@ -3,13 +3,17 @@
 use super::*;
 use kajiba_proto::v1::{
     GetBlobRequest, GetBlobResponse, GetCommitDiffRequest, GetCommitDiffResponse, GetRepoRequest,
-    GetRepoResponse, GetTreeRequest, GetTreeResponse, GetViewerRequest, GetViewerResponse,
-    ListCommitsRequest, ListCommitsResponse, ListReposRequest, ListReposResponse, LogoutRequest,
-    LogoutResponse, Repo,
+    GetRepoResponse, GetRunRequest, GetRunResponse, GetTreeRequest, GetTreeResponse,
+    GetViewerRequest, GetViewerResponse, ListCommitsRequest, ListCommitsResponse, ListReposRequest,
+    ListReposResponse, ListRunsRequest, ListRunsResponse, LogBytes, LogSection, LogoutRequest,
+    LogoutResponse, Repo, Run, TriggerRunRequest, TriggerRunResponse, WatchRunRequest,
+    WatchRunResponse,
     auth_service_server::{AuthService, AuthServiceServer},
     get_repo_request,
     repo_service_client::RepoServiceClient,
     repo_service_server::{RepoService, RepoServiceServer},
+    run_service_server::{RunService, RunServiceServer},
+    watch_run_response::Event,
 };
 use std::{
     collections::HashMap,
@@ -64,6 +68,16 @@ pub struct State {
     pub refusal: Option<Status>,
     pub server_version: Option<&'static str>,
     pub viewer: String,
+    /// Answered by TriggerRun, and by GetRun for its id.
+    pub run: Option<Run>,
+    /// WatchRun: the attempt of the single section, the run's log, the run sent once
+    /// the log is out, and a byte offset where the next stream drops (Unavailable).
+    pub attempt: kajiba_proto::v1::Attempt,
+    pub log: Vec<u8>,
+    pub finished: Option<Run>,
+    pub drop_at: Option<u64>,
+    /// Every WatchRun request: offset and follow.
+    pub watches: Vec<(u64, bool)>,
 }
 
 #[derive(Clone, Default)]
@@ -78,7 +92,8 @@ impl Fake {
             tonic::transport::server::TcpIncoming::from_listener(listener, true, None).unwrap();
         let router = tonic::transport::Server::builder()
             .add_service(RepoServiceServer::new(self.clone()))
-            .add_service(AuthServiceServer::new(self.clone()));
+            .add_service(AuthServiceServer::new(self.clone()))
+            .add_service(RunServiceServer::new(self.clone()));
         tokio::spawn(router.serve_with_incoming(incoming));
         url
     }
@@ -213,6 +228,89 @@ impl AuthService for Fake {
                 admin: false,
             })
         })
+    }
+}
+
+#[tonic::async_trait]
+impl RunService for Fake {
+    async fn trigger_run(
+        &self,
+        request: tonic::Request<TriggerRunRequest>,
+    ) -> Result<Response<TriggerRunResponse>, Status> {
+        self.answer("TriggerRun", request, |state, _| {
+            Ok(TriggerRunResponse {
+                run: state.run.clone(),
+            })
+        })
+    }
+    async fn get_run(
+        &self,
+        request: tonic::Request<GetRunRequest>,
+    ) -> Result<Response<GetRunResponse>, Status> {
+        self.answer("GetRun", request, |state, request| {
+            match state
+                .run
+                .as_ref()
+                .filter(|run| run.public_id == request.run)
+            {
+                Some(run) => Ok(GetRunResponse {
+                    run: Some(run.clone()),
+                }),
+                None => Err(refusal(
+                    Code::NotFound,
+                    "RUN_NOT_FOUND",
+                    "no run by this id",
+                )),
+            }
+        })
+    }
+    async fn list_runs(
+        &self,
+        _: tonic::Request<ListRunsRequest>,
+    ) -> Result<Response<ListRunsResponse>, Status> {
+        unimplemented()
+    }
+
+    type WatchRunStream = std::pin::Pin<
+        Box<
+            dyn tonic::codegen::tokio_stream::Stream<Item = Result<WatchRunResponse, Status>>
+                + Send,
+        >,
+    >;
+
+    /// The section, the log from the offset in 4-byte pieces, then the finished run.
+    async fn watch_run(
+        &self,
+        request: tonic::Request<WatchRunRequest>,
+    ) -> Result<Response<Self::WatchRunStream>, Status> {
+        let request = self
+            .answer("WatchRun", request, |_, request| Ok(request))?
+            .into_inner();
+        let mut state = self.0.lock().unwrap();
+        state.watches.push((request.offset, request.follow));
+        let event = |event| Ok(WatchRunResponse { event: Some(event) });
+        let mut events = vec![event(Event::Section(LogSection {
+            attempt: Some(state.attempt.clone()),
+            offset: 0,
+        }))];
+        let end = state.drop_at.take().unwrap_or(state.log.len() as u64);
+        let mut offset = request.offset;
+        while offset < end {
+            let stop = (offset + 4).min(end);
+            events.push(event(Event::Log(LogBytes {
+                offset,
+                data: state.log[offset as usize..stop as usize].to_vec(),
+            })));
+            offset = stop;
+        }
+        if end < state.log.len() as u64 {
+            events.push(Err(Status::unavailable("dropped")));
+        } else if let Some(run) = &state.finished {
+            events.push(event(Event::Finished(run.clone())));
+        }
+        Ok(Response::new(Box::pin(tonic::codegen::tokio_stream::iter(
+            events,
+        ))))
     }
 }
 

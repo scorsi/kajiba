@@ -13,6 +13,7 @@ macro_rules! report {
     }};
 }
 
+mod ci;
 mod client;
 mod login;
 mod repo;
@@ -53,6 +54,11 @@ enum Command {
         #[command(subcommand)]
         command: repo::Command,
     },
+    /// Trigger and follow CI runs.
+    Ci {
+        #[command(subcommand)]
+        command: ci::Command,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -63,9 +69,9 @@ async fn main() -> ExitCode {
     finish(run(Args::parse(), &env, &mut stdin.lock(), tty, &mut Stdout).await)
 }
 
-fn finish(result: Result<(), client::Error>) -> ExitCode {
+fn finish(result: Result<ExitCode, client::Error>) -> ExitCode {
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             report!("kajiba: {err}");
             ExitCode::FAILURE
@@ -99,7 +105,7 @@ async fn run(
     input: &mut dyn BufRead,
     tty: bool,
     out: &mut dyn Write,
-) -> Result<(), client::Error> {
+) -> Result<ExitCode, client::Error> {
     let token_file = client::token_path(args.token_file.as_deref(), env)?;
     match args.command {
         Command::Login => {
@@ -112,7 +118,7 @@ async fn run(
                 tty,
                 out,
             )
-            .await
+            .await?;
         }
         Command::Repo { command } => {
             let saved = client::credentials(args.url.as_deref(), &token_file, env)?;
@@ -122,7 +128,19 @@ async fn run(
                 args.json,
                 out,
             )
-            .await
+            .await?;
+        }
+        Command::Ci { command } => {
+            let saved = client::credentials(args.url.as_deref(), &token_file, env)?;
+            return ci::run(
+                command,
+                client::connect(&saved.url, &saved.token, args.development)?,
+                args.json,
+                out,
+                &mut std::io::stderr(),
+            )
+            .await;
         }
     }
+    Ok(ExitCode::SUCCESS)
 }
