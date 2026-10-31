@@ -178,6 +178,7 @@ let
       log_retention = cfg.ci.logRetention;
       artifact_retention = cfg.ci.artifactRetention;
       run_at = cfg.ci.runAt;
+      worktree_retention = cfg.ci.worktreeRetention;
     };
     dump = {
       dir = if cfg.dump.dir == "/var/lib/kajiba-dumps" then null else cfg.dump.dir;
@@ -494,6 +495,9 @@ in
       logRetention = optional types.str "14d" "CI log retention (0010).";
       artifactRetention = optional types.str "14d" "CI artifact retention (0010).";
       runAt = optional types.str "03:00" "Local time `HH:MM` of the daily CI retention pass (0115).";
+      worktreeRetention =
+        optional types.str "1d"
+          "Worktree runs are purged this long after creation (0097).";
     };
     persistedPaths = mkOption {
       type = types.listOf types.str;

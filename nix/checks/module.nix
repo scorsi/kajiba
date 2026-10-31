@@ -143,6 +143,7 @@ let
         logRetention = "7d";
         artifactRetention = "30d";
         runAt = "04:30";
+        worktreeRetention = "2h";
       };
       dump = {
         dir = "/srv/kajiba-dumps";
@@ -283,6 +284,7 @@ let
       log_retention = "7d";
       artifact_retention = "30d";
       run_at = "04:30";
+      worktree_retention = "2h";
     };
     dump = {
       dir = "/srv/kajiba-dumps";

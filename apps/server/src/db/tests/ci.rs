@@ -74,7 +74,7 @@ async fn ci_valid_rows_columns_nullability_and_indexes() {
         ),
         (
             "run",
-            "id public_id repo_id sha ref trigger event_id triggered_by state created_at started_at finished_at failure_check failure_reason",
+            "id public_id repo_id sha ref trigger event_id triggered_by state created_at started_at finished_at failure_check failure_reason checks",
         ),
         (
             "job",
@@ -126,6 +126,7 @@ async fn ci_valid_rows_columns_nullability_and_indexes() {
                         | "finished_at"
                         | "failure_check"
                         | "failure_reason"
+                        | "checks"
                 )
                 && (name != "started_at" || table == "job_attempt");
             assert_eq!(

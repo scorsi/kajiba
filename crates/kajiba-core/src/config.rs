@@ -312,6 +312,9 @@ pub struct CiConfig {
     /// Local time `(hour, minute)` of the daily retention pass (ADR 0115).
     #[serde(deserialize_with = "local_time")]
     pub run_at: (u8, u8),
+    /// Worktree runs are purged this long after creation (ADR 0097).
+    #[serde(deserialize_with = "positive")]
+    pub worktree_retention: Duration,
 }
 
 impl Default for CiConfig {
@@ -320,6 +323,7 @@ impl Default for CiConfig {
             log_retention: Duration::from_secs(14 * 86400),
             artifact_retention: Duration::from_secs(14 * 86400),
             run_at: (3, 0),
+            worktree_retention: Duration::from_secs(86400),
         }
     }
 }

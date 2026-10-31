@@ -292,3 +292,96 @@ fn state_machines_allow_exactly_the_0008_transitions() {
         ],
     );
 }
+
+#[tokio::test]
+async fn migration_12_keeps_ci_rows_and_admits_worktree_runs() {
+    let dir = TempDir::new();
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(dir.database())
+        .create_if_missing(true);
+    let mut writer = SqliteConnection::connect_with(&options).await.unwrap();
+    let before = Migrator {
+        migrations: MIGRATOR
+            .iter()
+            .filter(|migration| migration.version < 12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into(),
+        ..MIGRATOR
+    };
+    migrate(&mut writer, &before).await.unwrap();
+    populate(&mut writer).await;
+    let event = push(&mut writer, Some(1), 1, "refs/heads/main", SHA).await;
+    sqlx::query(&format!("INSERT INTO runner (id, public_id, name, capabilities, version, connected) VALUES (1, '00000000000000000000000001', 'build-1', '{{}}', '0.1.0', 1);
+        INSERT INTO run (id, public_id, repo_id, sha, ref, trigger, event_id, triggered_by, state, created_at, failure_reason) VALUES (1, '00000000000000000000000001', 1, '{SHA}', 'refs/heads/main', 'push', {event}, 1, 'failed', 7, 'exit status 1');
+        INSERT INTO job (id, public_id, run_id, name, requirements, replayable, max_attempts, state, created_at) VALUES (1, '00000000000000000000000001', 1, 'flake-check', '{{}}', 1, 3, 'failed', 7);
+        INSERT INTO job_attempt (id, public_id, job_id, number, runner_id, state, lease_expires_at, started_at) VALUES (1, '00000000000000000000000001', 1, 1, 1, 'failed', 9, 8);
+        INSERT INTO step (attempt_id, idx, name, state) VALUES (1, 0, 'flake-check', 'failed');
+        INSERT INTO log_chunk (attempt_id, seq, step_idx, offset, length) VALUES (1, 0, 0, 0, 5);
+        INSERT INTO artifact (public_id, attempt_id, name, size, sha256, created_at, expires_at) VALUES ('00000000000000000000000001', 1, 'out', 1, 'x', 8, 9)"))
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    migrate(&mut writer, &MIGRATOR).await.unwrap();
+
+    for (table, rows) in [
+        ("run", 1),
+        ("job", 1),
+        ("job_attempt", 1),
+        ("step", 1),
+        ("log_chunk", 1),
+        ("artifact", 1),
+    ] {
+        assert_eq!(
+            count(&mut writer, &format!("SELECT count(*) FROM {table}")).await,
+            rows,
+            "{table}"
+        );
+    }
+    let kept: (String, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT trigger, failure_reason, checks FROM run")
+            .fetch_one(&mut writer)
+            .await
+            .unwrap();
+    assert_eq!(kept, ("push".into(), Some("exit status 1".into()), None));
+    let leftovers = count(
+        &mut writer,
+        "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'copy_%' OR name LIKE 'new_%'",
+    )
+    .await;
+    assert_eq!(leftovers, 0);
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_schema WHERE type = 'index' AND name IN ('run_repo_id_id', 'job_state', 'job_attempt_state_lease_expires_at') ORDER BY name",
+    )
+    .fetch_all(&mut writer)
+    .await
+    .unwrap();
+    assert_eq!(indexes.len(), 3);
+
+    // A worktree run has no ref and no event, and may carry selected checks.
+    sqlx::query(&format!("INSERT INTO run (public_id, repo_id, sha, trigger, triggered_by, state, created_at, checks) VALUES ('00000000000000000000000002', 1, '{SHA}', 'worktree', 1, 'queued', 10, '[\"a\"]')"))
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let refused = sqlx::query(&format!("INSERT INTO run (public_id, repo_id, sha, trigger, state, created_at) VALUES ('00000000000000000000000003', 1, '{SHA}', 'other', 'queued', 10)"))
+        .execute(&mut writer)
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("CHECK"), "{refused}");
+    // Foreign keys still point at the rebuilt tables: deleting a run cascades.
+    sqlx::query("DELETE FROM run WHERE id = 1")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    assert_eq!(
+        count(&mut writer, "SELECT count(*) FROM log_chunk").await,
+        0
+    );
+    assert_eq!(count(&mut writer, "SELECT count(*) FROM artifact").await, 0);
+    let broken = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&mut writer)
+        .await
+        .unwrap();
+    assert!(broken.is_empty());
+    writer.close().await.unwrap();
+}
