@@ -301,7 +301,7 @@ async fn the_repository_comes_from_the_single_forge_remote_or_repo() {
             "remote",
             "add",
             "ssh",
-            "kajiba@forge.example.org:Alice/Demo",
+            "kajiba-git@forge.example.org:Alice/Demo",
         ],
     );
     create_with(&url, &clone, choice(&[])).await.unwrap();
@@ -312,7 +312,7 @@ async fn the_repository_comes_from_the_single_forge_remote_or_repo() {
             "remote",
             "add",
             "fork",
-            "ssh://kajiba@forge.example.org:2222/bob/demo.git",
+            "ssh://kajiba-git@forge.example.org:2222/bob/demo.git",
         ],
     );
     let err = create_with(&url, &clone, choice(&[])).await.unwrap_err();
@@ -345,6 +345,19 @@ async fn the_repository_comes_from_the_single_forge_remote_or_repo() {
 }
 
 #[test]
+fn the_repository_comes_from_an_ssh_only_clone() {
+    let dir = TempDir::new();
+    run_git(&dir.0, &["init", "-q"]);
+    for url in [
+        "ssh://kajiba-git@forge.example.org:2222/alice/demo.git",
+        "kajiba-git@forge.example.org:alice/demo.git",
+    ] {
+        run_git(&dir.0, &["config", "remote.origin.url", url]);
+        assert_eq!(repository(&dir.0, FORGE).unwrap(), "alice/demo", "{url}");
+    }
+}
+
+#[test]
 fn forge_urls_in_every_form() {
     for (url, expected) in [
         (
@@ -354,22 +367,22 @@ fn forge_urls_in_every_form() {
         ("https://forge.example.org/alice/demo", Some("alice/demo")),
         ("https://forge.example.org/alice/demo/", Some("alice/demo")),
         (
-            "ssh://kajiba@forge.example.org/alice/demo.git",
+            "ssh://kajiba-git@forge.example.org/alice/demo.git",
             Some("alice/demo"),
         ),
         (
-            "ssh://kajiba@forge.example.org:2222/alice/demo",
+            "ssh://kajiba-git@forge.example.org:2222/alice/demo",
             Some("alice/demo"),
         ),
         (
-            "kajiba@forge.example.org:alice/demo.git",
+            "kajiba-git@forge.example.org:alice/demo.git",
             Some("alice/demo"),
         ),
         ("https://forge.example.org.evil/alice/demo", None),
         ("https://forge.example.org/alice", None),
         ("https://forge.example.org/alice/demo/tree", None),
         ("git@forge.example.org:alice/demo.git", None),
-        ("ssh://kajiba@forge.example.orgx/alice/demo", None),
+        ("ssh://kajiba-git@forge.example.orgx/alice/demo", None),
     ] {
         assert_eq!(addressed(url, FORGE).as_deref(), expected, "{url}");
     }

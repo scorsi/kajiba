@@ -183,8 +183,8 @@ fn repository(dir: &Path, forge: &str) -> Result<String, Error> {
 }
 
 /// `<owner>/<name>` when `url` is one of the forge's repository URLs: `<forge>/<owner>/
-/// <name>[.git]`, `ssh://kajiba@<host>[:<port>]/<owner>/<name>[.git]` or
-/// `kajiba@<host>:<owner>/<name>[.git]`, `<host>` being the forge URL's.
+/// <name>[.git]`, `ssh://kajiba-git@<host>[:<port>]/<owner>/<name>[.git]` or
+/// `kajiba-git@<host>:<owner>/<name>[.git]`, `<host>` being the forge URL's.
 fn addressed(url: &str, forge: &str) -> Option<String> {
     let forge = forge.trim_end_matches('/');
     let authority = forge.split_once("://")?.1;
@@ -195,7 +195,7 @@ fn addressed(url: &str, forge: &str) -> Option<String> {
         .strip_prefix(forge)
         .and_then(|rest| rest.strip_prefix('/'))
         .or_else(|| {
-            let rest = url.strip_prefix("ssh://kajiba@")?.strip_prefix(host)?;
+            let rest = url.strip_prefix("ssh://kajiba-git@")?.strip_prefix(host)?;
             let rest = match rest.strip_prefix(':') {
                 Some(port) => port.trim_start_matches(|c: char| c.is_ascii_digit()),
                 None => rest,
@@ -203,7 +203,7 @@ fn addressed(url: &str, forge: &str) -> Option<String> {
             rest.strip_prefix('/')
         })
         .or_else(|| {
-            url.strip_prefix("kajiba@")?
+            url.strip_prefix("kajiba-git@")?
                 .strip_prefix(host)?
                 .strip_prefix(':')
         })?;
