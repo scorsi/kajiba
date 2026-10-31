@@ -231,6 +231,13 @@
             kajibaRunnerPackage = config.packages.kajiba-runner;
             kajibaCliPackage = config.packages.kajiba-cli;
           };
+          nixos-ci-worktree = import ./tests/ci-worktree.nix {
+            inherit pkgs testLib;
+            kajibaServerPackage = config.packages.kajiba-server;
+            kajibaGitPackage = config.packages.kajiba-git;
+            kajibaRunnerPackage = config.packages.kajiba-runner;
+            kajibaCliPackage = config.packages.kajiba-cli;
+          };
           nixos-server-lifecycle = import ./tests/server-lifecycle.nix {
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;
