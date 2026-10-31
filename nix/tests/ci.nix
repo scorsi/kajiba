@@ -98,7 +98,7 @@ pkgs.testers.runNixOSTest {
     # (the runner's log stream) unbounded; one access-log line per request with its size.
     services.nginx = {
       enable = true;
-      appendHttpConfig = ''
+      commonHttpConfig = ''
         log_format kajiba '$remote_addr $request_uri $status $body_bytes_sent';
       '';
       virtualHosts.forge = {
