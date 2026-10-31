@@ -23,6 +23,7 @@ serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+tokio-rustls.workspace = true
 tonic.workspace = true
 tonic-types.workspace = true
 tonic-web.workspace = true

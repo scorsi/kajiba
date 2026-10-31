@@ -1,5 +1,7 @@
 use super::*;
-use crate::transport::{PUBLIC, auth::tests::reason, router, serve_tcp, tests::State};
+use crate::transport::{
+    PUBLIC, auth::tests::reason, router, runner_router, serve_runners, serve_tcp, tests::State,
+};
 use kajiba_core::config::ServerConfig;
 use kajiba_proto::runner::v1::{
     Capabilities as Announced, runner_service_client::RunnerServiceClient,
@@ -68,14 +70,8 @@ impl Forge {
         let registry = Arc::new(Registry::default());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router(
-            state.health.clone(),
-            false,
-            registry.clone(),
-            "https://example.org",
-        )
-        .unwrap()
-        .layer(axum::middleware::from_fn(verified));
+        let app = runner_router(state.health.clone(), registry.clone())
+            .layer(axum::middleware::from_fn(verified));
         let (stop, stopped) = watch::channel(false);
         let server = tokio::spawn(serve_tcp(listener, app, PUBLIC, stopped));
         let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
@@ -648,6 +644,139 @@ async fn admission_records_the_runner_and_a_newer_connection_replaces_the_older(
         serde_json::json!({ "runner": "build-1", "version": patched, "hostname": "builder.example.org" })
     );
     assert_eq!(events[2].3, serde_json::json!({ "runner": "build-1" }));
+}
+
+/// A runner's connector for the TLS listener's tests: TLS to `addr` whatever the URI,
+/// ALPN `h2`, the runner's SVID from the fixtures.
+#[derive(Clone)]
+struct Tls(
+    Arc<tokio_rustls::rustls::ClientConfig>,
+    std::net::SocketAddr,
+);
+
+impl tonic::codegen::Service<tonic::codegen::http::Uri> for Tls {
+    type Response = hyper_util::rt::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
+    type Error = std::io::Error;
+    type Future =
+        Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: tonic::codegen::http::Uri) -> Self::Future {
+        let Tls(config, addr) = self.clone();
+        Box::pin(async move {
+            let tcp = tokio::net::TcpStream::connect(addr).await?;
+            let name = "runners.example.org".try_into().unwrap();
+            let tls = tokio_rustls::TlsConnector::from(config)
+                .connect(name, tcp)
+                .await?;
+            Ok(hyper_util::rt::TokioIo::new(tls))
+        })
+    }
+}
+
+fn svid(leaf: &str) -> Arc<kajiba_core::svid::Source> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/kajiba-core/tests/fixtures/svid");
+    kajiba_core::svid::Source::load(kajiba_core::svid::Files {
+        trust_domain: "example.org".into(),
+        svid_file: dir.join(format!("{leaf}.pem")),
+        key_file: dir.join(format!("{leaf}.key")),
+        bundle_file: dir.join("ca.pem"),
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn the_tls_listener_serves_runners_by_certificate_and_the_public_port_does_not() {
+    let state = Forge::state().await;
+    let registry = Arc::new(Registry::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (_stop, stopped) = watch::channel(false);
+    let server = tokio::spawn(serve_runners(
+        listener,
+        svid("forge"),
+        runner_router(state.health.clone(), registry.clone()),
+        stopped,
+    ));
+    let client = |leaf: &str| {
+        let config = svid(leaf).client_config("spiffe://example.org/forge/kajiba-server");
+        let channel = tonic::transport::Endpoint::from_static("http://runners.example.org")
+            .connect_with_connector_lazy(Tls(Arc::new(config), addr));
+        RunnerServiceClient::new(channel)
+    };
+    let open = |client: RunnerServiceClient<Channel>, hello: Hello| async move {
+        let (sender, receiver) = mpsc::channel(4);
+        sender
+            .send(ConnectRequest {
+                message: Some(Message::Hello(hello)),
+            })
+            .await
+            .unwrap();
+        let stream = client.clone().connect(ReceiverStream::new(receiver)).await;
+        (sender, stream)
+    };
+
+    // The certificate names build-1: its hello is admitted, another runner's name is not.
+    let (_sender, admitted) = open(client("runner"), hello("build-1")).await;
+    admitted.unwrap();
+    let status = open(client("runner"), hello("build-2"))
+        .await
+        .1
+        .unwrap_err();
+    assert_eq!(
+        (status.code(), reason(&status).as_str()),
+        (tonic::Code::Unauthenticated, "CREDENTIAL_INVALID")
+    );
+    assert!(
+        registry
+            .exposition("test", [0; 4], [0; 4])
+            .contains("kajiba_runner_refusals_total{reason=\"identity\"} 1")
+    );
+    // Another CA's certificate never reaches the service: the handshake fails.
+    let status = open(client("foreign"), hello("build-1"))
+        .await
+        .1
+        .unwrap_err();
+    assert!(
+        format!("{status:?}").contains("received fatal alert"),
+        "{status:?}"
+    );
+    // A valid SVID of the trust domain whose ID is no declared runner's.
+    let status = open(client("forge"), hello("build-1")).await.1.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    assert!(
+        registry
+            .exposition("test", [0; 4], [0; 4])
+            .contains("kajiba_runner_refusals_total{reason=\"identity\"} 2")
+    );
+    server.abort();
+
+    // kajiba.runner.v1 is not served on the public port (0124).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = router(state.health.clone(), false, registry, "https://example.org").unwrap();
+    let (_stop, stopped) = watch::channel(false);
+    let server = tokio::spawn(serve_tcp(listener, app, PUBLIC, stopped));
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect_lazy();
+    let mut request = Request::new(ReceiverStream::new(mpsc::channel(1).1));
+    request
+        .metadata_mut()
+        .insert(PEER, BUILD_1.parse().unwrap());
+    let status = RunnerServiceClient::new(channel)
+        .connect(request)
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unimplemented);
+    server.abort();
 }
 
 #[tokio::test]

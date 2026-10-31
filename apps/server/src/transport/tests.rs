@@ -837,6 +837,7 @@ async fn signals_drain_in_flight_requests_and_exit_zero() {
             listener,
             app,
             metrics,
+            None,
             (local, admin),
             (gate_local, gate),
             Arc::default(),

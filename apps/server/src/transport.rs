@@ -10,7 +10,12 @@ use axum::{
     response::{IntoResponse, Response as HttpResponse},
     routing::get,
 };
-use kajiba_core::config::ServerConfig;
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo, TokioTimer},
+    server::conn::auto::Builder,
+    service::TowerToHyperService,
+};
+use kajiba_core::{config::ServerConfig, svid};
 use kajiba_proto::runner::v1::runner_service_server::RunnerServiceServer;
 use kajiba_proto::v1::{
     CheckRequest, CheckResponse,
@@ -172,10 +177,6 @@ fn router(
     registry: Arc<Registry>,
     public_url: &str,
 ) -> Result<Router, String> {
-    let runner_service = runners::Runners::new(health.clone(), registry.clone());
-    if health.runners.get().is_some() {
-        tokio::spawn(runner_service.clone().schedule());
-    }
     let api = Routes::new(HealthServiceServer::new(health.clone()))
         .add_service(AuthServiceServer::new(auth::Sessions(health.clone())))
         .add_service(TokenServiceServer::new(tokens::Tokens(health.clone())))
@@ -235,24 +236,34 @@ fn router(
             .map_err(|err| err.to_string())?;
         app = Routes::from(app).add_service(reflection).into_axum_router();
     }
-    // A runner's stream lasts as long as the runner: no `kajiba.v1` layer, no timeout (0105);
-    // only its admission is bounded (0119).
-    app = Routes::from(app)
-        .add_service(
-            RunnerServiceServer::new(runner_service)
-                .max_decoding_message_size(runners::MAX_MESSAGE),
-        )
-        .into_axum_router()
-        .route_layer(middleware::from_fn_with_state(
-            Arc::new(Semaphore::new(runners::MAX_PENDING)),
-            runners::admission,
-        ));
     Ok(app
         .fallback(|request: HttpRequest| async move { ui_response(ui_dir.get(), request).await })
         .layer(middleware::from_fn_with_state(
             registry,
             correlation::request,
         )))
+}
+
+/// The runner listener's routes: `kajiba.runner.v1` only (0124). A runner's stream lasts as
+/// long as the runner: no `kajiba.v1` layer, no timeout (0105); only its admission is bounded
+/// (0119). Matching runs whether or not the listener is configured.
+fn runner_router(health: Health, registry: Arc<Registry>) -> Router {
+    let runner_service = runners::Runners::new(health.clone(), registry.clone());
+    if health.runners.get().is_some() {
+        tokio::spawn(runner_service.clone().schedule());
+    }
+    Routes::new(
+        RunnerServiceServer::new(runner_service).max_decoding_message_size(runners::MAX_MESSAGE),
+    )
+    .into_axum_router()
+    .route_layer(middleware::from_fn_with_state(
+        Arc::new(Semaphore::new(runners::MAX_PENDING)),
+        runners::admission,
+    ))
+    .layer(middleware::from_fn_with_state(
+        registry,
+        correlation::request,
+    ))
 }
 
 /// Shared page fallback for unmatched paths and the two-segment repository route (0094).
@@ -276,6 +287,10 @@ const PUBLIC: Limits = Limits {
     connections: 1024,
     header_read: Duration::from_secs(30),
 };
+/// The runner listener (0119 as amended by 0126): connections, handshakes included, and the
+/// time a TLS handshake may take.
+const RUNNER_CONNECTIONS: usize = 64;
+const RUNNER_HANDSHAKE: Duration = Duration::from_secs(10);
 /// Time to produce a response head on non-streaming routes, request body included; a
 /// worktree upload is bounded by its own idle and total times instead (0120).
 #[derive(Clone, Copy)]
@@ -393,13 +408,8 @@ async fn serve_tcp(
     listener: tokio::net::TcpListener,
     app: Router,
     limits: Limits,
-    mut stopped: watch::Receiver<bool>,
+    stopped: watch::Receiver<bool>,
 ) -> io::Result<()> {
-    use hyper_util::{
-        rt::{TokioExecutor, TokioIo, TokioTimer},
-        server::conn::auto::Builder,
-        service::TowerToHyperService,
-    };
     let mut builder = Builder::new(TokioExecutor::new());
     builder
         .http1()
@@ -409,8 +419,71 @@ async fn serve_tcp(
         .http2()
         .timer(TokioTimer::new())
         .keep_alive_interval(limits.header_read);
+    serve_with(
+        listener,
+        limits.connections,
+        builder,
+        stopped,
+        move |stream| {
+            let app = app.clone();
+            async move { Some((stream, app)) }
+        },
+    )
+    .await
+}
+
+/// Serve `kajiba.runner.v1` over TLS 1.3 with a verified client SVID, HTTP/2 only (0124):
+/// each request carries the peer's [`svid::Peer`]; a handshake that fails or takes longer
+/// than [`RUNNER_HANDSHAKE`] closes the connection.
+async fn serve_runners(
+    listener: tokio::net::TcpListener,
+    source: Arc<svid::Source>,
+    app: Router,
+    stopped: watch::Receiver<bool>,
+) -> io::Result<()> {
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(source.server_config()));
+    let mut builder = Builder::new(TokioExecutor::new()).http2_only();
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .keep_alive_interval(PUBLIC.header_read);
+    serve_with(
+        listener,
+        RUNNER_CONNECTIONS,
+        builder,
+        stopped,
+        move |stream| {
+            let (acceptor, app, source) = (acceptor.clone(), app.clone(), source.clone());
+            async move {
+                let tls = tokio::time::timeout(RUNNER_HANDSHAKE, acceptor.accept(stream))
+                    .await
+                    .ok()?
+                    .ok()?;
+                // The verifier accepted this leaf: it parses as a SPIFFE ID in the trust domain.
+                let leaf = tls.get_ref().1.peer_certificates()?.first()?;
+                let peer = svid::peer(leaf, source.trust_domain()).ok()?;
+                Some((tls, app.layer(axum::Extension(peer))))
+            }
+        },
+    )
+    .await
+}
+
+/// Accept connections, each holding one of `connections` permits from its acceptance
+/// (`accept`, e.g. a TLS handshake, included) to its end; serve them with `builder`.
+async fn serve_with<S, F>(
+    listener: tokio::net::TcpListener,
+    connections: usize,
+    builder: Builder<TokioExecutor>,
+    mut stopped: watch::Receiver<bool>,
+    accept: impl Fn(tokio::net::TcpStream) -> F,
+) -> io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    F: std::future::Future<Output = Option<(S, Router)>> + Send + 'static,
+{
     // Each connection holds a permit; holding them all again means every connection ended.
-    let permits = Arc::new(Semaphore::new(limits.connections));
+    let permits = Arc::new(Semaphore::new(connections));
     loop {
         let permit = tokio::select! {
             permit = permits.clone().acquire_owned() => permit.map_err(io::Error::other)?,
@@ -429,10 +502,14 @@ async fn serve_tcp(
             () = stopping(&mut stopped) => break,
         };
         let connection = builder.clone();
-        let service = TowerToHyperService::new(app.clone());
+        let accepted = accept(stream);
         let mut stopped = stopped.clone();
         tokio::spawn(async move {
             let _permit = permit;
+            let Some((stream, app)) = accepted.await else {
+                return;
+            };
+            let service = TowerToHyperService::new(app);
             let connection =
                 connection.serve_connection_with_upgrades(TokioIo::new(stream), service);
             tokio::pin!(connection);
@@ -444,7 +521,7 @@ async fn serve_tcp(
         });
     }
     drop(listener);
-    let _ = permits.acquire_many(limits.connections as u32).await;
+    let _ = permits.acquire_many(connections as u32).await;
     Ok(())
 }
 
@@ -471,6 +548,21 @@ pub async fn serve(
     )?;
     let gate = gate::Gate::new(&admin, registry.clone());
     let git_side = health.git_side.clone();
+    let runner_app = runner_router(health.clone(), registry.clone());
+    let runners = match &server.runner_listener {
+        Some(listener) => {
+            let source = svid::Source::load(svid::Files {
+                trust_domain: listener.trust_domain.clone(),
+                svid_file: listener.svid_file.clone(),
+                key_file: listener.key_file.clone(),
+                bundle_file: listener.bundle_file.clone(),
+            })
+            .map_err(|err| std::io::Error::other(format!("runner_listener: {err}")))?;
+            let bound = tokio::net::TcpListener::bind(listener.listen).await?;
+            Some((bound, source, runner_app))
+        }
+        None => None,
+    };
     let app = router(
         health,
         config.reflection,
@@ -484,7 +576,7 @@ pub async fn serve(
         .map(|listener| (listener, metrics::router(registry.clone(), readers, bus)));
     let recovery = admin.clone();
     tokio::select! {
-        result = serve_listeners(listener, app, metrics, (local, admin), (gate_local, gate), registry) => result,
+        result = serve_listeners(listener, app, metrics, runners, (local, admin), (gate_local, gate), registry) => result,
         () = git_side.run(&git_config.socket, Some(&recovery)) => unreachable!("connection loop runs until shutdown"),
     }
 }
@@ -493,6 +585,7 @@ async fn serve_listeners(
     listener: tokio::net::TcpListener,
     app: Router,
     metrics: Option<(tokio::net::TcpListener, Router)>,
+    runners: Option<(tokio::net::TcpListener, Arc<svid::Source>, Router)>,
     (local, admin): (local::Local, local::Admin),
     (gate_local, gate): (local::Local, gate::Gate),
     registry: Arc<Registry>,
@@ -506,6 +599,7 @@ async fn serve_listeners(
     tracing::info!(event = "ready");
     let http_stopped = stopped.clone();
     let metrics_stopped = stopped.clone();
+    let runners_stopped = stopped.clone();
     let mut gate_stopped = stopped.clone();
     let mut local_stopped = stopped;
     let servers = async move {
@@ -520,6 +614,12 @@ async fn serve_listeners(
             async move {
                 if let Some((listener, app)) = metrics {
                     serve_tcp(listener, app, PUBLIC, metrics_stopped).await?;
+                }
+                Ok(())
+            },
+            async move {
+                if let Some((listener, source, app)) = runners {
+                    serve_runners(listener, source, app, runners_stopped).await?;
                 }
                 Ok(())
             }
