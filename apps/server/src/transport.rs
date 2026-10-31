@@ -232,10 +232,18 @@ fn router(
             .map_err(|err| err.to_string())?;
         app = Routes::from(app).add_service(reflection).into_axum_router();
     }
-    // A runner's stream lasts as long as the runner: no `kajiba.v1` layer, no timeout (0105).
+    // A runner's stream lasts as long as the runner: no `kajiba.v1` layer, no timeout (0105);
+    // only its admission is bounded (0119).
     app = Routes::from(app)
-        .add_service(RunnerServiceServer::new(runner_service))
-        .into_axum_router();
+        .add_service(
+            RunnerServiceServer::new(runner_service)
+                .max_decoding_message_size(runners::MAX_MESSAGE),
+        )
+        .into_axum_router()
+        .route_layer(middleware::from_fn_with_state(
+            Arc::new(Semaphore::new(runners::MAX_PENDING)),
+            runners::admission,
+        ));
     Ok(app
         .fallback(|request: HttpRequest| async move { ui_response(ui_dir.get(), request).await })
         .layer(middleware::from_fn_with_state(
@@ -480,6 +488,7 @@ pub mod raw;
 pub mod repos;
 pub mod runners;
 mod runs;
+mod slots;
 mod stream;
 mod tokens;
 mod ui;

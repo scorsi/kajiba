@@ -1151,8 +1151,14 @@ fn bundles_are_incremental_over_the_commits_the_receiver_holds() {
     let bundle = |commit: &str, have: &[&str]| {
         let mut out = Vec::new();
         let have: Vec<String> = have.iter().map(|id| id.to_string()).collect();
-        Gix.bundle(&f.bare, &[commit.to_owned()], &have, &mut out)
-            .map(|()| out)
+        Gix.bundle(
+            &f.bare,
+            &[commit.to_owned()],
+            &have,
+            &mut out,
+            &Abort::default(),
+        )
+        .map(|()| out)
     };
     let cache = f.bare.with_file_name("cache.git");
     git(
@@ -1218,6 +1224,20 @@ fn bundles_are_incremental_over_the_commits_the_receiver_holds() {
             .join("\n")
     );
     assert_eq!(bundle(&tag, &[]), Err(Error::NotFound));
+    // An aborted bundle kills its git child: no complete bundle is written.
+    let aborted = Abort::default();
+    aborted.abort();
+    let mut out = Vec::new();
+    assert!(matches!(
+        Gix.bundle(
+            &f.bare,
+            std::slice::from_ref(&f.first),
+            &[],
+            &mut out,
+            &aborted
+        ),
+        Err(Error::Git(_))
+    ));
     assert_eq!(bundle("zz", &[]), Err(Error::NotFound));
 
     // Several heads, all under the run ref: the receiver gets their objects.
@@ -1227,6 +1247,7 @@ fn bundles_are_incremental_over_the_commits_the_receiver_holds() {
         &[f.first.clone(), f.second.clone()],
         &[],
         &mut both,
+        &Abort::default(),
     )
     .unwrap();
     assert!(String::from_utf8_lossy(&both).starts_with(&format!(

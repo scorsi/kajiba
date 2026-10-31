@@ -67,7 +67,13 @@ impl RunnerService for Fake {
             {
                 let mut data = Vec::new();
                 kajiba_gitstore::Gix
-                    .bundle(&self.source, &base, &request.have, &mut data)
+                    .bundle(
+                        &self.source,
+                        &base,
+                        &request.have,
+                        &mut data,
+                        &kajiba_gitstore::Abort::default(),
+                    )
                     .unwrap();
                 bundles.push((0, data));
             }
@@ -76,7 +82,13 @@ impl RunnerService for Fake {
             let sha = self.attempts.lock().unwrap()[&request.attempt_id].clone();
             let mut data = Vec::new();
             kajiba_gitstore::Gix
-                .bundle(&self.source, &[sha], &request.have, &mut data)
+                .bundle(
+                    &self.source,
+                    &[sha],
+                    &request.have,
+                    &mut data,
+                    &kajiba_gitstore::Abort::default(),
+                )
                 .unwrap();
             bundles.push((0, data));
         }

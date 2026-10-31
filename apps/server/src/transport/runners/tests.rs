@@ -1473,3 +1473,171 @@ async fn a_worktree_attempt_gets_the_base_it_lacks_then_its_stored_bundle() {
         (tonic::Code::FailedPrecondition, "INVALID_STATE")
     );
 }
+
+#[tokio::test]
+async fn runner_requests_waiting_for_admission_and_their_messages_are_bounded() {
+    let forge = Forge::start().await;
+    // Streams that never send their hello hold every admission place.
+    let mut waiting = Vec::new();
+    let mut senders = Vec::new();
+    for _ in 0..MAX_PENDING {
+        let (sender, receiver) = mpsc::channel::<ConnectRequest>(1);
+        senders.push(sender);
+        let mut client = forge.client.clone();
+        waiting.push(tokio::spawn(async move {
+            client
+                .connect(Request::new(ReceiverStream::new(receiver)))
+                .await
+        }));
+    }
+    // Time for all of them to reach the server: one more is refused at once.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (_sender, receiver) = mpsc::channel::<ConnectRequest>(1);
+    let status = tokio::time::timeout(
+        Duration::from_secs(5),
+        forge
+            .client
+            .clone()
+            .connect(Request::new(ReceiverStream::new(receiver))),
+    )
+    .await
+    .expect("refused before the hello timeout")
+    .unwrap_err();
+    assert_eq!(
+        (status.code(), reason(&status).as_str()),
+        (tonic::Code::ResourceExhausted, "RUNNER_ADMISSIONS_LIMIT")
+    );
+    // Places come back once the waiting requests are gone.
+    for task in waiting {
+        task.abort();
+    }
+    drop(senders);
+    let mut admitted = false;
+    for _ in 0..100 {
+        if forge.connect(Some(SECRET), hello("build-1")).await.is_ok() {
+            admitted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(admitted);
+
+    // A message above 128 KiB is refused before it reaches the handler.
+    let mut large = hello("build-2");
+    large.in_flight_attempt_ids = vec!["7".repeat(1024); 130];
+    let status = forge.connect(Some(OTHER_SECRET), large).await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::OutOfRange, "{status:?}");
+    let mut fits = hello("build-2");
+    fits.in_flight_attempt_ids = vec!["7".repeat(1024); 120];
+    assert!(forge.connect(Some(OTHER_SECRET), fits).await.is_ok());
+}
+
+/// Incompressible bytes, so a bundle holding them stays as large.
+fn noise(length: usize) -> Vec<u8> {
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..length)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
+}
+
+impl Forge {
+    /// A bundle transfer whose first message was received, then left unread.
+    async fn open_transfer(
+        &self,
+        attempt: &str,
+    ) -> Result<Streaming<FetchRunBundleResponse>, Status> {
+        let mut request = Request::new(FetchRunBundleRequest {
+            attempt_id: attempt.into(),
+            have: Vec::new(),
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {SECRET}").parse().unwrap());
+        let mut stream = self
+            .client
+            .clone()
+            .fetch_run_bundle(request)
+            .await?
+            .into_inner();
+        stream.message().await?;
+        Ok(stream)
+    }
+}
+
+#[tokio::test]
+async fn bundle_transfers_are_bounded_per_runner_and_end_with_their_stream_or_lease() {
+    let forge = Forge::start().await;
+    let git_dir = forge.state.health.git_state_dir.clone();
+    let repo = git_dir.join("repos/00000000000000000000000001.git");
+    git(&git_dir, &["init", "-q", "--bare", repo.to_str().unwrap()]);
+    // Far more than the HTTP/2 window and the channels: an unread transfer stays open.
+    let work = git_dir.join("work");
+    git(&git_dir, &["init", "-q", work.to_str().unwrap()]);
+    std::fs::write(work.join("big"), noise(8 << 20)).unwrap();
+    git(&work, &["add", "big"]);
+    git(&work, &["commit", "-q", "-m", "big"]);
+    git(
+        &work,
+        &["push", "-q", repo.to_str().unwrap(), "HEAD:refs/heads/main"],
+    );
+    let sha = git(&work, &["rev-parse", "HEAD"]);
+    forge.exec("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
+        INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_enabled, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 1, 'main', '', 0, 'demo')").await;
+    forge.run_at(&sha).await;
+    let (_sender, mut stream) = forge.connect(Some(SECRET), hello("build-1")).await.unwrap();
+    let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
+        panic!("expected an assignment");
+    };
+    let attempt = assignment.attempt_id.as_str();
+
+    // `build-1` declares max_jobs 2: a third transfer at once is refused.
+    let first = forge.open_transfer(attempt).await.unwrap();
+    let second = forge.open_transfer(attempt).await.unwrap();
+    let status = forge.open_transfer(attempt).await.unwrap_err();
+    assert_eq!(
+        (status.code(), reason(&status).as_str()),
+        (tonic::Code::ResourceExhausted, "BUNDLE_TRANSFERS_LIMIT")
+    );
+    // An ended stream gives its place back once its git child is killed and reaped.
+    drop(first);
+    let mut third = None;
+    for _ in 0..250 {
+        if let Ok(stream) = forge.open_transfer(attempt).await {
+            third = Some(stream);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let third = third.expect("the ended transfer's place is free again");
+
+    // A lost lease ends the transfers in progress with a refusal.
+    forge
+        .exec(&format!(
+            "UPDATE job_attempt SET lease_expires_at = 1 WHERE public_id = '{attempt}'"
+        ))
+        .await;
+    // Unread meanwhile: the cut comes from the lease check, not from delivery.
+    tokio::time::sleep(TRANSFER_LEASE_CHECK * 3).await;
+    for mut transfer in [second, third] {
+        let status = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match transfer.message().await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => panic!("a transfer without a lease completed"),
+                    Err(status) => return status,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            (status.code(), reason(&status).as_str()),
+            (tonic::Code::FailedPrecondition, "INVALID_STATE")
+        );
+    }
+}

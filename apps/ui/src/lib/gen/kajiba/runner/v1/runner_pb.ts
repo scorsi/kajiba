@@ -609,7 +609,9 @@ export const ResultStateSchema: GenEnum<ResultState> = /*@__PURE__*/
  * scope option, no reflection (ADR 0105). Every call carries the runner's shared secret
  * as `authorization: Bearer <secret>` metadata; the runner's name travels in the Hello.
  * Constants (ADR 0105): lease 30 s from the server's clock, heartbeat every 10 s, log
- * chunks of at most 64 KiB, reconnection backoff from 1 s doubling to 30 s.
+ * chunks of at most 64 KiB, reconnection backoff from 1 s doubling to 30 s. Bounds
+ * (ADR 0119): a message holds at most 128 KiB; at most 16 requests server-wide wait for
+ * admission, each for 10 s (RESOURCE_EXHAUSTED / RUNNER_ADMISSIONS_LIMIT beyond).
  *
  * @generated from service kajiba.runner.v1.RunnerService
  */
@@ -628,7 +630,10 @@ export const RunnerService: GenService<{
   },
   /**
    * The sources of an attempt the calling runner holds a lease on, as git bundles
-   * (ADR 0106): the attempt's commit, minus what the runner's cache already holds.
+   * (ADR 0106): the attempt's commit, minus what the runner's cache already holds. At
+   * most `max_jobs` transfers per runner and 8 server-wide (RESOURCE_EXHAUSTED /
+   * BUNDLE_TRANSFERS_LIMIT); a transfer ends when its lease is lost (FAILED_PRECONDITION /
+   * INVALID_STATE) or after 60 s without progress (ADR 0119).
    *
    * @generated from rpc kajiba.runner.v1.RunnerService.FetchRunBundle
    */

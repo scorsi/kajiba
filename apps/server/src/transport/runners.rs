@@ -1,7 +1,13 @@
 //! `kajiba.runner.v1` admission (0008, 0026, 0105, 0108): served on the public port,
 //! outside the `kajiba.v1` auth layer and the request timeout.
 
-use super::{Health, auth::compatible, cursor::invalid_field, local::refused};
+use super::{
+    Health,
+    auth::compatible,
+    cursor::invalid_field,
+    local::refused,
+    slots::{Slot, Slots},
+};
 use crate::{
     db::{
         attempts::{self, Offer, Outcome},
@@ -11,7 +17,7 @@ use crate::{
     metrics::Registry,
 };
 use kajiba_core::config::{Capabilities, RunnerDeclaration};
-use kajiba_gitstore::{GitStore, Gix};
+use kajiba_gitstore::{Abort, GitStore, Gix};
 use kajiba_proto::runner::v1::{
     Assignment, CancelAttempt, ConnectRequest, ConnectResponse, ContinueAttempt,
     FetchRunBundleRequest, FetchRunBundleResponse, Hello, LogAck, ResultAck, ResultState,
@@ -24,7 +30,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming, metadata::MetadataMap};
 
@@ -46,6 +52,14 @@ use kajiba_core::config::MAX_HOSTNAME;
 const MAX_CHUNK: usize = 64 * 1024;
 /// `have` ids considered per bundle request (0106).
 const MAX_HAVE: usize = 64;
+/// ADR 0119: runner requests not yet admitted, server-wide.
+pub const MAX_PENDING: usize = 16;
+/// ADR 0119: a decoded runner message holds at most 128 KiB.
+pub const MAX_MESSAGE: usize = 128 * 1024;
+/// ADR 0119: bundle transfers at once, server-wide; per runner, its `max_jobs`.
+const MAX_TRANSFERS: usize = 8;
+/// ADR 0119: a transfer delivering nothing for this long is cut.
+const TRANSFER_IDLE: Duration = Duration::from_secs(60);
 
 type Outbound = mpsc::Sender<Result<ConnectResponse, Status>>;
 
@@ -75,6 +89,8 @@ pub struct Runners {
     registry: Arc<Registry>,
     // Only read or changed under the writer lock, so it always agrees with `runner.connected`.
     live: Arc<Mutex<(u64, BTreeMap<String, Live>)>>,
+    /// Bundle transfers per runner name (0119).
+    transfers: Arc<Slots<String>>,
 }
 
 impl Runners {
@@ -83,8 +99,40 @@ impl Runners {
             health,
             registry,
             live: Arc::default(),
+            transfers: Slots::new(MAX_TRANSFERS),
         }
     }
+}
+
+/// ADR 0119: at most [`MAX_PENDING`] runner requests wait for admission (the hello of
+/// `Connect`, the request of `FetchRunBundle`); each gets [`HELLO_TIMEOUT`] to be
+/// admitted, i.e. for its response head. Other routes pass through.
+pub async fn admission(
+    axum::extract::State(pending): axum::extract::State<Arc<Semaphore>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use kajiba_proto::runner::v1::runner_service_server::SERVICE_NAME;
+    let path = request.uri().path();
+    if !path
+        .strip_prefix('/')
+        .and_then(|path| path.strip_prefix(SERVICE_NAME))
+        .is_some_and(|rest| rest.starts_with('/'))
+    {
+        return next.run(request).await;
+    }
+    let status = match pending.try_acquire_owned() {
+        Ok(_permit) => match tokio::time::timeout(HELLO_TIMEOUT, next.run(request)).await {
+            Ok(response) => return response,
+            Err(_) => Status::deadline_exceeded("not admitted in time"),
+        },
+        Err(_) => refused(
+            tonic::Code::ResourceExhausted,
+            "RUNNER_ADMISSIONS_LIMIT",
+            format!("at most {MAX_PENDING} runner requests may wait for admission"),
+        ),
+    };
+    status.into_http().map(axum::body::Body::new)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -795,7 +843,22 @@ impl RunnerService for Runners {
             attempt_id,
             mut have,
         } = request.into_inner();
-        let (repo, sha, run, trigger) = self.leased(secret, &attempt_id).await?;
+        let ((runner, name), (repo, sha, run, trigger)) = self.leased(secret, &attempt_id).await?;
+        let max_jobs = self
+            .health
+            .runners
+            .get()
+            .and_then(|declared| declared.runners.get(&name))
+            .map_or(0, |declaration| declaration.capabilities.max_jobs as usize);
+        let slot: Slot<String> = self.transfers.take(name, max_jobs).ok_or_else(|| {
+            refused(
+                tonic::Code::ResourceExhausted,
+                "BUNDLE_TRANSFERS_LIMIT",
+                format!(
+                    "at most max_jobs transfers per runner and {MAX_TRANSFERS} in all may run at once"
+                ),
+            )
+        })?;
         // The runner's cache keeps 16 commits (0106): more ids only make a smaller bundle.
         have.truncate(MAX_HAVE);
         let repos = self.health.git_state_dir.join("repos");
@@ -805,15 +868,111 @@ impl RunnerService for Runners {
                 .state_dir
                 .join(format!("ci/bundles/{run}.bundle"))
         });
-        let (sender, receiver) = mpsc::channel(4);
+        let (sender, produced) = mpsc::channel(4);
+        let abort = Arc::new(Abort::default());
+        let aborted = abort.clone();
         tokio::task::spawn_blocking(move || {
-            if let Err(err) = sources(&repos, &repo, &sha, stored.as_deref(), &have, &sender) {
+            // Held until git is reaped (0119).
+            let _slot = slot;
+            if let Err(err) = sources(
+                &repos,
+                &repo,
+                &sha,
+                stored.as_deref(),
+                &have,
+                &sender,
+                &aborted,
+            ) {
                 // A runner gone mid-transfer closed the channel: nothing to report to it.
                 let _ = sender.blocking_send(Err(internal(format!("bundle of {repo}: {err}"))));
             }
         });
+        let (out, receiver) = mpsc::channel(2);
+        let runners = self.clone();
+        tokio::spawn(async move {
+            runners.relay(runner, &attempt_id, produced, out).await;
+            abort.abort();
+        });
         Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
     }
+}
+
+type Bundled = Result<FetchRunBundleResponse, Status>;
+
+/// Lease checks of a running transfer happen this often.
+const TRANSFER_LEASE_CHECK: Duration = Duration::from_secs(1);
+
+impl Runners {
+    /// Relay a transfer to the runner until it is complete, the stream ends, the attempt's
+    /// lease is lost or nothing is delivered for [`TRANSFER_IDLE`] (0119).
+    async fn relay(
+        &self,
+        runner: i64,
+        attempt: &str,
+        mut produced: mpsc::Receiver<Bundled>,
+        out: mpsc::Sender<Bundled>,
+    ) {
+        let mut lease = tokio::time::interval(TRANSFER_LEASE_CHECK);
+        let mut deadline = tokio::time::Instant::now() + TRANSFER_IDLE;
+        let mut pending = None;
+        loop {
+            tokio::select! {
+                // Two free places, one used: a final status always fits behind the data.
+                permits = out.reserve_many(2), if pending.is_some() => {
+                    let Some(permit) = permits.ok().and_then(|mut permits| permits.next()) else {
+                        return;
+                    };
+                    permit.send(pending.take().expect("pending"));
+                    deadline = tokio::time::Instant::now() + TRANSFER_IDLE;
+                }
+                item = produced.recv(), if pending.is_none() => match item {
+                    Some(item) => pending = Some(item),
+                    None => return,
+                },
+                () = out.closed() => return,
+                _ = lease.tick() => {
+                    let leased = match self.health.database.get() {
+                        Some(database) => match database.acquire().await {
+                            Ok(mut connection) => {
+                                current_lease(&mut connection, runner, attempt).await
+                            }
+                            Err(err) => Err(err),
+                        },
+                        None => Ok(None),
+                    };
+                    if !matches!(leased, Ok(Some(_))) {
+                        let _ = out.try_send(Err(not_leased()));
+                        return;
+                    }
+                }
+                () = tokio::time::sleep_until(deadline) => {
+                    let _ = out.try_send(Err(Status::deadline_exceeded("no transfer progress")));
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn not_leased() -> Status {
+    refused(
+        tonic::Code::FailedPrecondition,
+        "INVALID_STATE",
+        "the attempt is not current and leased".into(),
+    )
+}
+
+/// The attempt when it is this runner's current one, running and leased.
+async fn current_lease(
+    connection: &mut SqliteConnection,
+    runner: i64,
+    attempt: &str,
+) -> Result<Option<attempts::Current>, sqlx::Error> {
+    Ok(attempts::current(connection, runner, attempt)
+        .await?
+        .filter(|current| {
+            current.state == "running" && current.lease_expires_at > crate::db::runs::now()
+        }))
 }
 
 /// Send an attempt's bundles. A push or manual run: its commit minus `have` (bundle 0).
@@ -826,7 +985,8 @@ fn sources(
     sha: &str,
     stored: Option<&std::path::Path>,
     have: &[String],
-    sender: &mpsc::Sender<Result<FetchRunBundleResponse, Status>>,
+    sender: &mpsc::Sender<Bundled>,
+    abort: &Abort,
 ) -> Result<(), String> {
     use std::io::Write;
     let path = repos.join(format!("{repo}.git"));
@@ -836,7 +996,7 @@ fn sources(
         |bundle| std::io::BufWriter::with_capacity(MAX_CHUNK, Chunks(sender.clone(), bundle));
     let Some(stored) = stored else {
         let mut out = open(0);
-        gix.bundle(&path, &[sha.into()], have, &mut out)
+        gix.bundle(&path, &[sha.into()], have, &mut out, abort)
             .map_err(|err| text(&err))?;
         return out.flush().map_err(|err| text(&err));
     };
@@ -847,7 +1007,7 @@ fn sources(
         .map_err(|err| text(&err))?
     {
         let mut out = open(0);
-        gix.bundle(&path, &prerequisites, have, &mut out)
+        gix.bundle(&path, &prerequisites, have, &mut out, abort)
             .map_err(|err| text(&err))?;
         out.flush().map_err(|err| text(&err))?;
     }
@@ -866,7 +1026,7 @@ fn sources(
 }
 
 /// The bytes of bundle `.1` as consecutive `FetchRunBundleResponse` messages.
-struct Chunks(mpsc::Sender<Result<FetchRunBundleResponse, Status>>, u32);
+struct Chunks(mpsc::Sender<Bundled>, u32);
 
 impl std::io::Write for Chunks {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
@@ -885,14 +1045,14 @@ impl std::io::Write for Chunks {
 }
 
 impl Runners {
-    /// The repository public id, commit, run public id and trigger of an attempt that is
-    /// its job's current one, still leased and held by the runner whose secret is
-    /// presented (0106).
+    /// The runner (id, name), then the repository public id, commit, run public id and
+    /// trigger of an attempt that is its job's current one, still leased and held by the
+    /// runner whose secret is presented (0106).
     async fn leased(
         &self,
         secret: Option<Vec<u8>>,
         attempt: &str,
-    ) -> Result<(String, String, String, String), Status> {
+    ) -> Result<((i64, String), (String, String, String, String)), Status> {
         let unauthenticated = || {
             refused(
                 tonic::Code::Unauthenticated,
@@ -930,26 +1090,18 @@ impl Runners {
             self.refuse(&name, Reason::Secret);
             return Err(unauthenticated());
         }
-        let current = attempts::current(&mut connection, id, attempt)
+        let current = current_lease(&mut connection, id, attempt)
             .await
             .map_err(internal)?
-            .filter(|current| {
-                current.state == "running" && current.lease_expires_at > crate::db::runs::now()
-            })
-            .ok_or_else(|| {
-                refused(
-                    tonic::Code::FailedPrecondition,
-                    "INVALID_STATE",
-                    "the attempt is not current and leased".into(),
-                )
-            })?;
-        sqlx::query_as(
+            .ok_or_else(not_leased)?;
+        let source = sqlx::query_as(
             "SELECT repo.public_id, run.sha, run.public_id, run.trigger FROM run JOIN repo ON repo.id = run.repo_id WHERE run.id = ?",
         )
         .bind(current.run_id)
         .fetch_one(&mut *connection)
         .await
-        .map_err(internal)
+        .map_err(internal)?;
+        Ok(((id, name), source))
     }
 }
 

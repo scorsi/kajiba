@@ -163,8 +163,14 @@ async fn ci_handler_runs_only_trusted_pushes_once() {
     ];
     assert_eq!(runs(&mut writer).await, expected);
     let mut bundle = Vec::new();
-    Gix.bundle(&repo, &[expected[1].1.clone()], &[], &mut bundle)
-        .unwrap();
+    Gix.bundle(
+        &repo,
+        &[expected[1].1.clone()],
+        &[],
+        &mut bundle,
+        &kajiba_gitstore::Abort::default(),
+    )
+    .unwrap();
     assert!(bundle.starts_with(b"# v2 git bundle\n"));
     let jobs: Vec<(String, String, bool, i64, String, Option<String>)> = sqlx::query_as(
         "SELECT name, requirements, replayable, max_attempts, state, pending_reason FROM job ORDER BY id",

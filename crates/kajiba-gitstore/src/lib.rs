@@ -237,13 +237,14 @@ pub trait GitStore {
     /// the history of the `have` ids that are commits of the repository (others are
     /// ignored); read only (ADR 0106). The bundle is valid even when `have` already holds
     /// `commits`. Blocking; `NotFound` when one of `commits` is not a commit of the
-    /// repository.
+    /// repository. [`Abort::abort`] from another thread kills its git child.
     fn bundle(
         &self,
         repo: &Path,
         commits: &[String],
         have: &[String],
         out: &mut dyn std::io::Write,
+        abort: &Abort,
     ) -> Result<()>;
     /// Whether the history of the `have` ids that are commits of the repository already
     /// holds every one of `commits`; read only, blocking.
@@ -259,6 +260,36 @@ pub trait GitStore {
 
 /// The single ref of a run bundle (ADR 0106).
 pub const BUNDLE_REF: &str = "refs/kajiba/run";
+
+/// Kills the git child of a running [`GitStore::bundle`] from another thread, and any
+/// child started after the abort.
+#[derive(Default)]
+pub struct Abort(std::sync::Mutex<(bool, Option<u32>)>);
+
+impl Abort {
+    pub fn abort(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.0 = true;
+        if let Some(pid) = state.1 {
+            // SAFETY: the child is not reaped before `reaping` clears its pid.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+    }
+
+    fn started(&self, child: &mut std::process::Child) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.0 {
+            let _ = child.kill();
+        } else {
+            state.1 = Some(child.id());
+        }
+    }
+
+    /// Before waiting on the child: its pid may be reused once reaped.
+    fn reaping(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).1 = None;
+    }
+}
 
 /// Deadline of one git child of an import (`ls-remote`, then `fetch`): a hung
 /// source must not pin the repository's admission gate (ADR 0003). Past it the
@@ -782,6 +813,7 @@ impl GitStore for Gix<'_> {
         commits: &[String],
         have: &[String],
         out: &mut dyn std::io::Write,
+        abort: &Abort,
     ) -> Result<()> {
         use std::io::Write;
         let (commits, have) = self.commits(repo, commits, have)?;
@@ -819,6 +851,7 @@ impl GitStore for Gix<'_> {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|err| Error::Git(format!("git: {err}")))?;
+        abort.started(&mut child);
         let lines = |ids: &[String]| ids.iter().map(|id| format!("{id}\n")).collect::<String>();
         let revs = format!("{}--not\n{}", lines(&commits), lines(&have));
         // Revisions are read whole before the pack is written: no deadlock on the pipes.
@@ -833,6 +866,7 @@ impl GitStore for Gix<'_> {
         if copied.is_err() {
             let _ = child.kill();
         }
+        abort.reaping();
         let status = child.wait().map_err(io)?;
         copied.map_err(io)?;
         if !status.success() {
