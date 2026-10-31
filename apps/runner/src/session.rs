@@ -1,12 +1,12 @@
 //! The runner's side of `kajiba.runner.v1` (0008, 0105): admission, heartbeats,
-//! reconnection with backoff, and the in-flight attempts whose logs and results outlive
-//! a connection.
+//! reconnection with backoff, and the in-flight attempts whose logs, step statuses
+//! and results outlive a connection.
 #![allow(clippy::result_large_err)]
 
 use crate::metrics::Metrics;
 use kajiba_proto::runner::v1::{
     Accept, Assignment, Capabilities, ConnectRequest, Heartbeat, Hello, LogChunk,
-    Result as RunResult, connect_request::Message, connect_response,
+    Result as RunResult, StepStatus, connect_request::Message, connect_response,
     runner_service_client::RunnerServiceClient,
 };
 use std::{
@@ -66,6 +66,7 @@ pub enum Job {
 struct Attempt {
     next: u64,
     unacknowledged: VecDeque<LogChunk>,
+    steps: BTreeMap<u32, StepStatus>,
     result: Option<RunResult>,
     /// Wait for ContinueAttempt and its LogAck before sending on a new stream.
     reconciling: bool,
@@ -103,7 +104,7 @@ impl Inner {
 }
 
 /// The attempts this runner holds; their logs are kept until acknowledged and their
-/// result until recorded, across reconnections (0008).
+/// latest step statuses and result until recorded, across reconnections (0008).
 #[derive(Clone, Default)]
 pub struct Attempts(Arc<Mutex<Inner>>, Arc<Notify>);
 
@@ -147,9 +148,16 @@ impl Attempts {
         }
     }
 
-    /// Send a message that need not survive a reconnection (step status).
+    /// Send a message, retaining the latest status of each step for reconnection.
     pub fn send(&self, message: Message) {
-        self.0.lock().unwrap().send(message);
+        let mut inner = self.0.lock().unwrap();
+        if let Message::StepStatus(step) = &message {
+            let Some(held) = inner.attempts.get_mut(&step.attempt_id) else {
+                return;
+            };
+            held.steps.insert(step.step_index, step.clone());
+        }
+        inner.send(message);
     }
 
     /// The attempt's terminal result, resent until the server acknowledges it.
@@ -215,6 +223,7 @@ impl Attempts {
                         .cloned()
                         .map(Message::LogChunk)
                         .collect();
+                    resent.extend(held.steps.values().cloned().map(Message::StepStatus));
                     resent.extend(held.result.clone().map(Message::Result));
                     for message in resent {
                         inner.send(message);

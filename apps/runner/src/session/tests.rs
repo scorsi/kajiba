@@ -1,7 +1,7 @@
 use super::*;
 use kajiba_proto::runner::v1::{
     CancelAttempt, ConnectResponse, ContinueAttempt, FetchRunBundleRequest, FetchRunBundleResponse,
-    LogAck, ResultAck, ResultState,
+    LogAck, ResultAck, ResultState, StepState, StepStatus,
     runner_service_server::{RunnerService, RunnerServiceServer},
 };
 use std::pin::Pin;
@@ -254,6 +254,82 @@ async fn completion_during_reconnection_waits_for_log_replay() {
         assert_eq!(
             messages,
             [chunk(2, "two"), chunk(3, "three"), Message::Result(result)]
+        );
+        attempts.receive(connect_response::Message::ResultAck(ResultAck {
+            attempt_id: "A1".into(),
+        }));
+        assert!(attempts.ids().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn steps_completed_during_an_outage_are_replayed_before_the_result() {
+    for finish_stage in 0..3 {
+        let (attempts, metrics) = (Attempts::default(), Metrics::default());
+        let (outbound, mut connected) = mpsc::unbounded_channel();
+        attempts.attach(Some(outbound));
+        attempts.accept("A1");
+        connected.try_recv().unwrap();
+        let step = |index, state, exit_code| {
+            Message::StepStatus(StepStatus {
+                attempt_id: "A1".into(),
+                step_index: index,
+                name: format!("check-{index}"),
+                state: state as i32,
+                exit_code,
+            })
+        };
+        attempts.send(step(0, StepState::Running, None));
+        assert_eq!(
+            connected.try_recv().unwrap().message,
+            Some(step(0, StepState::Running, None))
+        );
+        attempts.attach(None);
+        let result = RunResult {
+            attempt_id: "A1".into(),
+            state: ResultState::Failed.into(),
+            exit_code: Some(1),
+            ..Default::default()
+        };
+        let finish = || {
+            attempts.send(step(0, StepState::Succeeded, Some(0)));
+            // This step started and finished without reaching the server.
+            attempts.send(step(1, StepState::Running, None));
+            attempts.send(step(1, StepState::Failed, Some(1)));
+            attempts.finish(result.clone(), &metrics);
+        };
+        if finish_stage == 0 {
+            finish();
+        }
+        assert_eq!(attempts.reconcile(), ["A1"]);
+        let (outbound, mut sent) = mpsc::unbounded_channel();
+        attempts.attach(Some(outbound));
+        if finish_stage == 1 {
+            finish();
+        }
+        attempts.receive(connect_response::Message::ContinueAttempt(
+            ContinueAttempt {
+                attempt_id: "A1".into(),
+            },
+        ));
+        if finish_stage == 2 {
+            finish();
+        }
+        assert!(sent.try_recv().is_err());
+        attempts.receive(connect_response::Message::LogAck(LogAck {
+            attempt_id: "A1".into(),
+            sequence: 0,
+        }));
+        let messages: Vec<_> = std::iter::from_fn(|| sent.try_recv().ok())
+            .map(|request| request.message.unwrap())
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                step(0, StepState::Succeeded, Some(0)),
+                step(1, StepState::Failed, Some(1)),
+                Message::Result(result),
+            ]
         );
         attempts.receive(connect_response::Message::ResultAck(ResultAck {
             attempt_id: "A1".into(),
