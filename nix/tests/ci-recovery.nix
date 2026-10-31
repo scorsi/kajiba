@@ -1,6 +1,7 @@
 # J6 task 20: recovery around a long job. A WatchRun stream outlives the request timeout with
 # keepalives (0129), a server restart loses or doubles nothing, a frozen runner loses its lease
-# and the job is replayed, its late result ignored (0105).
+# and the job is replayed, its late result ignored (0105); a restarted runner process loses its
+# attempt at reconnection and the job is replayed (0008).
 {
   kajibaServerPackage,
   kajibaRunnerPackage,
@@ -97,5 +98,18 @@ import ./ci-common.nix args {
         kinds = sql(f"SELECT kind FROM event WHERE id > {mark}").splitlines()
         assert "attempt-lost" in kinds and "attempt-replayed" in kinds, kinds
         assert finishes(r6) == 1
+
+    with subtest("a restarted runner process: its hello lists nothing, the attempt is lost and the job replayed"):
+        c7 = commit(LONG, "seventh")
+        r7 = push(c7)
+        started(r7)
+        first = attempts(r7)[0][0]
+        runner.succeed("systemctl restart kajiba-runner.service")
+        # Lost on reconnection: the new process's heartbeats must not keep it alive.
+        forge.wait_until_succeeds(f"test \"$(sqlite3 {db} \"SELECT state FROM job_attempt WHERE public_id = '{first}'\")\" = lost", timeout=60)
+        assert finished(r7) == "succeeded"
+        tries = attempts(r7)
+        assert tries[0] == (first, "1", "lost") and len(tries) == 2 and tries[1][2] == "succeeded", tries
+        assert finishes(r7) == 1
   '';
 }

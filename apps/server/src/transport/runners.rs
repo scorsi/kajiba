@@ -361,6 +361,26 @@ impl Runners {
             .map_err(internal)?;
             return Err(status);
         }
+        // Under the writer lock and before registering the stream: no attempt assigned
+        // to this session is lost (0008).
+        let lost = async {
+            let mut tx = writer.begin().await?;
+            let changes = attempts::abandon(
+                &mut tx,
+                id,
+                &hello.in_flight_attempt_ids,
+                crate::db::runs::now(),
+            )
+            .await?;
+            declared.bus.commit(tx).await?;
+            Ok::<_, sqlx::Error>(changes)
+        }
+        .await
+        .map_err(internal)?;
+        if !lost.is_empty() {
+            self.health.ci_progress.send_replace(());
+        }
+        self.runs_changed(lost);
         let announced = hello.capabilities.clone().unwrap_or_default();
         let offer = Offer {
             runner_id: id,

@@ -1226,6 +1226,69 @@ async fn a_reconnected_runner_continues_its_attempt_and_resends_unacknowledged_l
     assert_eq!(attempts, [(1, "running".into())]);
 }
 
+#[tokio::test]
+async fn a_restarted_runner_process_loses_its_unlisted_attempt_and_the_job_is_replayed() {
+    use kajiba_proto::runner::v1::{Accept, Heartbeat};
+    let forge = Forge::start().await;
+    forge.run().await;
+    let (sender, mut stream) = forge
+        .connect(Some(BUILD_1), hello("build-1"))
+        .await
+        .unwrap();
+    let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
+        panic!("expected an assignment");
+    };
+    let attempt = assignment.attempt_id;
+    send(
+        &sender,
+        Message::Accept(Accept {
+            attempt_id: attempt.clone(),
+        }),
+    )
+    .await;
+    forge
+        .until("SELECT count(*) FROM job WHERE state = 'running'", 1)
+        .await;
+    // A fresh process holds nothing: its hello lists no attempt.
+    let (sender, mut stream) = forge
+        .connect(Some(BUILD_1), hello("build-1"))
+        .await
+        .unwrap();
+    let connect_response::Message::Assignment(replay) = next(&mut stream).await else {
+        panic!("expected the replay's assignment");
+    };
+    assert_ne!(replay.attempt_id, attempt);
+    let lease = "SELECT lease_expires_at FROM job_attempt WHERE number = 1";
+    let before: Vec<(i64,)> = forge.sql(lease).await;
+    send(&sender, Message::Heartbeat(Heartbeat {})).await;
+    // Messages are handled in order: once the replay is accepted, the heartbeat was too.
+    send(
+        &sender,
+        Message::Accept(Accept {
+            attempt_id: replay.attempt_id.clone(),
+        }),
+    )
+    .await;
+    forge
+        .until("SELECT count(*) FROM job WHERE state = 'running'", 1)
+        .await;
+    assert_eq!(forge.sql::<(i64,)>(lease).await, before);
+    let attempts: Vec<(i64, String)> = forge
+        .sql("SELECT number, state FROM job_attempt ORDER BY number")
+        .await;
+    assert_eq!(attempts, [(1, "lost".into()), (2, "running".into())]);
+    let events: Vec<(String, String)> = forge
+        .sql("SELECT kind, correlation_id FROM event WHERE kind IN ('attempt-lost', 'attempt-replayed') ORDER BY id")
+        .await;
+    assert_eq!(
+        events,
+        [
+            ("attempt-lost".into(), attempt.clone()),
+            ("attempt-replayed".into(), attempt)
+        ]
+    );
+}
+
 impl Forge {
     async fn bundle(
         &self,

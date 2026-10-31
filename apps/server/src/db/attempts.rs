@@ -305,6 +305,8 @@ pub async fn accept(
 }
 
 /// A heartbeat renews unexpired leases only after the runner accepts the job (0008).
+/// Every running attempt of the runner was accepted or continued in its current session:
+/// [`abandon`] lost the others at admission.
 pub async fn heartbeat(
     writer: &mut SqliteConnection,
     runner_id: i64,
@@ -578,6 +580,36 @@ pub async fn expire(
     .bind(now)
     .fetch_all(&mut *tx)
     .await?;
+    lose(tx, lost, now).await
+}
+
+/// At a runner's admission, its running attempts that its hello does not list (`held`)
+/// died with an earlier process: they are lost and replayed as by [`expire`], at once
+/// rather than once heartbeats of the new process stop renewing them (0008).
+pub async fn abandon(
+    tx: &mut SqliteConnection,
+    runner_id: i64,
+    held: &[String],
+    now: i64,
+) -> Result<Vec<(String, RunState)>, sqlx::Error> {
+    let running: Vec<Current> = sqlx::query_as(&format!(
+        "{ATTEMPT} WHERE a.state = 'running' AND a.runner_id = ? ORDER BY a.id"
+    ))
+    .bind(runner_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let lost = running
+        .into_iter()
+        .filter(|attempt| !held.contains(&attempt.public_id))
+        .collect();
+    lose(tx, lost, now).await
+}
+
+async fn lose(
+    tx: &mut SqliteConnection,
+    lost: Vec<Current>,
+    now: i64,
+) -> Result<Vec<(String, RunState)>, sqlx::Error> {
     let mut changes = Vec::new();
     for attempt in lost {
         sqlx::query("UPDATE job_attempt SET state = 'lost', finished_at = ? WHERE id = ?")

@@ -1,8 +1,8 @@
 use super::*;
 use crate::db::attempts::{
     BACKEND_UNAVAILABLE, Chunk, Finish, LEASE_MS, MAX_LOG, NO_CONNECTED_RUNNER, Offer, Outcome,
-    RUNNERS_BUSY, TAGS_UNMATCHED, TRUNCATED, accept, append_log, assign, expire, finish, heartbeat,
-    resume, step,
+    RUNNERS_BUSY, TAGS_UNMATCHED, TRUNCATED, abandon, accept, append_log, assign, expire, finish,
+    heartbeat, resume, step,
 };
 use crate::db::runs::{AttemptState, NewRun, RunState, create_run};
 
@@ -1150,6 +1150,55 @@ async fn reconnection_continues_only_current_leased_attempts() {
             .await
             .unwrap();
     assert_eq!(renewed, now + LEASE_MS);
+    readers.close().await;
+    writer.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn admission_loses_only_the_running_attempts_its_hello_does_not_list() {
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    populate(&mut writer).await;
+    let (_, unlisted) = running(&mut writer).await;
+    new_run(&mut writer, 4).await;
+    let (listed, _) = pass(&mut writer, &[offer(1, &["nix"], &[], 2)], 5).await;
+    new_run(&mut writer, 6).await;
+    let (other, _) = pass(&mut writer, &[offer(2, &["nix"], &[], 1)], 7).await;
+    let held = [listed[0].attempt.clone()];
+    let mut tx = writer.begin().await.unwrap();
+    // A replay changes no run state.
+    assert!(abandon(&mut tx, 1, &held, 8).await.unwrap().is_empty());
+    tx.commit().await.unwrap();
+    let states: Vec<(String, String)> =
+        sqlx::query_as("SELECT public_id, state FROM job_attempt ORDER BY id")
+            .fetch_all(&mut writer)
+            .await
+            .unwrap();
+    assert_eq!(
+        states,
+        [
+            (unlisted.clone(), "lost".into()),
+            (listed[0].attempt.clone(), "running".into()),
+            (other[0].attempt.clone(), "running".into()),
+        ]
+    );
+    assert_eq!(
+        jobs(&mut writer).await,
+        [
+            ("pending".into(), None),
+            ("assigned".into(), None),
+            ("assigned".into(), None)
+        ]
+    );
+    // The new process's heartbeats do not revive it.
+    heartbeat(&mut writer, 1, 9).await.unwrap();
+    let lost: (String, i64) =
+        sqlx::query_as("SELECT state, lease_expires_at FROM job_attempt WHERE public_id = ?")
+            .bind(&unlisted)
+            .fetch_one(&mut writer)
+            .await
+            .unwrap();
+    assert_eq!(lost, ("lost".into(), 2 + LEASE_MS));
     readers.close().await;
     writer.close().await.unwrap();
 }
