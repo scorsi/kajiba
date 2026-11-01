@@ -35,7 +35,7 @@ pub fn expiry(now: i64, ttl: Duration) -> Option<i64> {
         .and_then(|ttl| now.checked_add(ttl))
 }
 
-static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+pub(crate) static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 /// The single writer, shared by the event dispatcher and request handlers. Lock it
 /// only for one transaction: append events in the caller's transaction, then

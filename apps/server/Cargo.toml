@@ -15,6 +15,8 @@ clap.workspace = true
 http-body.workspace = true
 hyper-util.workspace = true
 libc.workspace = true
+libsqlite3-sys.workspace = true
+sha2.workspace = true
 prost.workspace = true
 kajiba-core = { path = "../../crates/kajiba-core" }
 kajiba-gitstore = { path = "../../crates/kajiba-gitstore" }

@@ -19,6 +19,9 @@ http = "1"
 http-body = "1"
 # Already transitive (tokio): O_NONBLOCK for configuration and secret file opens.
 libc = "0.2"
+# Already transitive: SQLite backup API and streaming dump hashes (0168).
+libsqlite3-sys = "0.30.1"
+sha2 = "0.10"
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "server-auto", "service"] }
 prost = "0.13"
 # Already transitive (tonic): TLS of the runner channel with the ring provider (0123).

@@ -3,6 +3,7 @@ use kajiba_core::{config::ServerConfig, log};
 use std::{path::PathBuf, process::ExitCode};
 
 mod db;
+mod dump;
 mod import;
 mod metrics;
 mod reload;
