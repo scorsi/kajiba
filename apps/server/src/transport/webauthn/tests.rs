@@ -969,6 +969,70 @@ mod ceremonies {
     }
 
     #[tokio::test]
+    async fn registration_options_match_enrollment() {
+        let (fixture, mut app) = fixture().await;
+        let token = issue(&fixture, "alice", epoch_ms()).await;
+        let (status, _, enrollment) = post(
+            &mut app,
+            "/auth/webauthn/enroll/start",
+            serde_json::json!({ "token": token }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mut first = authenticator();
+        let credential = first
+            .do_registration(
+                Url::parse(ORIGIN).unwrap(),
+                serde_json::from_value(enrollment["options"].clone()).unwrap(),
+            )
+            .unwrap();
+        let (status, cookie, _) = post(
+            &mut app,
+            "/auth/webauthn/enroll/finish",
+            serde_json::json!({ "ceremony": enrollment["ceremony"], "credential": credential }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let cookie = cookie_value(&cookie.unwrap());
+        step_up(&mut app, &cookie, &mut first, credential.raw_id.as_ref()).await;
+        let (status, _, registration) = post_as(
+            &mut app,
+            "/auth/webauthn/register/start",
+            Some(&cookie),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let enrollment = &enrollment["options"]["publicKey"];
+        let registration = &registration["options"]["publicKey"];
+        for field in [
+            "authenticatorSelection",
+            "attestation",
+            "hints",
+            "extensions",
+            "timeout",
+            "pubKeyCredParams",
+            "rp",
+            "user",
+        ] {
+            assert_eq!(registration.get(field), enrollment.get(field), "{field}");
+        }
+        assert_eq!(
+            enrollment["authenticatorSelection"]["residentKey"],
+            "required"
+        );
+        assert_ne!(registration["challenge"], enrollment["challenge"]);
+        assert!(
+            enrollment["excludeCredentials"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+        );
+        let excluded = registration["excludeCredentials"].as_array().unwrap();
+        assert_eq!(excluded.len(), 1);
+        assert_eq!(excluded[0]["id"], serde_json::json!(credential.raw_id));
+    }
+
+    #[tokio::test]
     async fn a_step_up_lets_the_session_add_a_passkey() {
         let (fixture, mut app) = fixture().await;
         let (mut first, first_id, handle) = enrolled(&fixture, &mut app, "alice").await;
