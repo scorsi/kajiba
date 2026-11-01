@@ -116,25 +116,70 @@ pkgs.testers.runNixOSTest {
         assert_refused(unknown, "colour")
 
     with subtest("a missing token_file stops startup with config-invalid naming the file"):
-        machine.succeed(f"systemctl stop {unit}", f"rm {token_file}")
-        # Runtime drop-in: one start attempt, no auto-restart, so the outcome needs no timing.
+        # Stop listeners too while preparing the failure, then exercise normal activation.
         machine.succeed(
-            f"mkdir -p /run/systemd/system/{unit}.d",
-            f"printf '[Service]\\nRestart=no\\n' > /run/systemd/system/{unit}.d/no-restart.conf",
-            "systemctl daemon-reload",
+            f"systemctl stop {unit} kajiba-server.socket",
+            f"rm {token_file}",
+            f"systemctl reset-failed {unit} kajiba-server.socket",
+            "journalctl --sync",
         )
-        # The readiness probe stops with the main process: the start job fails at once,
-        # not after TimeoutStartSec (timeout exits 124).
+        cursor = machine.succeed("journalctl -n 1 --show-cursor --no-pager").split("-- cursor: ")[-1].strip()
+        # The readiness probe stops with the main process: each failed start must be prompt.
         status, out = machine.execute(f"timeout 60 systemctl start {unit}")
         assert status not in (0, 124), f"systemctl start: exit {status}, output {out!r}"
+        machine.wait_until_succeeds(f"test \"$(systemctl show -P Result {unit})\" = start-limit-hit", timeout=60)
         state = machine.succeed(f"systemctl show -p ActiveState -p Result {unit}").split()
-        assert state == ["ActiveState=failed", "Result=exit-code"], f"after the failed start: {state}"
+        assert state == ["ActiveState=failed", "Result=start-limit-hit"], f"after exhausting starts: {state}"
+        # systemd propagates the service start limit to its triggering sockets, closing them.
+        machine.wait_until_succeeds("test \"$(systemctl show -P Result kajiba-server.socket)\" = service-start-limit-hit")
+        assert machine.succeed("systemctl show -P ActiveState kajiba-server.socket").strip() == "failed"
+        machine.fail("curl -fsS --max-time 2 http://127.0.0.1:8080/readyz")
         machine.succeed("journalctl --sync")
-        invocation = machine.succeed(f"systemctl show -P InvocationID {unit}").strip()
-        out = machine.succeed(f"journalctl _SYSTEMD_INVOCATION_ID={invocation} _SYSTEMD_UNIT={unit} -o cat --no-pager")
-        lines = [json.loads(line) for line in out.splitlines()]
-        assert len(lines) == 1 and lines[0]["event"] == "config-invalid" and lines[0]["level"] == "error" and f"mirror.credentials.github.token_file ({token_file})" in lines[0]["err"], f"failed invocation {invocation}: expected one config-invalid naming the file, got {lines}"
+        out = machine.succeed(f"journalctl --after-cursor={shlex.quote(cursor)} _SYSTEMD_UNIT={unit} -o json --no-pager")
+        invocations = {}
+        for entry in map(json.loads, out.splitlines()):
+            invocations.setdefault(entry["_SYSTEMD_INVOCATION_ID"], []).append(json.loads(entry["MESSAGE"]))
+        assert len(invocations) == 10, f"expected the module's ten start attempts: {invocations}"
+        for invocation, lines in invocations.items():
+            assert len(lines) == 1 and lines[0]["event"] == "config-invalid" and lines[0]["level"] == "error" and f"mirror.credentials.github.token_file ({token_file})" in lines[0]["err"], f"failed invocation {invocation}: expected one config-invalid naming the file, got {lines}"
+        # Repairing configuration and explicitly restarting recovers the stopped listeners.
+        machine.succeed(
+            f"install -o kajiba-server -g kajiba-server -m 0400 /dev/null {token_file}",
+            f"printf %s DO-NOT-PRINT > {token_file}",
+            f"systemctl reset-failed {unit} kajiba-server.socket",
+            f"systemctl start {unit}",
+        )
+        machine.wait_for_unit(unit)
+        machine.succeed("curl -fsS --max-time 5 http://127.0.0.1:8080/readyz")
         validate_logs(machine, unit)
         validate_logs(machine, "kajiba-git.service")
+
+    with subtest("invalid git configuration also exhausts starts and closes both sockets"):
+        git_unit = "kajiba-git.service"
+        machine.succeed(
+            "systemctl stop kajiba-server.service kajiba-server.socket kajiba-git.service kajiba-git.socket kajiba-git-ssh.socket",
+            f"mkdir -p /run/systemd/system/{git_unit}.d",
+            f"printf '[Service]\\nExecStart=\\nExecStart=${kajibaGitPackage}/bin/kajiba-git serve --config /run/missing-git.toml\\n' > /run/systemd/system/{git_unit}.d/invalid.conf",
+            "systemctl daemon-reload",
+            f"systemctl reset-failed {git_unit} kajiba-git.socket kajiba-git-ssh.socket",
+            "journalctl --sync",
+        )
+        cursor = machine.succeed("journalctl -n 1 --show-cursor --no-pager").split("-- cursor: ")[-1].strip()
+        status, out = machine.execute(f"timeout 60 systemctl start {git_unit}")
+        assert status not in (0, 124), f"systemctl start: exit {status}, output {out!r}"
+        machine.wait_until_succeeds(f"test \"$(systemctl show -P Result {git_unit})\" = start-limit-hit", timeout=60)
+        assert machine.succeed(f"systemctl show -P ActiveState {git_unit}").strip() == "failed"
+        for socket in ["kajiba-git.socket", "kajiba-git-ssh.socket"]:
+            machine.wait_until_succeeds(f"test \"$(systemctl show -P Result {socket})\" = service-start-limit-hit")
+            assert machine.succeed(f"systemctl show -P ActiveState {socket}").strip() == "failed"
+        machine.succeed("journalctl --sync")
+        out = machine.succeed(f"journalctl --after-cursor={shlex.quote(cursor)} _SYSTEMD_UNIT={git_unit} -o json --no-pager")
+        invocations = {}
+        for entry in map(json.loads, out.splitlines()):
+            invocations.setdefault(entry["_SYSTEMD_INVOCATION_ID"], []).append(json.loads(entry["MESSAGE"]))
+        assert len(invocations) == 10, invocations
+        for lines in invocations.values():
+            assert len(lines) == 1 and lines[0]["event"] == "config-invalid" and "/run/missing-git.toml" in lines[0]["err"], lines
+        validate_logs(machine, git_unit)
   '';
 }

@@ -594,6 +594,10 @@ in
         && systemd.sockets.kajiba-server.socketConfig.FileDescriptorName == "http"
         && systemd.sockets.kajiba-git.socketConfig.SocketMode == "0660"
         && systemd.sockets.kajiba-git-ssh.socketConfig.SocketMode == "0600"
+        && server.startLimitIntervalSec == 60
+        && server.startLimitBurst == 10
+        && git.startLimitIntervalSec == 60
+        && git.startLimitBurst == 10
         && unit.Restart == "on-failure"
         &&
           unit.SystemCallFilter == [

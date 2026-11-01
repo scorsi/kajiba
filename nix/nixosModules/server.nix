@@ -767,6 +767,9 @@ in
     };
     systemd.services.kajiba-server = {
       description = "kajiba forge server";
+      # Socket-triggered starts share this budget; hitting it also fails the sockets.
+      startLimitIntervalSec = 60;
+      startLimitBurst = 10;
       wantedBy = [ "multi-user.target" ];
       wants = [
         "kajiba-git.service"
@@ -841,6 +844,9 @@ in
     };
     systemd.services.kajiba-git = {
       description = "kajiba repository writer";
+      # Socket-triggered starts share this budget; hitting it also fails the sockets.
+      startLimitIntervalSec = 60;
+      startLimitBurst = 10;
       wantedBy = [ "multi-user.target" ];
       requires = [
         "kajiba-git.socket"
