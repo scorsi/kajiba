@@ -3,7 +3,10 @@
 import ./ci-common.nix args {
   name = "ops";
   forgeConfig = {
-    environment.systemPackages = [ pkgs.python3 ];
+    environment.systemPackages = [
+      pkgs.python3
+      pkgs.openssl
+    ];
     services.kajiba-git.metrics.listen = "127.0.0.1:9433";
     # Recovery assertions must not race the fixture's one-minute log retention.
     services.kajiba-server.ci.logRetention = pkgs.lib.mkForce "1d";
