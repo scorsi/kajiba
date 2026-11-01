@@ -28,6 +28,9 @@ import ./ci-common.nix args {
       OnActiveSec = "5s";
     };
     # Invoke gc explicitly so the calendar cannot race the dump rotation assertions.
+    # The script starts the services by hand in quick succession; do not trip systemd's start limit.
+    systemd.services.kajiba-dump.startLimitIntervalSec = 0;
+    systemd.services.kajiba-gc.startLimitIntervalSec = 0;
     systemd.timers.kajiba-gc.wantedBy = lib.mkForce [ ];
     systemd.tmpfiles.rules = [ "d /var/lib/kajiba-fixtures 0777 root root -" ];
     systemd.services.kajiba-git.path = lib.mkBefore [ heldCommands ];
