@@ -1024,6 +1024,8 @@ export async function watchRun(req: {
   follow: boolean;
   signal?: AbortSignal;
   onChange?: () => void;
+  /** Stop before the next attempt when reading a single stored section. */
+  attempt?: string;
 }): Promise<Run | undefined> {
   const { log, signal } = req;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1041,14 +1043,19 @@ export async function watchRun(req: {
           { signal },
         )) {
           const e = m.event;
-          if (e.case === "section" && e.value.attempt)
+          if (e.case === "section" && e.value.attempt) {
+            if (req.attempt && e.value.attempt.publicId !== req.attempt) {
+              if (log.attempts.length) return undefined;
+              continue;
+            }
             log.section(
               e.value.attempt.publicId,
               toStep(e.value.attempt),
               Number(e.value.attempt.startedAt?.seconds ?? 0n) * 1000 +
                 (e.value.attempt.startedAt?.nanos ?? 0) / 1e6,
+              Number(e.value.offset),
             );
-          else if (e.case === "log") {
+          } else if (e.case === "log") {
             const offset = log.offset;
             log.bytes(
               Number(e.value.offset),
@@ -1083,5 +1090,28 @@ export async function watchRun(req: {
   } finally {
     clearTimeout(timer);
     req.onChange?.();
+  }
+}
+
+/** Read one stored attempt, then abort transport delivery at the next section. */
+export async function readAttemptLog(req: {
+  id: string;
+  repo: RepoRef;
+  attempt: string;
+  offset: number;
+  signal: AbortSignal;
+}): Promise<RunLogLine[]> {
+  const log = newRunLog();
+  log.offset = req.offset;
+  const stop = new AbortController();
+  const abort = () => stop.abort();
+  req.signal.addEventListener("abort", abort, { once: true });
+  if (req.signal.aborted) abort();
+  try {
+    await watchRun({ ...req, log, follow: false, signal: stop.signal });
+    return log.attempts.length ? log.lines(0) : [];
+  } finally {
+    req.signal.removeEventListener("abort", abort);
+    stop.abort();
   }
 }

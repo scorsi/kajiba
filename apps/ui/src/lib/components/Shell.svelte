@@ -64,6 +64,7 @@
 
 	const ALL_PAGES = [
 		{ label: 'Activity', href: '/', icon: 'chart' as const, admin: false },
+		{ label: 'Pipelines', href: '/?pipelines=1#pipelines', icon: 'chart' as const, admin: false },
 		{ label: 'Administration', href: '/-/admin', icon: 'server' as const, admin: true },
 		{ label: 'Account', href: '/-/account', icon: 'user' as const, admin: false }
 	];

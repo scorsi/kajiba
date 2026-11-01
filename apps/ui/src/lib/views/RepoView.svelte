@@ -17,6 +17,7 @@
 	import RunActions from '#lib/components/RunActions.svelte';
 	import ActivityChart from '#lib/components/ActivityChart.svelte';
 	import { activityRange } from '#lib/data/activity.ts';
+	import { runLabel } from '#lib/run-label.ts';
 	import RunRef from '#lib/components/RunRef.svelte';
 	import DurationBar from '#lib/components/DurationBar.svelte';
 	import { hasActiveRuns, uniqueCommits } from '#lib/data/forge.ts';
@@ -578,11 +579,18 @@
 					</div>
 					{#if worktreeRuns.length}
 						<h2 class="mt-3 text-xs text-fg-subtle">Worktree runs</h2>
-						<ul class="mt-1 space-y-1">
+						<!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable run list) -->
+						<ul class="mt-1 max-h-64 overflow-auto" tabindex="0" aria-label="Worktree runs">
 							{#each worktreeRuns as r (r.id)}
-								<li>
-									<a href="/-/runs/{r.id}" class="flex flex-wrap items-center gap-2 text-xs hover:underline">
-										<RunBadge state={r.state} size={11} />#{r.short} <RunRef run={r} />
+								<li class="flex min-w-[42rem] items-center gap-2 border-b border-border/50 py-1.5">
+									<a href="/-/runs/{r.id}" class="flex min-w-0 flex-1 items-center gap-3 text-xs hover:bg-surface-2" title={runLabel(r)}>
+										<span class="rounded-sm border border-accent/40 bg-accent-soft px-1 text-accent">worktree</span>
+										<span class="w-20 shrink-0 truncate">{r.triggeredBy || 'unknown user'}</span>
+										<span class="shrink-0 font-mono">{r.baseCommitId ? shortId(r.baseCommitId) : 'unknown base'}</span>
+										<span class="min-w-20 flex-1 truncate">{r.checks.length ? r.checks.join(', ') : 'all checks'}</span>
+										<RunBadge state={r.state} size={11} />
+										<span class="tabular shrink-0">{dur(r.durationSeconds)}</span>
+										<span class="shrink-0 text-fg-subtle">{relativeTime(toDate(r.createTime))}</span>
 									</a>
 									<RunActions run={r} allowed={canManageRuns(repo, viewer.data)} rerun={false} onchange={runs.retry} />
 								</li>

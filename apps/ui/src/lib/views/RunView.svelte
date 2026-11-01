@@ -29,6 +29,7 @@
 
 	let { data, onchange }: { data: RunPage; onchange: () => void } = $props();
 	const run = $derived(data.run);
+	let busyAttempt = $state<number>();
 
 	const q = $derived(page.url.searchParams);
 	const pulseOpen = $derived(q.get('pulse') !== '0');
@@ -120,6 +121,7 @@
 					{@const e = elapsedOf(i)}
 					<a
 						href={stepHref(i)}
+						aria-busy={busyAttempt === i}
 						data-sveltekit-noscroll
 						class="group min-w-0"
 						style:flex-basis="{widths[i]}%"
@@ -140,7 +142,7 @@
 						<span
 							class="mt-1.5 block truncate text-xs group-hover:text-fg {s.state === RunState.FAILED
 								? 'text-danger'
-								: 'text-fg-muted'}">{s.name}</span
+								: 'text-fg-muted'}">{s.name}{#if busyAttempt === i} · Loading…{/if}</span
 						>
 						<span class="tabular block truncate text-xs text-fg-subtle"
 							>{s.state === RunState.QUEUED
@@ -208,5 +210,5 @@
 					>{/if}</span
 			>{/each}
 	</BandStrip>
-	{#if stepsOpen}<StepColumns {data} />{/if}
+	{#if stepsOpen}<StepColumns {data} onbusy={(step) => busyAttempt = step} />{/if}
 </div>

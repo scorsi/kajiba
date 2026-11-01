@@ -152,6 +152,7 @@
 			>{/each}
 		<span class={failures.length ? 'text-danger' : ''}>{failures.length} failed · 7 days</span>
 	{/snippet}
+	<div id="pipelines"></div>
 	{@render strip('Pipelines', pipelinesOpen, 'pipelines', null, '0', pipeSummary)}
 	{#if pipelinesOpen}
 		<section class="border-b border-border bg-surface px-4 py-3 sm:px-6" aria-label="Pipelines">

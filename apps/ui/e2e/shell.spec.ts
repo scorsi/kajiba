@@ -42,7 +42,7 @@ test("the shell toggles from the full header zone and marks the current entry", 
     ["/", "Activity"],
     ["/-/account", "Account"],
     ["/-/admin", "Administration"],
-    [`/-/runs/${run}`, "Activity"],
+    [`/-/runs/${run}`, "Pipelines"],
   ]) {
     await page.goto(path + "?drawer=1");
     const pages = overview.getByRole("navigation", { name: "Pages" });

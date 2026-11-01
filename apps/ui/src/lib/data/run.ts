@@ -229,19 +229,17 @@ export function segments(lines: RunLogLine[], offset = 0): Segment[] {
   return out;
 }
 
-/** Index of the step to look at first: the failing one, else the running one, else the longest. */
-export function focusStep(run: Run) {
-  const failed = run.steps.findIndex((s) => s.state === RunState.FAILED);
-  if (failed >= 0) return failed;
-  const running = run.steps.findIndex((s) => s.state === RunState.RUNNING);
-  if (running >= 0) return running;
-  // all done: the step that took longest (the build, usually)
-  return run.steps.reduce(
-    (best, x, i) =>
-      x.durationSeconds > run.steps[best].durationSeconds ? i : best,
-    0,
-  );
+/** Explicit line anchors win, then the selected tab, otherwise the latest attempt. */
+export function focusStep(run: Run, selected: string | null = null, hash = "") {
+  const linked = /^#L(\d+)-\d+$/.exec(hash);
+  const n = Number(linked?.[1] ?? selected);
+  return Number.isInteger(n) && n >= 1 && n <= run.steps.length
+    ? n - 1
+    : Math.max(0, run.steps.length - 1);
 }
+
+export const atLogBottom = (height: number, top: number, viewport: number) =>
+  height - top - viewport <= 4;
 
 /** Error lines of a step with a little context before each, merged. */
 export function excerpt(lines: RunLogLine[], context = 2, max = 14) {

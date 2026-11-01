@@ -13,8 +13,8 @@ test("shell entries stay current on nested routes without matching adjacent name
   );
   for (const [path, href] of [
     ["/", "/"],
-    ["/-/runs/abc", "/"],
-    ["/-/runs/abc/steps", "/"],
+    ["/-/runs/abc", "/?pipelines=1#pipelines"],
+    ["/-/runs/abc/steps", "/?pipelines=1#pipelines"],
     ["/-/account", "/-/account"],
     ["/-/account/keys", "/-/account"],
     ["/-/admin/runners", "/-/admin"],
@@ -23,6 +23,8 @@ test("shell entries stay current on nested routes without matching adjacent name
     assert.equal(isCurrentPage(path, href), true, path);
   for (const [path, href] of [
     ["/alice/demo", "/"],
+    ["/-/runs/abc", "/"],
+    ["/", "/?pipelines=1#pipelines"],
     ["/-/account", "/"],
     ["/-/administrator", "/-/admin"],
     ["/-/runs-other/abc", "/"],

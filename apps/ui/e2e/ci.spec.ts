@@ -124,7 +124,7 @@ test.describe.serial("CI runs", () => {
     await page.goto(`/-/runs/${id}`);
     await expect(log).toContainText("building 'fmt'");
     await expect(pulse(page)).toContainText("passed", { timeout: 30_000 });
-    await expect(pulse(page)).toContainText("e2e-host");
+    await expect(pulse(page)).not.toContainText("on e2e-host");
     const times = () => log.locator("[data-log-time]").allTextContents();
     await expect
       .poll(async () => (await times()).some((t) => t !== "0:00"))
@@ -262,9 +262,17 @@ test.describe.serial("CI runs", () => {
         pipelines.getByRole("heading", { name: "Worktree runs" }),
       ).toBeVisible();
       await expect(pipelines.locator(`a[href="/-/runs/${id}"]`)).toHaveCount(1);
-      await expect(pipelines.locator(`a[href="/-/runs/${id}"]`)).toContainText(
-        label,
-      );
+      const row = pipelines.locator(`a[href="/-/runs/${id}"]`);
+      for (const value of [
+        "worktree",
+        "alice",
+        env("KAJIBA_E2E_MAIN_SHA").slice(0, 7),
+        "unit",
+      ])
+        await expect(row).toContainText(value);
+      await expect(
+        pipelines.getByRole("list", { name: "Worktree runs" }),
+      ).toHaveCSS("overflow-y", "auto");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -34,11 +34,12 @@ export class RunLog<A> {
     lines: RunLogLine[];
     partial: string;
     startedAt: number;
+    offset: number;
     time: number;
   }[] = [];
   private decoder = new TextDecoder();
 
-  section(id: string, meta: A, startedAt = 0) {
+  section(id: string, meta: A, startedAt = 0, offset = this.offset) {
     const last = this.attempts.at(-1);
     // A resumed stream repeats the section of the attempt it resumes inside.
     if (last?.id === id) {
@@ -51,6 +52,7 @@ export class RunLog<A> {
         lines: [],
         partial: "",
         startedAt,
+        offset,
         time: 0,
       });
   }

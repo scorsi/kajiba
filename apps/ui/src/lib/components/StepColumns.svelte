@@ -10,12 +10,15 @@
 -->
 <script lang="ts">
 	import { page } from '$app/state';
-	import { RunState } from '#lib/api.ts';
+	import { onDestroy, tick, untrack } from 'svelte';
+	import Skeleton from '#lib/components/Skeleton.svelte';
+	import { resource } from '#lib/resource.svelte.ts';
+	import { RunState, readAttemptLog } from '#lib/api.ts';
 	import RunBadge, { RUN_LABEL } from '#lib/components/RunBadge.svelte';
 	import LogView from '#lib/components/LogView.svelte';
-	import { clock, focusStep, segments, type RunPage } from '#lib/data/run.ts';
+	import { clock, focusStep, atLogBottom, segments, type RunPage } from '#lib/data/run.ts';
 
-	let { data }: { data: RunPage } = $props();
+	let { data, onbusy }: { data: RunPage; onbusy: (step: number | undefined) => void } = $props();
 	const run = $derived(data.run);
 
 	const q = $derived(page.url.searchParams);
@@ -24,10 +27,7 @@
 		for (const [k, v] of Object.entries(next)) v === null ? u.delete(k) : u.set(k, v);
 		return `?${u}`;
 	}
-	const step = $derived.by(() => {
-		const n = Number(q.get('step'));
-		return n >= 1 && n <= run.steps.length ? n - 1 : focusStep(run);
-	});
+	const step = $derived(focusStep(run, q.get('step'), page.url.hash));
 	const stepHref = (i: number) => hrefFor({ step: String(i + 1), check: null });
 
 	// ── durations against usual ───────────────────────────────────────
@@ -53,7 +53,29 @@
 
 	// ── the open step: lines before, checks, lines after ───────────────
 	const s = $derived(run.steps[step]);
-	const log = $derived(data.logs[step]);
+	const attemptId = $derived(data.log.attempts[step]?.id);
+	let firstRead = true;
+	const stored = resource((signal) => {
+		const attempt = attemptId;
+		void step;
+		return untrack(() => {
+			// The initial stored log is already part of the page load.
+			if (firstRead) {
+				firstRead = false;
+				return Promise.resolve(data.logs[step]?.lines ?? []);
+			}
+			const section = data.log.attempts[step];
+			return attempt && section
+				? readAttemptLog({ id: run.id, repo: run.repo, attempt, offset: section.offset, signal })
+				: Promise.resolve(data.logs[step]?.lines ?? []);
+		});
+	});
+	$effect(() => onbusy(stored.loading ? step : undefined));
+	onDestroy(() => onbusy(undefined));
+	const log = $derived({
+		lines: step === data.logs.length - 1 ? (data.logs[step]?.lines ?? []) : (stored.data ?? []),
+		complete: data.logs[step]?.complete ?? true
+	});
 	const segs = $derived(segments(log?.lines ?? []));
 	const firstG = $derived(segs.findIndex((x) => x.group));
 	const lastG = $derived(segs.findLastIndex((x) => x.group));
@@ -90,27 +112,57 @@
 	});
 	const errors = $derived(log?.lines.filter((l) => l.stream === 'err').length ?? 0);
 
-	// Land on what matters: a linked line, else the first error, else follow the
-	// end of a running log (unless the reader scrolled up).
+	// Initial landing is separate from updates: terminal refreshes must not pull a reader back.
 	let pane = $state<HTMLElement>();
 	let stick = true;
+	let unseen = $state(false);
+	let landed = '';
+	let previousLines = 0;
 	const onscroll = (e: Event) => {
 		const el = e.currentTarget as HTMLElement;
-		stick = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+		stick = atLogBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
+		if (stick) unseen = false;
 	};
+	function jumpToLatest() {
+		if (pane) pane.scrollTop = pane.scrollHeight;
+		stick = true;
+		unseen = false;
+	}
 	$effect(() => {
-		void step;
-		void check;
-		void log?.lines.length;
-		if (!pane) return;
-		const to = (el: HTMLElement) =>
-			(pane!.scrollTop = Math.max(0, el.offsetTop - pane!.offsetTop - 48));
-		const linked = page.url.hash && document.getElementById(page.url.hash.slice(1));
-		const err = pane.querySelector<HTMLElement>('[data-err]');
-		if (log?.complete) {
-			if (linked && pane.contains(linked)) to(linked);
-			else if (err) to(err);
-		} else if (stick) pane.scrollTop = pane.scrollHeight;
+		const el = pane;
+		const key = `${step}:${check ?? ''}:${page.url.hash}`;
+		const count = log.lines.length;
+		const loading = stored.loading;
+		const complete = log.complete;
+		if (!el || loading) return;
+		const initial = key !== landed;
+		const added = count > previousLines;
+		const follow = stick;
+		landed = key;
+		previousLines = count;
+		let cancelled = false;
+		tick().then(() => {
+			if (cancelled) return;
+			if (initial) {
+				unseen = false;
+				const linked = page.url.hash && document.getElementById(page.url.hash.slice(1));
+				const err = el.querySelector<HTMLElement>('[data-err]');
+				const target = linked && el.contains(linked) ? linked : complete ? err : null;
+				if (target)
+					el.scrollTop = Math.max(
+						0,
+						target.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - 48
+					);
+				else el.scrollTop = complete ? 0 : el.scrollHeight;
+				stick = atLogBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
+			} else if (added) {
+				if (follow) el.scrollTop = el.scrollHeight;
+				else unseen = true;
+			}
+		});
+		return () => {
+			cancelled = true;
+		};
 	});
 </script>
 
@@ -196,6 +248,7 @@
 			<section
 				class="flex min-h-0 min-w-0 flex-1 flex-col border-b border-border bg-bg sm:border-r sm:border-b-0"
 				aria-label="{st.name} log"
+				aria-busy={stored.loading}
 			>
 				<!-- step header: state, duration against usual -->
 				<header
@@ -228,9 +281,14 @@
 								>{` · ${errors} errors`}</span
 							>{/if}</span
 					>
+					{#if unseen}<button class="ml-auto text-accent hover:underline" onclick={jumpToLatest}>Jump to latest</button>{/if}
 				</header>
 
-				{#if st.state === RunState.QUEUED}
+				{#if stored.loading}
+					<div class="p-4" role="status" aria-label="Loading attempt log"><Skeleton lines={8} /></div>
+				{:else if stored.error}
+					<p class="p-4 text-xs text-danger">Could not load this attempt. <button onclick={stored.retry}>Retry</button></p>
+				{:else if st.state === RunState.QUEUED}
 					<p class="px-4 py-3 text-xs text-fg-subtle">
 						Not started yet{data.usual[i] ? ` — usually takes ${clock(data.usual[i])}` : ''}.
 					</p>
@@ -265,7 +323,8 @@
 										bind:this={pane}
 						{onscroll}
 										tabindex="0"
-										class="relative min-h-0 flex-1 overflow-y-auto py-1"
+										data-log-pane
+						class="relative min-h-0 flex-1 overflow-y-auto py-1 [overflow-anchor:none]"
 									>
 										<LogView
 											flat
@@ -303,7 +362,8 @@
 						bind:this={pane}
 						{onscroll}
 						tabindex="0"
-						class="relative min-h-0 flex-1 overflow-y-auto py-1"
+						data-log-pane
+						class="relative min-h-0 flex-1 overflow-y-auto py-1 [overflow-anchor:none]"
 					>
 						<LogView
 							flat

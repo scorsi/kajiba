@@ -39,9 +39,7 @@
 	>
 	{/if}
 	{#if run.runner}<span class="flex items-center gap-1" title={run.runnerHostname}
-			><Icon name="server" size={11} /><span class="font-mono">{run.runner}</span>{#if run.runnerHostname}<span
-					>on {run.runnerHostname}</span
-				>{/if}</span
+			><Icon name="server" size={11} /><span class="font-mono">{run.runner}</span></span
 		>{/if}
 	<span title={absoluteTime(toDate(run.createTime))}>{relativeTime(toDate(run.createTime))}</span>
 </p>
