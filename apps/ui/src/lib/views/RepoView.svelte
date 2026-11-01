@@ -45,9 +45,10 @@
 		type Run,
 		type TreeEntry
 	} from '#lib/api.ts';
-	import { repoQuery, isMarkdown, localDateTime } from '#lib/repo-navigation.ts';
+	import { repoQuery, isMarkdown, localDateTime, fileViewMode, touchedPaths } from '#lib/repo-navigation.ts';
 	import CopyButton from '#lib/components/CopyButton.svelte';
 	import CloneButton from '#lib/components/CloneButton.svelte';
+	import DiffView from '#lib/components/DiffView.svelte';
 	import CodeView from '#lib/components/CodeView.svelte';
 	import Icon, { type IconName } from '#lib/components/Icon.svelte';
 	import Markdown from '#lib/components/Markdown.svelte';
@@ -264,12 +265,8 @@
 		}
 		return target.startsWith('/') ? undefined : out.join('/');
 	}
-	let fileMode = $state<'diff' | 'file'>('file');
-	$effect(() => {
-		void path;
-		void revision;
-		fileMode = 'file';
-	});
+	const fileMode = $derived(fileViewMode(q));
+	const touched = $derived(touchedPaths(at ? commitDiff.data?.changes ?? [] : []));
 
 	let scroller = $state<HTMLElement>();
 	$effect(() => {
@@ -684,7 +681,7 @@
 				<ul aria-label="Files touched by selected commit" class="mt-2 max-h-48 overflow-y-auto">
 					{#each commitDiff.data?.changes ?? [] as ch (`${ch.kind}:${ch.path}`)}
 						{@const k = CHANGE[ch.kind]}
-						<li><a href={hrefFor({ path: ch.path })} data-sveltekit-noscroll aria-current={path === ch.path ? 'true' : undefined} class="flex gap-3 py-1 font-mono text-xs hover:underline">
+						<li><a href={hrefFor({ path: ch.path, view: 'diff' })} data-sveltekit-noscroll aria-current={path === ch.path ? 'true' : undefined} class="flex gap-3 py-1 font-mono text-xs hover:underline">
 							<span class={k.cls} title={k.label}>{k.l}</span><span class="break-all">{ch.path}</span>
 						</a></li>
 					{/each}
@@ -705,7 +702,7 @@
 		{/if}
 
 		<!-- ═══ Workspace ═══ -->
-		<div bind:this={scroller} class="flex min-h-[28rem] flex-1 overflow-x-auto">
+		<div bind:this={scroller} class="flex min-h-[56rem] shrink-0 overflow-x-auto bg-surface" data-workspace>
 			{#if empty}
 				<section class="max-w-2xl px-4 py-8 text-[0.8125rem] sm:px-6" aria-label="Empty repository">
 					<p class="text-xs tracking-wide text-fg-subtle uppercase">Nothing pushed yet</p>
@@ -729,6 +726,8 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 								href={hrefFor({ path: segs.slice(0, i + 1).join('/') })}
 								data-sveltekit-noscroll
 								title="Back to {sel}"
+								data-touched={touched.has(segs.slice(0, i + 1).join('/')) ? 'true' : undefined}
+								class:bg-accent-soft={touched.has(segs.slice(0, i + 1).join('/'))}
 								class="hidden w-7 shrink-0 justify-center border-r border-border pt-3 text-[0.6875rem] text-fg-subtle hover:bg-surface hover:text-fg md:flex"
 							>
 								<span class="font-mono [writing-mode:vertical-rl]">{sel}</span>
@@ -748,6 +747,7 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 								<ul class="flex-1 overflow-y-auto pb-2" data-col={i}>
 									{#each col.entries as e, n (e.name)}
 										{@const isSel = e.name === sel}
+										{@const changed = touched.has(col.dir ? `${col.dir}/${e.name}` : e.name)}
 										<li>
 											<a
 												href={hrefFor({ path: col.dir ? `${col.dir}/${e.name}` : e.name })}
@@ -755,6 +755,8 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 												data-sveltekit-keepfocus
 												tabindex={isSel || (!sel && n === 0) ? 0 : -1}
 												aria-current={isSel ? 'true' : undefined}
+												data-touched={changed ? 'true' : undefined}
+												title={changed ? (e.kind === EntryKind.TREE ? 'Contains changes in selected commit' : 'Changed in selected commit') : undefined}
 												onkeydown={(ev) =>
 													onKey(
 														ev,
@@ -762,7 +764,7 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 														col.entries.map((x) => x.name),
 														sel
 													)}
-												class="relative flex items-center gap-2 py-[3px] pr-3 pl-4 text-[0.8125rem] {isSel
+												class="{changed ? (e.kind === EntryKind.TREE ? 'bg-accent-soft/40' : 'bg-accent-soft') : ''} relative flex items-center gap-2 py-[3px] pr-3 pl-4 text-[0.8125rem] {isSel
 													? 'font-medium text-fg'
 													: 'text-fg-muted hover:text-fg'}"
 											>
@@ -848,7 +850,7 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 							f.before && !isBinary(f.now)
 								? lineDiff(new TextDecoder().decode(f.before), text)
 								: undefined}
-						<div class="flex h-full flex-col">
+						<div class="flex min-w-0 flex-col">
 							<div
 								class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-4 py-2 text-xs text-fg-subtle"
 							>
@@ -874,7 +876,7 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 											<button
 												type="button"
 												aria-pressed={fileMode === m}
-												onclick={() => (fileMode = m)}
+												onclick={() => go({ view: m === 'diff' ? 'diff' : null })}
 												class="rounded-[3px] px-2 py-0.5 {fileMode === m
 													? 'bg-accent-soft text-accent'
 													: 'hover:text-fg'}">{m === 'diff' ? 'Diff' : 'File'}</button
@@ -890,45 +892,7 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 										Binary file, {formatBytes(f.now.length)}.
 									</p>
 								{:else if hunks && fileMode === 'diff'}
-									<table
-										class="w-full font-mono text-[0.8125rem] leading-5 [font-variant-ligatures:none]"
-									>
-										{#each hunks as h, hi (hi)}
-											<tbody>
-												<tr
-													><td colspan="3" class="bg-surface-2 px-3 py-0.5 text-xs text-fg-subtle"
-														>@@ −{h.oldStart} +{h.newStart} @@</td
-													></tr
-												>
-												{#each h.lines as l, li (li)}
-													<tr
-														class={l.kind === 'add'
-															? 'bg-(--k-syn-add-bg)'
-															: l.kind === 'del'
-																? 'bg-(--k-syn-del-bg)'
-																: ''}
-													>
-														<td class="w-10 px-2 text-right text-xs text-fg-subtle select-none"
-															>{l.old ?? ''}</td
-														>
-														<td class="w-10 px-2 text-right text-xs text-fg-subtle select-none"
-															>{l.new ?? ''}</td
-														>
-														<td class="pr-4 whitespace-pre"
-															><span
-																class="inline-block w-4 select-none {l.kind === 'add'
-																	? 'text-ok'
-																	: l.kind === 'del'
-																		? 'text-danger'
-																		: 'text-fg-subtle'}"
-																>{l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ' '}</span
-															>{l.text}</td
-														>
-													</tr>
-												{/each}
-											</tbody>
-										{/each}
-									</table>
+									<DiffView {hunks} language={languageFor(path)} />
 								{:else if isMarkdown(path)}
 									<div class="mx-auto max-w-3xl px-6 py-8"><Markdown source={text} /></div>
 								{:else}

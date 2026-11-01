@@ -211,10 +211,17 @@ test("repository files default to content and retain selected commit context", a
   const touched = selected.getByRole("list", {
     name: "Files touched by selected commit",
   });
+  await expect(root.getByRole("link", { name: /^docs/ })).toHaveAttribute(
+    "data-touched",
+    "true",
+  );
+  await expect(
+    root.getByRole("link", { name: /README\.md/ }),
+  ).not.toHaveAttribute("data-touched");
   await touched.getByRole("link", { name: /docs\/guide\/intro\.md/ }).click();
   await expect(page).toHaveURL(new RegExp(`at=${sha}`));
   await expect(
-    preview.getByRole("button", { name: "File", exact: true }),
+    preview.getByRole("button", { name: "Diff", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
   await expect(preview).toContainText("More.");
   await expect(
@@ -230,6 +237,54 @@ test("repository files default to content and retain selected commit context", a
   await expect(
     preview.getByRole("link", { name: "Raw", exact: true }),
   ).toHaveAttribute("href", `/raw/alice/demo/${sha}/docs/guide/intro.md`);
+  await expect(
+    page.getByTitle("Back to docs", { exact: true }),
+  ).toHaveAttribute("data-touched", "true");
+  await expect(
+    page
+      .getByRole("region", { name: "docs", exact: true })
+      .getByRole("link", { name: /^guide/ }),
+  ).toHaveAttribute("data-touched", "true");
+  const treeFile = page
+    .getByRole("region", { name: "docs/guide", exact: true })
+    .getByRole("link", { name: /intro\.md/ });
+  await expect(treeFile).toHaveAttribute("data-touched", "true");
+  // The same path must switch modes in both directions without a reload.
+  await treeFile.click();
+  await expect(
+    preview.getByRole("button", { name: "File", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(preview.locator("table")).toHaveCount(0);
+  await touched.getByRole("link", { name: /docs\/guide\/intro\.md/ }).click();
+  await expect(
+    preview.getByRole("button", { name: "Diff", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(preview.locator("table")).toContainText("More.");
+  // Bands and tall previews share one vertical scroll owner and end at Files.
+  const workspace = page.locator("[data-workspace]");
+  expect(
+    await workspace.evaluate((el) => el.getBoundingClientRect().height),
+  ).toBeGreaterThanOrEqual(896);
+  await preview.locator("table").evaluate((el) => {
+    el.style.height = "1400px";
+  });
+  expect(
+    await workspace.evaluate((el) => el.getBoundingClientRect().height),
+  ).toBeGreaterThanOrEqual(1400);
+  // Compare content coordinates: the parent is a viewport, not the full page.
+  expect(
+    await workspace.evaluate((el) => {
+      const scroll = el.parentElement!;
+      const contentBottom =
+        el.getBoundingClientRect().bottom -
+        scroll.getBoundingClientRect().top +
+        scroll.scrollTop;
+      return Math.abs(scroll.scrollHeight - contentBottom);
+    }),
+  ).toBeLessThanOrEqual(1);
+  await preview.locator("table").evaluate((el) => {
+    el.style.removeProperty("height");
+  });
   await expect(pulse.locator("ul").first()).toHaveText(beforePulse, {
     useInnerText: true,
   });
@@ -237,6 +292,7 @@ test("repository files default to content and retain selected commit context", a
   await page.getByRole("link", { name: "Back to now" }).click();
   await expect(page).not.toHaveURL(/at=/);
   await expect(page).not.toHaveURL(/path=/);
+  await expect(page.locator("[data-touched]")).toHaveCount(0);
   await expect(page).toHaveURL(/ref=feature/);
   await expect(pulse.locator("ul").first()).toHaveText(beforePulse, {
     useInnerText: true,
@@ -254,6 +310,22 @@ test("repository files default to content and retain selected commit context", a
   await expect(preview).toContainText("Start here.");
   await expect(preview).not.toContainText("More.");
   await expect(touched.getByRole("link")).toHaveCount(2);
+  await touched.getByRole("link", { name: /README\.md/ }).click();
+  await expect(
+    preview.getByRole("button", { name: "Diff", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(preview.locator("table .hljs-section")).toContainText("# Demo");
+  await expect(root.getByRole("link", { name: /README\.md/ })).toHaveAttribute(
+    "data-touched",
+    "true",
+  );
+  await root.getByRole("link", { name: /README\.md/ }).click();
+  await expect(
+    preview.getByRole("button", { name: "File", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    preview.getByRole("heading", { name: "Demo", exact: true }),
+  ).toBeVisible();
 });
 
 test("bands fold from the far edge; Pulse day lists stay bounded and stable", async ({

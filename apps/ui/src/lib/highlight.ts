@@ -119,3 +119,24 @@ export async function highlightBlocks(root: HTMLElement): Promise<void> {
     if (html !== undefined) block.innerHTML = html;
   }
 }
+
+/** Highlight diff lines with the file grammar; keep the source view's size cap. */
+export async function highlightDiff(
+  hunks: import("./diff.ts").Hunk[],
+  language?: string,
+): Promise<(string | undefined)[][] | undefined> {
+  if (
+    !language ||
+    hunks.reduce(
+      (size, h) => size + h.lines.reduce((n, l) => n + l.text.length + 1, 0),
+      0,
+    ) >
+      256 * 1024
+  )
+    return undefined;
+  return Promise.all(
+    hunks.map((h) =>
+      Promise.all(h.lines.map((l) => highlight(l.text, language))),
+    ),
+  );
+}

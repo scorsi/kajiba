@@ -4,6 +4,8 @@ export function repoQuery(
   next: Record<string, string | null>,
 ) {
   const u = new URLSearchParams(q.toString());
+  // Every navigation chooses its mode, even when it targets the current path.
+  if ("path" in next || "at" in next || "ref" in next) u.delete("view");
   if (next.at && !q.get("at")) u.set("scope", q.get("path") ?? "");
   if (next.at === null) {
     const scope = q.get("scope") ?? q.get("path") ?? "";
@@ -39,4 +41,20 @@ export function localDateTime(date: Date | undefined): string {
       timeZoneName: "short",
     }) ?? ""
   );
+}
+
+export const fileViewMode = (q: Pick<URLSearchParams, "get">) =>
+  q.get("view") === "diff" ? "diff" : "file";
+
+/** Changed files and each ancestor, using exact paths rather than prefixes. */
+export function touchedPaths(
+  changes: readonly { path: string }[],
+): Set<string> {
+  const paths = new Set<string>();
+  for (const { path } of changes) {
+    const parts = path.split("/");
+    for (let i = 1; i <= parts.length; i++)
+      paths.add(parts.slice(0, i).join("/"));
+  }
+  return paths;
 }

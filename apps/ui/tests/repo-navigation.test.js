@@ -69,3 +69,61 @@ test("repository navigation preserves ref, history scope, day and band state", a
     }),
   );
 });
+
+test("file mode follows changed-file and normal navigation, including the same path", async (t) => {
+  const vite = await createServer({
+    configFile: false,
+    server: { middlewareMode: true, ws: false },
+  });
+  t.after(() => vite.close());
+  const { repoQuery, fileViewMode, touchedPaths } = await vite.ssrLoadModule(
+    "/src/lib/repo-navigation.ts",
+  );
+  const initial = new URLSearchParams("at=abc&path=src/main.rs&files=1");
+  assert.equal(fileViewMode(initial), "file");
+  const diff = new URLSearchParams(
+    repoQuery(initial, { path: "src/main.rs", view: "diff" }).slice(1),
+  );
+  assert.equal(fileViewMode(diff), "diff");
+  for (const next of [
+    { path: "src/main.rs" },
+    { path: "README.md" },
+    { at: "def" },
+    { at: null },
+    { ref: "main" },
+  ]) {
+    assert.equal(
+      fileViewMode(new URLSearchParams(repoQuery(diff, next).slice(1))),
+      "file",
+    );
+  }
+  assert.equal(
+    fileViewMode(new URLSearchParams(repoQuery(diff, { files: "0" }).slice(1))),
+    "diff",
+  );
+  assert.equal(fileViewMode(new URLSearchParams("view=unknown")), "file");
+  const paths = touchedPaths([
+    { path: "src/nested/main.rs" },
+    { path: "src/lib.rs" },
+    { path: "README.md" },
+    { path: "deleted/file" },
+  ]);
+  assert.deepEqual([...paths].sort(), [
+    "README.md",
+    "deleted",
+    "deleted/file",
+    "src",
+    "src/lib.rs",
+    "src/nested",
+    "src/nested/main.rs",
+  ]);
+  for (const path of [
+    "",
+    "sr",
+    "src/other.rs",
+    "src/nest",
+    "src/nested/main.rs.bak",
+  ])
+    assert.equal(paths.has(path), false);
+  assert.equal(touchedPaths([]).size, 0);
+});
