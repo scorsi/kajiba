@@ -50,6 +50,13 @@ impl GateService for Gate {
                 details,
             ));
         }
+        // Re-introducing the live generation changes nothing, so reads stay available while
+        // maintenance freezes completion and reconnect writes (0165, 0166).
+        if self.generation.lock().unwrap().as_ref() == Some(&request.generation) {
+            return Ok(Response::new(HelloResponse {
+                version: env!("CARGO_PKG_VERSION").into(),
+            }));
+        }
         let _completion = self.maintenance.completion().await;
         let _writer = self.writer.lock().await;
         let mut generation = self.generation.lock().unwrap();

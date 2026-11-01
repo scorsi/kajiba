@@ -1779,6 +1779,17 @@ async fn maintenance_waits_for_session_exit_before_quiescence() {
         assert!(admin.gate.quiescent());
         let guard = drain.await.unwrap();
         assert!(admin.maintenance.admit().is_err());
+        // A same-generation handshake (every read's key lookup) does not wait for the frozen barrier.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            gate.hello(Request::new(HelloRequest {
+                version: env!("CARGO_PKG_VERSION").into(),
+                generation: "00000000000000000000000001".into(),
+            })),
+        )
+        .await
+        .expect("hello must not block")
+        .unwrap();
         drop(guard);
     }
     assert!(admin.maintenance.admit().is_ok());
