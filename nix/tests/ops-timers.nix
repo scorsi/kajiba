@@ -43,10 +43,9 @@ import ./ci-common.nix args {
         assert forge.succeed("systemctl show -P Result kajiba-dump.service").strip() == "success"
 
     with subtest("timer invokes the admitted dump command as the server identity"):
-        forge.wait_for_unit("kajiba-dump.timer")
+        # The one-shot OnActiveSec timer is inactive once elapsed, so wait for its dump instead.
         forge.wait_until_succeeds("test -n \"$(find /var/lib/kajiba-dumps -maxdepth 1 -name 'dump-*' -type d -print -quit)\"")
         forge.wait_until_succeeds("test \"$(systemctl show -P ActiveState kajiba-dump.service)\" = inactive")
-        forge.succeed("systemctl stop kajiba-dump.timer")
         assert len(dumps()) == 1
         first = dumps()[0]
         assert forge.succeed(f"stat -c '%U:%G:%a' {first}").strip() == "kajiba-server:kajiba-server:700"
