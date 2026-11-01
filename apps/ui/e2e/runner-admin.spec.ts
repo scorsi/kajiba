@@ -62,12 +62,16 @@ test("the administrator sees the runner, its current run and the server", async 
   await expect(server).toContainText("Version");
   await expect(server).toContainText("generation 1");
 
-  // The shell's runner summary.
+  // Runners stay in Administration, outside the shell overview (0150).
   await page.goto("/?drawer=1");
+  const overview = page.getByRole("region", { name: "kajiba overview" });
   await expect(
-    page.getByRole("link", { name: "Administration" }),
+    overview.getByRole("link", { name: "Administration" }),
   ).toBeVisible();
-  await expect(page.locator('a[href="/-/admin#runner-e2e"]')).toBeVisible();
+  await expect(
+    overview.getByRole("region", { name: "Runners", exact: true }),
+  ).toHaveCount(0);
+  await expect(overview.locator('a[href^="/-/admin#runner"]')).toHaveCount(0);
 });
 
 test("another user gets 403 and no administration entry", async ({ page }) => {

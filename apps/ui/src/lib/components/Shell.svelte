@@ -2,8 +2,8 @@
 	The app shell: the whole forge as one foldable band on top of every page.
 	Folded (default): a 36 px strip — ▸ kajiba, where you are, user, theme.
 	Unfolded (`?drawer=1`): it takes the whole screen instead of the page —
-	repositories (30-day activity, last change, last CI state), pages,
-	runners. Picking anything folds it again (the link drops `drawer`).
+	repositories (30-day activity, last change, last CI state) and pages.
+	Picking anything folds it again (the link drops `drawer`).
 	Where you are is derived from the route; `location` overrides it.
 -->
 <script lang="ts">
@@ -11,23 +11,15 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import type { Snippet } from 'svelte';
-	import {
-		Code,
-		RunnerState,
-		getViewer,
-		logout,
-		listCommits,
-		listRunners,
-		type Run
-	} from '#lib/api.ts';
+	import { Code, getViewer, logout, listCommits, type Run } from '#lib/api.ts';
 	import Icon from '#lib/components/Icon.svelte';
 	import RunBadge from '#lib/components/RunBadge.svelte';
-	import RunnerStateDot from '#lib/components/RunnerState.svelte';
 	import StateView from '#lib/components/StateView.svelte';
 	import ThemeToggle from '#lib/components/ThemeToggle.svelte';
 	import { relativeTime, toDate } from '#lib/format.ts';
 	import { allRepos, recentRuns } from '#lib/loaders.ts';
 	import { resource } from '#lib/resource.svelte.ts';
+	import { isCurrentPage } from '#lib/shell-navigation.ts';
 
 	let { location, children }: { location?: string; children: Snippet } = $props();
 
@@ -38,13 +30,6 @@
 			viewer.error !== null &&
 			'code' in viewer.error &&
 			viewer.error.code === Code.Unauthenticated
-	);
-	// Runners are for administrators (ADR 0139).
-	const runners = resource(async () =>
-		(await getViewer()).admin ? (await listRunners()).runners : undefined
-	);
-	const online = $derived(
-		(runners.data ?? []).filter((r) => r.state !== RunnerState.OFFLINE).length
 	);
 
 	async function signOut() {
@@ -72,7 +57,7 @@
 		}
 	});
 	const repoKey = $derived(
-		page.route.id === '/(app)/[owner=slug]/[name=slug]'
+		page.params.owner && page.params.name
 			? `${page.params.owner}/${page.params.name}`
 			: ''
 	);
@@ -119,7 +104,7 @@
 		});
 	});
 	const navLink =
-		'rounded-sm px-2 py-1 text-[0.8125rem] text-fg-muted hover:bg-surface-2 hover:text-fg';
+		'rounded-sm px-2 py-1 text-[0.8125rem] text-fg-muted hover:bg-surface-2 hover:text-fg aria-[current=page]:bg-accent-soft aria-[current=page]:text-accent aria-[current=page]:font-semibold';
 </script>
 
 <div class="flex h-dvh flex-col bg-bg text-fg">
@@ -129,23 +114,28 @@
 		>Skip to content</a
 	>
 	<header class="shrink-0 border-b border-border bg-surface">
-		<div class="flex h-9 items-center gap-3 px-3 text-xs sm:px-4">
-			<a
-				href={drawerHref(!drawerOpen)}
-				data-sveltekit-noscroll
+		<div class="flex h-9 items-center gap-3 pr-3 text-xs sm:pr-4">
+			<button
+				type="button"
+				onclick={() => goto(drawerHref(!drawerOpen), { reset: false })}
 				aria-expanded={drawerOpen}
-				aria-label="{drawerOpen ? 'Fold' : 'Unfold'} the kajiba overview"
-				class="flex items-center gap-1.5 text-fg-subtle hover:text-fg"
+				aria-controls={drawerOpen ? 'overview' : undefined}
+				class="flex h-full min-w-0 flex-1 items-center gap-3 px-3 text-left text-fg-subtle hover:bg-surface-2 hover:text-fg sm:px-4"
 			>
 				<span class="w-3" aria-hidden="true">{drawerOpen ? '▾' : '▸'}</span>
 				<span class="text-[0.8125rem] font-semibold tracking-tight text-fg">kajiba</span>
-			</a>
-			{#if here.text}<span class="truncate text-fg-muted {here.mono ? 'font-mono' : ''}"
-					>{here.text}</span
-				>{/if}
+				{#if here.text}
+					<span aria-hidden="true" class="truncate text-fg-muted {here.mono ? 'font-mono' : ''}"
+						>{here.text}</span
+					>
+				{/if}
+				<span class="ml-auto shrink-0 rounded-sm border border-border px-1.5 py-0.5 text-fg-muted"
+					>{drawerOpen ? 'Close' : 'Open'} overview</span>
+			</button>
 			<div class="ml-auto flex items-center gap-1">
 				<a
 					href="/-/account"
+					aria-current={isCurrentPage(page.url.pathname, '/-/account') ? 'page' : undefined}
 					class="flex items-center gap-1.5 {navLink}"
 					><Icon name="user" size={14} /><span class="sr-only sm:not-sr-only">{viewer.data?.user ?? 'Account'}</span
 					></a
@@ -166,9 +156,13 @@
 
 	{#if drawerOpen}
 		<!-- Unfolded: the forge overview takes the whole screen; picking anything folds it. -->
-		<section class="min-h-0 flex-1 overflow-y-auto bg-surface" aria-label="kajiba overview">
+		<section
+			id="overview"
+			class="min-h-0 flex-1 overflow-y-auto bg-surface"
+			aria-label="kajiba overview"
+		>
 			<div
-				class="grid content-start gap-8 px-3 py-6 sm:px-6 lg:grid-cols-[minmax(0,1fr)_14rem_14rem]"
+				class="grid content-start gap-8 px-3 py-6 sm:px-6 lg:grid-cols-[minmax(0,1fr)_14rem]"
 			>
 				<section aria-label="Repositories">
 					<h2 class="mb-2 text-xs tracking-wide text-fg-subtle uppercase">Repositories</h2>
@@ -180,7 +174,7 @@
 								<a
 									href="/{key}"
 									aria-current={key === repoKey ? 'page' : undefined}
-									class="grid grid-cols-[minmax(0,10rem)_1fr_auto] items-center gap-4 py-1.5 text-[0.8125rem] hover:bg-surface-2 sm:grid-cols-[minmax(0,12rem)_8rem_1fr_auto]"
+									class="grid grid-cols-[minmax(0,10rem)_1fr_auto] items-center gap-4 py-1.5 text-[0.8125rem] hover:bg-surface-2 aria-[current=page]:bg-accent-soft aria-[current=page]:text-accent aria-[current=page]:font-semibold sm:grid-cols-[minmax(0,12rem)_8rem_1fr_auto]"
 								>
 									<span
 										class="truncate font-mono text-xs {o.repo.archived
@@ -214,37 +208,13 @@
 						{#each PAGES as p (p.href)}<li>
 								<a
 									href={p.href}
-									aria-current={page.url.pathname === p.href ? 'page' : undefined}
+									aria-current={isCurrentPage(page.url.pathname, p.href) ? 'page' : undefined}
 									class="flex items-center gap-2 {navLink}"
 									><Icon name={p.icon} size={13} />{p.label}</a
 								>
 							</li>{/each}
 					</ul>
 				</nav>
-				{#if runners.data}
-				<section aria-label="Runners">
-					<h2 class="mb-2 text-xs tracking-wide text-fg-subtle uppercase">
-						<a href="/-/admin#runners" class="hover:text-fg">Runners</a>
-						<span class="normal-case">· {online}/{runners.data.length} online</span>
-					</h2>
-					<ul class="space-y-1.5 text-xs">
-						{#each runners.data as r (r.name)}
-							<li class="flex items-center gap-2">
-								<RunnerStateDot state={r.state} />
-								<a href="/-/admin#runner-{r.name}" class="font-mono text-fg-muted hover:text-fg"
-									>{r.name}</a
-								>
-								<span class="ml-auto text-fg-subtle"
-									>{#if r.currentRun}<a
-											href="/-/runs/{r.currentRun.id}"
-											class="text-accent hover:underline">#{r.currentRun.short}</a
-										>{:else}{r.state === RunnerState.OFFLINE ? 'offline' : 'idle'}{/if}</span
-								>
-							</li>
-						{/each}
-					</ul>
-				</section>
-				{/if}
 			</div>
 		</section>
 	{:else}

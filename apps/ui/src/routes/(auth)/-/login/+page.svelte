@@ -32,8 +32,11 @@
 
 <svelte:head><title>Sign in · kajiba</title></svelte:head>
 
-<section class="border-b border-border bg-surface px-4 py-8 sm:px-6 sm:py-12" aria-label="Sign in">
-	<div class="max-w-md">
+<div class="flex flex-1 items-center justify-center p-4 sm:p-6">
+	<section
+		class="w-full max-w-md rounded-md border border-border bg-surface p-6 sm:p-8"
+		aria-label="Sign in"
+	>
 		<p class="text-xs tracking-wide text-fg-subtle uppercase">▾ Sign in</p>
 		<h1 class="mt-1 text-2xl font-semibold tracking-tight">Welcome back</h1>
 		<p class="mt-1 text-[0.8125rem] text-fg-muted">
@@ -61,12 +64,8 @@
 				Then back to <span class="font-mono text-fg-muted">{next}</span>
 			</p>
 		{/if}
-	</div>
-</section>
-
-<p
-	class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-4 py-2 text-xs text-fg-muted sm:px-6"
->
-	<span class="tracking-wide text-fg-subtle uppercase">No account yet</span>
-	<span>Accounts are declared by the administrator, who sends you a one-time enrolment link.</span>
-</p>
+		<p class="mt-6 text-xs text-fg-muted">
+			Accounts are created through an administrator's enrollment link.
+		</p>
+	</section>
+</div>
