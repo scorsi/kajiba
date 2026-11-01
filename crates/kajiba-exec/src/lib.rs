@@ -6,6 +6,25 @@ use tokio::{process::Command, sync::mpsc};
 /// ADR 0105: a log chunk holds at most 64 KiB.
 pub const CHUNK: usize = 64 * 1024;
 
+/// Output stamped at the pipe read, before channel backpressure (ADR 0164).
+#[derive(Debug)]
+pub struct Log {
+    pub data: Vec<u8>,
+    pub produced_at_ms: i64,
+}
+
+impl Log {
+    pub fn new(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            produced_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64,
+        }
+    }
+}
+
 /// An attempt's sources, checked out at its commit.
 pub struct Job<'a> {
     pub source: &'a Path,
@@ -36,7 +55,7 @@ pub trait Executor: Send + Sync + 'static {
         &self,
         env: &Self::Env,
         index: usize,
-        log: mpsc::Sender<Vec<u8>>,
+        log: mpsc::Sender<Log>,
         cancel: impl Future<Output = ()> + Send,
     ) -> impl Future<Output = Result<Exit, String>> + Send;
 
@@ -101,7 +120,7 @@ impl Executor for Nix {
         &self,
         flake: &Flake,
         _: usize,
-        log: mpsc::Sender<Vec<u8>>,
+        log: mpsc::Sender<Log>,
         cancel: impl Future<Output = ()> + Send,
     ) -> Result<Exit, String> {
         if flake.checks.is_empty() {
@@ -136,7 +155,7 @@ impl Executor for Nix {
 /// cancellation kills the whole group.
 pub async fn spawn(
     mut command: Command,
-    log: mpsc::Sender<Vec<u8>>,
+    log: mpsc::Sender<Log>,
     cancel: impl Future<Output = ()> + Send,
 ) -> Result<Exit, String> {
     let program = command
@@ -159,7 +178,10 @@ pub async fn spawn(
     let reading = tokio::task::spawn_blocking(move || {
         let mut buffer = vec![0; CHUNK];
         while let Ok(read @ 1..) = reader.read(&mut buffer) {
-            if log.blocking_send(buffer[..read].to_vec()).is_err() {
+            if log
+                .blocking_send(Log::new(buffer[..read].to_vec()))
+                .is_err()
+            {
                 break;
             }
         }

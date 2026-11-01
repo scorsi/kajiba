@@ -420,6 +420,7 @@ impl RunService for Fake {
             let stop = (offset + 4).min(end);
             events.push(event(Event::Log(LogBytes {
                 offset,
+                produced_at_ms: 0,
                 data: state.log[offset as usize..stop as usize].to_vec(),
             })));
             offset = stop;

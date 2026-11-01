@@ -1,11 +1,12 @@
 use super::*;
 use std::{path::PathBuf, sync::OnceLock, time::Duration};
 
-const SCRIPTS: [(&str, &str); 5] = [
+const SCRIPTS: [(&str, &str); 6] = [
     (
         "succeeds",
         "printf 'args:'; printf ' %s' \"$@\"; echo; echo warning >&2; exit 0",
     ),
+    ("timed", "echo first; sleep 1; echo second"),
     ("fails", "echo 'error: check failed' >&2; exit 3"),
     // About 300 KB of numbered lines, more than four chunks.
     (
@@ -77,11 +78,11 @@ async fn build(
         "build-checks"
     };
     assert_eq!(steps, [step]);
-    let (log, mut received) = mpsc::channel(4);
+    let (log, mut received) = mpsc::channel::<Log>(4);
     let collect = async {
         let mut chunks = Vec::new();
         while let Some(chunk) = received.recv().await {
-            chunks.push(chunk);
+            chunks.push(chunk.data);
         }
         chunks
     };
@@ -157,12 +158,12 @@ async fn cancellation_kills_the_whole_process_group() {
     };
     let mut command = Command::new(&nix.program);
     command.env("MARKER", &marker);
-    let (log, mut received) = mpsc::channel(4);
+    let (log, mut received) = mpsc::channel::<Log>(4);
     let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
     let run = tokio::spawn(spawn(command, log, async {
         let _ = cancelled.await;
     }));
-    assert_eq!(received.recv().await.unwrap(), b"started\n");
+    assert_eq!(received.recv().await.unwrap().data, b"started\n");
     cancel.send(()).unwrap();
     let exit = tokio::time::timeout(Duration::from_secs(5), run)
         .await
@@ -192,4 +193,29 @@ async fn a_missing_program_is_an_error() {
         .unwrap();
     let exit = nix.run(&flake, 0, log, std::future::pending()).await;
     assert!(exit.unwrap_err().starts_with("/nonexistent/nix: "));
+}
+
+#[tokio::test]
+async fn chunks_are_stamped_when_read_before_the_receiver_consumes_them() {
+    let before = Log::new(Vec::new()).produced_at_ms;
+    let (log, mut output) = mpsc::channel::<Log>(4);
+    let command = Command::new(scripts().join("timed"));
+    assert_eq!(
+        spawn(command, log, std::future::pending()).await.unwrap(),
+        Exit::Code(0)
+    );
+    let mut chunks = Vec::new();
+    while let Some(chunk) = output.recv().await {
+        chunks.push(chunk);
+    }
+    assert!(chunks.len() >= 2);
+    assert!(chunks[0].produced_at_ms >= before);
+    assert!(chunks.last().unwrap().produced_at_ms - chunks[0].produced_at_ms >= 900);
+    assert_eq!(
+        chunks
+            .iter()
+            .flat_map(|c| c.data.iter().copied())
+            .collect::<Vec<_>>(),
+        b"first\nsecond\n"
+    );
 }

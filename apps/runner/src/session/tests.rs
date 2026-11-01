@@ -116,6 +116,7 @@ fn chunk(sequence: u64, data: &str) -> Message {
         attempt_id: "A1".into(),
         sequence,
         step_index: 0,
+        produced_at_ms: 1234,
         data: data.into(),
     })
 }
@@ -143,7 +144,7 @@ async fn logs_and_results_are_kept_until_acknowledged_and_resent_after_a_continu
     let (attempts, metrics) = (Attempts::default(), Metrics::default());
     attempts.accept("A1");
     for data in ["one", "two", "three"] {
-        attempts.log("A1", 0, data.into()).await;
+        attempts.log("A1", 0, data.into(), 1234).await;
     }
     assert_eq!(attempts.reconcile(), ["A1"]);
     let (outbound, mut sent) = mpsc::unbounded_channel();
@@ -205,8 +206,8 @@ async fn completion_during_reconnection_waits_for_log_replay() {
     for finish_before_continue in [true, false] {
         let (attempts, metrics) = (Attempts::default(), Metrics::default());
         attempts.accept("A1");
-        attempts.log("A1", 0, b"one".to_vec()).await;
-        attempts.log("A1", 0, b"two".to_vec()).await;
+        attempts.log("A1", 0, b"one".to_vec(), 1234).await;
+        attempts.log("A1", 0, b"two".to_vec(), 1234).await;
         assert_eq!(attempts.reconcile(), ["A1"]);
         let (outbound, mut sent) = mpsc::unbounded_channel();
         attempts.attach(Some(outbound));
@@ -235,7 +236,7 @@ async fn completion_during_reconnection_waits_for_log_replay() {
             ..Default::default()
         };
         if finish_before_continue {
-            attempts.log("A1", 0, b"three".to_vec()).await;
+            attempts.log("A1", 0, b"three".to_vec(), 1234).await;
             attempts.finish(result.clone(), &metrics);
         }
         assert!(sent.try_recv().is_err());
@@ -245,7 +246,7 @@ async fn completion_during_reconnection_waits_for_log_replay() {
             },
         ));
         if !finish_before_continue {
-            attempts.log("A1", 0, b"three".to_vec()).await;
+            attempts.log("A1", 0, b"three".to_vec(), 1234).await;
             attempts.finish(result.clone(), &metrics);
         }
         assert!(sent.try_recv().is_err());
@@ -355,7 +356,7 @@ async fn reconnection_resumes_in_flight_attempts_with_backoff() {
     let attempts = Attempts::default();
     attempts.accept("A1");
     for data in ["one", "two", "three"] {
-        attempts.log("A1", 0, data.into()).await;
+        attempts.log("A1", 0, data.into(), 1234).await;
     }
     let (jobs, mut handed) = mpsc::channel(4);
     let (paused, mut pauses) = mpsc::unbounded_channel();
@@ -460,9 +461,11 @@ async fn full_log_window_backpressures_until_acknowledged_or_cancelled() {
     attempts.accept("A1");
     // A disconnected build cannot retain more than the window.
     for _ in 0..LOG_WINDOW {
-        attempts.log("A1", 0, vec![0; kajiba_exec::CHUNK]).await;
+        attempts
+            .log("A1", 0, vec![0; kajiba_exec::CHUNK], 1234)
+            .await;
     }
-    let blocked = attempts.log("A1", 0, b"next".to_vec());
+    let blocked = attempts.log("A1", 0, b"next".to_vec(), 1234);
     tokio::pin!(blocked);
     assert!(
         tokio::time::timeout(Duration::from_millis(10), &mut blocked)
@@ -482,7 +485,7 @@ async fn full_log_window_backpressures_until_acknowledged_or_cancelled() {
     sent.try_recv().unwrap();
     tokio::time::timeout(
         Duration::from_secs(1),
-        attempts.log("A2", 0, b"other".to_vec()),
+        attempts.log("A2", 0, b"other".to_vec(), 1234),
     )
     .await
     .unwrap();
@@ -512,7 +515,7 @@ async fn full_log_window_backpressures_until_acknowledged_or_cancelled() {
     );
 
     // Cancellation must release the forwarding task even without an acknowledgment.
-    let blocked = attempts.log("A1", 0, b"cancelled".to_vec());
+    let blocked = attempts.log("A1", 0, b"cancelled".to_vec(), 1234);
     tokio::pin!(blocked);
     assert!(
         tokio::time::timeout(Duration::from_millis(10), &mut blocked)
@@ -541,8 +544,8 @@ async fn restart_replays_identical_chunks_after_the_servers_authoritative_ack() 
     };
     let mut state = State::new(&root, &assignment, root.join("scratch").join(id)).unwrap();
     std::fs::write(&state.log, b"acceptedpendingnew").unwrap();
-    state.index(8).unwrap();
-    state.index(7).unwrap();
+    state.index(8, 1234).unwrap();
+    state.index(7, 5678).unwrap();
     // Die before receiving the ack for sequence 1. Re-adopt both durable boundaries.
     let attempts = Attempts::default();
     let disk = Arc::new(Mutex::new(State::load(&root, id).unwrap()));
@@ -572,15 +575,19 @@ async fn restart_replays_identical_chunks_after_the_servers_authoritative_ack() 
                 attempt_id: id.into(),
                 sequence: 2,
                 step_index: 0,
+                produced_at_ms: 5678,
                 data: b"pending".to_vec()
             }),
         ]
     );
-    attempts.log(id, 0, b"new".to_vec()).await;
+    attempts.log(id, 0, b"new".to_vec(), 1234).await;
     let Message::LogChunk(chunk) = sent.try_recv().unwrap().message.unwrap() else {
         panic!("chunk expected")
     };
-    assert_eq!((chunk.sequence, chunk.data), (3, b"new".to_vec()));
+    assert_eq!(
+        (chunk.sequence, chunk.data, chunk.produced_at_ms),
+        (3, b"new".to_vec(), 1234)
+    );
     let saved = State::load(&root, id).unwrap();
     assert_eq!(
         (saved.acked_sequence, saved.acked_offset, saved.pending),

@@ -709,6 +709,7 @@ impl Runners {
                         sequence: chunk.sequence,
                         step: chunk.step_index,
                         data: &chunk.data,
+                        produced_at_ms: chunk.produced_at_ms,
                     },
                     now,
                 )

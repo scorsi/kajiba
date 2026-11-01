@@ -26,6 +26,8 @@ pub struct State {
     pub acked_offset: u64,
     /// End offsets of chunks durably indexed before transmission, at most one window.
     pub pending: Vec<u64>,
+    #[serde(default)]
+    pub pending_times: Vec<i64>,
 }
 
 pub fn atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -62,8 +64,10 @@ impl State {
             acked_sequence: 0,
             acked_offset: 0,
             pending: Vec::new(),
+            pending_times: Vec::new(),
         };
         fs::File::create(&state.log).map_err(|e| e.to_string())?;
+        fs::File::create(state.dir().join("output.times")).map_err(|e| e.to_string())?;
         state.save()?;
         Ok(state)
     }
@@ -83,8 +87,9 @@ impl State {
     pub fn sequence(&self) -> u64 {
         self.acked_sequence + self.pending.len() as u64
     }
-    pub fn index(&mut self, size: usize) -> Result<(), String> {
+    pub fn index(&mut self, size: usize, produced_at_ms: i64) -> Result<(), String> {
         self.pending.push(self.offset() + size as u64);
+        self.pending_times.push(produced_at_ms);
         self.save()
     }
     pub fn acknowledge(&mut self, sequence: u64) -> Result<(), String> {
@@ -97,6 +102,7 @@ impl State {
         }
         self.acked_offset = self.pending[count - 1];
         self.pending.drain(..count);
+        self.pending_times.drain(..count);
         self.acked_sequence = sequence;
         self.save()
     }
@@ -123,10 +129,14 @@ impl State {
             return Err("invalid attempt id".into());
         }
         let dir = root.join("jobs").join(id);
-        let state: Self =
+        let mut state: Self =
             serde_json::from_slice(&fs::read(dir.join("state.json")).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
-        if state.attempt != id
+        if state.pending_times.is_empty() {
+            state.pending_times.resize(state.pending.len(), 0);
+        }
+        if state.pending_times.len() != state.pending.len()
+            || state.attempt != id
             || state.unit != format!("kajiba-job-{id}.service")
             || state.log != dir.join("output.log")
             || state.source != root.join("scratch").join(id)
@@ -169,10 +179,10 @@ mod tests {
         };
         let mut state = State::new(&root, &assignment, root.join("scratch").join(id)).unwrap();
         fs::write(&state.log, b"first\nsecond\nthird\n").unwrap();
-        state.index(6).unwrap();
-        state.index(7).unwrap();
+        state.index(6, 1234).unwrap();
+        state.index(7, 1234).unwrap();
         state.acknowledge(1).unwrap();
-        state.index(6).unwrap();
+        state.index(6, 1234).unwrap();
         let mut adopted = State::load(&root, id).unwrap();
         assert_eq!(
             adopted.chunks().unwrap(),
@@ -189,6 +199,16 @@ mod tests {
             [b"third\n".to_vec()]
         );
         assert!(adopted.acknowledge(4).is_err());
+        // Pre-timestamp records deserialize without changing their byte boundaries.
+        let mut legacy = serde_json::to_value(&adopted).unwrap();
+        legacy.as_object_mut().unwrap().remove("pending_times");
+        atomic(
+            &adopted.dir().join("state.json"),
+            &serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(State::load(&root, id).unwrap().pending_times, [0]);
+
         adopted.source = root.join("outside");
         adopted.save().unwrap();
         assert!(State::load(&root, id).is_err());

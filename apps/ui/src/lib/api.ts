@@ -987,7 +987,7 @@ export async function rerunRun(id: string): Promise<string> {
 }
 
 export interface RunLogLine {
-  /** Seconds since the step started (the server does not time lines: 0). */
+  /** Seconds since the attempt started; 0 when the production time is unknown. */
   offsetSeconds: number;
   text: string;
   /** `err` = an `error:` line; `cmd` = a command the runner echoed. */
@@ -1043,9 +1043,18 @@ export async function watchRun(req: {
           failures = 0;
           const e = m.event;
           if (e.case === "section" && e.value.attempt)
-            log.section(e.value.attempt.publicId, toStep(e.value.attempt));
+            log.section(
+              e.value.attempt.publicId,
+              toStep(e.value.attempt),
+              Number(e.value.attempt.startedAt?.seconds ?? 0n) * 1000 +
+                (e.value.attempt.startedAt?.nanos ?? 0) / 1e6,
+            );
           else if (e.case === "log")
-            log.bytes(Number(e.value.offset), e.value.data);
+            log.bytes(
+              Number(e.value.offset),
+              e.value.data,
+              Number(e.value.producedAtMs),
+            );
           else if (e.case === "finished") return toRun(e.value, req.repo);
           else continue;
           changed();

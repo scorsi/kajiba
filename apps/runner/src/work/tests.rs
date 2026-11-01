@@ -22,13 +22,16 @@ impl Executor for Fake {
         &self,
         (source, _): &(PathBuf, Option<String>),
         _: usize,
-        log: mpsc::Sender<Vec<u8>>,
+        log: mpsc::Sender<kajiba_exec::Log>,
         cancel: impl Future<Output = ()> + Send,
     ) -> Result<Exit, String> {
         let file = std::fs::read_to_string(source.join("file")).unwrap();
-        log.send(format!("file={file}\n").into_bytes())
-            .await
-            .unwrap();
+        log.send(kajiba_exec::Log {
+            data: format!("file={file}\n").into_bytes(),
+            produced_at_ms: 1234,
+        })
+        .await
+        .unwrap();
         match file.as_str() {
             "1" => Ok(Exit::Code(0)),
             "2" => Ok(Exit::Code(2)),
@@ -112,6 +115,7 @@ impl Running {
         Message::LogChunk(kajiba_proto::runner::v1::LogChunk {
             attempt_id: id.into(),
             sequence,
+            produced_at_ms: 1234,
             step_index: 0,
             data: data.into(),
         })

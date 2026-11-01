@@ -287,6 +287,7 @@ async fn log(
             attempt,
             sequence,
             step: 0,
+            produced_at_ms: sequence as i64 * 1000,
             data,
         },
         10,
@@ -339,6 +340,31 @@ async fn log_chunks_are_appended_in_sequence_only() {
         log(&mut writer, &logs, 1, &attempt, 5, b"five\n").await,
         Some(5)
     );
+    let mut tx = writer.begin().await.unwrap();
+    assert_eq!(
+        append_log(
+            &mut tx,
+            &logs,
+            1,
+            &Chunk {
+                attempt: &attempt,
+                sequence: 1,
+                step: 0,
+                data: b"replayed",
+                produced_at_ms: 99999,
+            },
+            10
+        )
+        .await
+        .unwrap(),
+        Some((5, false))
+    );
+    tx.commit().await.unwrap();
+    let times: Vec<i64> = sqlx::query_scalar("SELECT produced_at_ms FROM log_chunk ORDER BY seq")
+        .fetch_all(&readers)
+        .await
+        .unwrap();
+    assert_eq!(times, [1000, 2000, 3000, 4000, 5000]);
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes, b"one\ntwo\nthree\nfour\nfive\n");
     let index: Vec<(i64, i64, i64)> =
@@ -418,6 +444,7 @@ async fn a_log_past_its_bound_is_truncated_once_and_later_chunks_are_acknowledge
         attempt: &attempt,
         sequence,
         step: 0,
+        produced_at_ms: sequence as i64 * 1000,
         data,
     };
     // The chunk crossing the bound keeps what fits, then the marker line.
@@ -443,6 +470,11 @@ async fn a_log_past_its_bound_is_truncated_once_and_later_chunks_are_acknowledge
         Some((5, false))
     );
     tx.commit().await.unwrap();
+    let times: Vec<i64> = sqlx::query_scalar("SELECT produced_at_ms FROM log_chunk ORDER BY seq")
+        .fetch_all(&readers)
+        .await
+        .unwrap();
+    assert_eq!(times, [1000, 2000]);
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.len() as i64, MAX_LOG + TRUNCATED.len() as i64);
     assert!(bytes.ends_with(&[b"bcd", TRUNCATED].concat()));
@@ -513,6 +545,7 @@ async fn only_running_unexpired_attempts_accept_new_logs_and_steps() {
                         attempt: &attempt,
                         sequence,
                         step: 0,
+                        produced_at_ms: sequence as i64 * 1000,
                         data,
                     },
                     20

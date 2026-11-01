@@ -1943,3 +1943,37 @@ async fn worktree_rerun_counts_concurrent_uploads_against_the_callers_limit() {
     assert_eq!(count, 1);
     assert_eq!(std::fs::read_dir(bundles).unwrap().count(), 1);
 }
+
+#[tokio::test]
+async fn watch_preserves_production_times_at_chunk_boundaries_and_resume_offsets() {
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, ALICE, "alice/ci", &tip)
+        .await
+        .unwrap()
+        .public_id;
+    let progress = Progress::new(&fixture, &runs, &run).await;
+    let attempt = progress.attempt(1).await;
+    progress.log(&attempt, "one\n").await;
+    progress.log(&attempt, "two\n").await;
+    sqlx::query("UPDATE log_chunk SET produced_at_ms = seq * 2000")
+        .execute(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    for follow in [false, true] {
+        let mut events = watch(&runs, ALICE, &run, 2, follow).await.unwrap();
+        assert!(matches!(
+            next(&mut events).await,
+            Some(watch_run_response::Event::Section(_))
+        ));
+        for (offset, bytes, time) in [(2, &b"e\n"[..], 2000), (4, &b"two\n"[..], 4000)] {
+            let Some(watch_run_response::Event::Log(log)) = next(&mut events).await else {
+                panic!("log chunk expected")
+            };
+            assert_eq!(
+                (log.offset, log.data.as_slice(), log.produced_at_ms),
+                (offset, bytes, time)
+            );
+        }
+    }
+}

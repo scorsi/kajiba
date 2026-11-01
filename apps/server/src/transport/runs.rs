@@ -611,6 +611,7 @@ impl Runs {
                     continue;
                 }
                 let path = self.log(&attempt.public_id);
+                let attempt_id = attempt.public_id.clone();
                 if marked.as_deref() != Some(attempt.public_id.as_str()) {
                     marked = Some(attempt.public_id.clone());
                     let section = LogSection {
@@ -626,11 +627,26 @@ impl Runs {
                     position = position.max(stop);
                 }
                 while position < stop {
-                    let data = read_at(&path, position - start, (stop - position).min(LOG_PIECE))
+                    let (end, produced_at_ms): (i64, i64) = sqlx::query_as(
+                        "SELECT offset + length, produced_at_ms FROM log_chunk
+                         WHERE attempt_id = (SELECT id FROM job_attempt WHERE public_id = ?)
+                           AND offset <= ? AND offset + length > ? ORDER BY offset DESC LIMIT 1",
+                    )
+                    .bind(&attempt_id)
+                    .bind((position - start) as i64)
+                    .bind((position - start) as i64)
+                    .fetch_one(self.readers()?)
+                    .await
+                    .map_err(internal)?;
+                    let length = (end as u64 - (position - start))
+                        .min(stop - position)
+                        .min(LOG_PIECE);
+                    let data = read_at(&path, position - start, length)
                         .map_err(|err| Status::internal(format!("log: {err}")))?;
                     let log = LogBytes {
                         offset: position,
                         data,
+                        produced_at_ms,
                     };
                     position += log.data.len() as u64;
                     if !send(watch_run_response::Event::Log(log)).await {

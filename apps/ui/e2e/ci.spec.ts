@@ -94,6 +94,13 @@ test.describe.serial("CI runs", () => {
     await expect(log).toContainText("building 'fmt'");
     await expect(pulse(page)).toContainText("passed", { timeout: 30_000 });
     await expect(pulse(page)).toContainText("e2e-host");
+    const times = () => log.locator("[data-log-time]").allTextContents();
+    await expect
+      .poll(async () => (await times()).some((t) => t !== "0:00"))
+      .toBe(true);
+    const liveTimes = await times();
+    await page.reload();
+    await expect.poll(times).toEqual(liveTimes);
     await expect(
       page.getByRole("region", { name: "What changed" }),
     ).toHaveCount(0);

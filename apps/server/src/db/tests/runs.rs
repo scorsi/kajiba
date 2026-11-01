@@ -386,6 +386,12 @@ async fn migration_12_keeps_ci_rows_and_admits_worktree_runs() {
         .await
         .unwrap();
     migrate(&mut writer, &MIGRATOR).await.unwrap();
+    let legacy_log: (i64, i64, i64, i64, i64) =
+        sqlx::query_as("SELECT seq, step_idx, offset, length, produced_at_ms FROM log_chunk")
+            .fetch_one(&mut writer)
+            .await
+            .unwrap();
+    assert_eq!(legacy_log, (0, 0, 0, 5, 0));
     let modes: Vec<String> = sqlx::query_scalar("SELECT ci_mode FROM repo ORDER BY id")
         .fetch_all(&mut writer)
         .await

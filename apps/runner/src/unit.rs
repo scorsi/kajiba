@@ -129,22 +129,34 @@ async fn tail(
     let mut file = fs::File::open(&snapshot.log).map_err(|e| e.to_string())?;
     file.seek(SeekFrom::Start(snapshot.offset()))
         .map_err(|e| e.to_string())?;
+    let mut times = match fs::File::open(snapshot.dir().join("output.times")) {
+        Ok(file) => Some(file),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err.to_string()),
+    };
     let mut inspect = tokio::time::Instant::now();
     loop {
         let finished = snapshot.dir().join("result.json");
         // Read the terminal marker before EOF: ExecStopPost publishes it after stdout closes.
         let done = finished.exists();
-        let mut data = vec![0; kajiba_exec::CHUNK];
-        let size = file.read(&mut data).map_err(|e| e.to_string())?;
-        if size > 0 {
-            data.truncate(size);
+        let chunk = read_chunk(&mut file, times.as_mut()).map_err(|e| e.to_string())?;
+        if let Some(kajiba_exec::Log {
+            data,
+            produced_at_ms,
+        }) = chunk
+        {
             tokio::select! {
-                () = attempts.log(&snapshot.attempt, 0, data) => {},
+                () = attempts.log(&snapshot.attempt, 0, data, produced_at_ms) => {},
                 _ = &mut cancel => { control("stop", &snapshot.attempt).await?; snapshot.remove(); return Ok((Exit::Cancelled, None)); }
             }
             continue;
         }
         if done {
+            if file.stream_position().map_err(|e| e.to_string())?
+                < file.metadata().map_err(|e| e.to_string())?.len()
+            {
+                return Err("job log has bytes without production times".into());
+            }
             let (result, code, value): (String, String, String) =
                 serde_json::from_slice(&fs::read(&finished).map_err(|e| e.to_string())?)
                     .map_err(|e| e.to_string())?;
@@ -185,6 +197,47 @@ async fn tail(
     }
 }
 
+/// Read one production boundary, including when resuming inside an old boundary.
+fn read_chunk(
+    file: &mut fs::File,
+    mut times: Option<&mut fs::File>,
+) -> std::io::Result<Option<kajiba_exec::Log>> {
+    let offset = file.stream_position()?;
+    let (length, produced_at_ms) = if let Some(times) = times.as_mut() {
+        loop {
+            // A writer may have flushed bytes before publishing the complete time record.
+            if times.metadata()?.len() < times.stream_position()? + 16 {
+                return Ok(None);
+            }
+            let mut record = [0; 16];
+            times.read_exact(&mut record)?;
+            let end = u64::from_le_bytes(record[..8].try_into().unwrap());
+            let time = i64::from_le_bytes(record[8..].try_into().unwrap());
+            if end <= offset {
+                continue;
+            }
+            if end - offset > kajiba_exec::CHUNK as u64 {
+                return Err(std::io::Error::other("invalid log production boundary"));
+            }
+            break ((end - offset) as usize, time);
+        }
+    } else {
+        (kajiba_exec::CHUNK, 0)
+    };
+    let mut data = vec![0; length];
+    let size = if times.is_some() {
+        file.read_exact(&mut data)?;
+        length
+    } else {
+        file.read(&mut data)?
+    };
+    data.truncate(size);
+    Ok((size > 0).then_some(kajiba_exec::Log {
+        data,
+        produced_at_ms,
+    }))
+}
+
 /// Fixed ExecStart of the transient unit. It uses the existing backend and its validation.
 pub async fn execute(root: &Path, id: &str) -> Result<Exit, String> {
     let state = State::load(root, id)?;
@@ -195,17 +248,28 @@ pub async fn execute(root: &Path, id: &str) -> Result<Exit, String> {
         system: &state.system,
         checks: &state.checks,
     })?;
-    let (log, mut output) = mpsc::channel::<Vec<u8>>(4);
+    let (log, mut output) = mpsc::channel::<kajiba_exec::Log>(4);
     // Open as the runner user, never through systemd's privileged stdout-file handling.
     let mut file = fs::OpenOptions::new()
         .append(true)
         .open(&state.log)
         .map_err(|e| e.to_string())?;
+    let mut times =
+        fs::File::create(state.dir().join("output.times")).map_err(|e| e.to_string())?;
+    let mut end = fs::metadata(&state.log).map_err(|e| e.to_string())?.len();
     let forward = async {
         let stdout = &mut file;
         while let Some(data) = output.recv().await {
-            stdout.write_all(&data).map_err(|e| e.to_string())?;
+            stdout.write_all(&data.data).map_err(|e| e.to_string())?;
             stdout.flush().map_err(|e| e.to_string())?;
+            end += data.data.len() as u64;
+            times
+                .write_all(&end.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+            times
+                .write_all(&data.produced_at_ms.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+            times.flush().map_err(|e| e.to_string())?;
         }
         Ok::<_, String>(())
     };
@@ -234,6 +298,50 @@ mod tests {
     use super::*;
     use kajiba_proto::runner::v1::{Assignment, ConnectRequest};
 
+    #[test]
+    fn production_records_wait_for_publication_and_resume_inside_a_boundary() {
+        let dir = std::env::temp_dir().join(format!("kajiba-log-times-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let output = dir.join("output.log");
+        let sidecar = dir.join("output.times");
+        fs::write(&output, b"one\ntwo\n").unwrap();
+        fs::write(&sidecar, 4_u64.to_le_bytes()).unwrap();
+        let mut file = fs::File::open(&output).unwrap();
+        let mut times = fs::File::open(&sidecar).unwrap();
+        assert!(read_chunk(&mut file, Some(&mut times)).unwrap().is_none());
+        assert_eq!(times.stream_position().unwrap(), 0);
+        fs::write(
+            &sidecar,
+            [
+                4_u64.to_le_bytes(),
+                1000_i64.to_le_bytes(),
+                8_u64.to_le_bytes(),
+                6000_i64.to_le_bytes(),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        file.seek(SeekFrom::Start(2)).unwrap();
+        let first = read_chunk(&mut file, Some(&mut times)).unwrap().unwrap();
+        assert_eq!(
+            (first.data.as_slice(), first.produced_at_ms),
+            (&b"e\n"[..], 1000)
+        );
+        let second = read_chunk(&mut file, Some(&mut times)).unwrap().unwrap();
+        assert_eq!(
+            (second.data.as_slice(), second.produced_at_ms),
+            (&b"two\n"[..], 6000)
+        );
+        assert!(read_chunk(&mut file, Some(&mut times)).unwrap().is_none());
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let legacy = read_chunk(&mut file, None).unwrap().unwrap();
+        assert_eq!(
+            (legacy.data.as_slice(), legacy.produced_at_ms),
+            (&b"one\ntwo\n"[..], 0)
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn a_collected_finished_unit_is_adopted_and_tailed_from_its_indexed_offset() {
         let root =
@@ -246,7 +354,12 @@ mod tests {
         };
         let mut state = State::new(&root, &assignment, root.join("scratch").join(id)).unwrap();
         fs::write(&state.log, b"old\nnew\n").unwrap();
-        state.index(4).unwrap();
+        fs::write(
+            state.dir().join("output.times"),
+            [8_u64.to_le_bytes(), 5678_i64.to_le_bytes()].concat(),
+        )
+        .unwrap();
+        state.index(4, 1234).unwrap();
         state.acknowledge(1).unwrap();
         durable::atomic(
             &state.dir().join("result.json"),
@@ -278,7 +391,7 @@ mod tests {
             matches!(&sent[0], Message::StepStatus(step) if step.state() == StepState::Running)
         );
         assert!(
-            matches!(&sent[1], Message::LogChunk(chunk) if chunk.sequence == 2 && chunk.data == b"new\n")
+            matches!(&sent[1], Message::LogChunk(chunk) if chunk.sequence == 2 && chunk.data == b"new\n" && chunk.produced_at_ms == 5678)
         );
         assert!(
             matches!(&sent[2], Message::StepStatus(step) if step.state() == StepState::Succeeded)

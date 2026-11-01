@@ -128,6 +128,7 @@ impl Attempts {
                     sequence: state.acked_sequence + i as u64 + 1,
                     step_index: 0,
                     data,
+                    produced_at_ms: state.pending_times[i],
                 })
                 .collect(),
             disk: Some(disk.clone()),
@@ -142,7 +143,7 @@ impl Attempts {
     }
 
     /// Append log bytes (at most 64 KiB), waiting for acknowledgments when full.
-    pub async fn log(&self, attempt: &str, step_index: u32, data: Vec<u8>) {
+    pub async fn log(&self, attempt: &str, step_index: u32, data: Vec<u8>, produced_at_ms: i64) {
         assert!(data.len() <= kajiba_exec::CHUNK);
         loop {
             let changed = self.1.notified();
@@ -156,7 +157,7 @@ impl Attempts {
                 };
                 if held.unacknowledged.len() < LOG_WINDOW {
                     if let Some(disk) = &held.disk {
-                        persist(disk.lock().unwrap().index(data.len()));
+                        persist(disk.lock().unwrap().index(data.len(), produced_at_ms));
                     }
                     held.next += 1;
                     let chunk = LogChunk {
@@ -164,6 +165,7 @@ impl Attempts {
                         sequence: held.next,
                         step_index,
                         data,
+                        produced_at_ms,
                     };
                     held.unacknowledged.push_back(chunk.clone());
                     inner.send(Message::LogChunk(chunk));

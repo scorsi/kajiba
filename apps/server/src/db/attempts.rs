@@ -336,6 +336,7 @@ pub struct Chunk<'a> {
     pub sequence: u64,
     pub step: u32,
     pub data: &'a [u8],
+    pub produced_at_ms: i64,
 }
 
 /// ADR 0121: an attempt stores at most 64 MiB of log, then this line.
@@ -404,13 +405,14 @@ pub async fn append_log(
     std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(end as u64))?;
     file.write_all(&data)?;
     sqlx::query(
-        "INSERT INTO log_chunk (attempt_id, seq, step_idx, offset, length) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO log_chunk (attempt_id, seq, step_idx, offset, length, produced_at_ms) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(attempt.id)
     .bind(highest + 1)
     .bind(chunk.step)
     .bind(end)
     .bind(data.len() as i64)
+    .bind(chunk.produced_at_ms)
     .execute(&mut *tx)
     .await?;
     Ok(Some((chunk.sequence, truncated)))

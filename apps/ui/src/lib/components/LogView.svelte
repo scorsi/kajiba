@@ -100,6 +100,7 @@
 		>
 		<span
 			class="hidden select-none sm:block {line.stream === 'err' ? 'text-danger' : 'text-fg-subtle'}"
+			data-log-time
 			aria-hidden="true">{clock(line.offsetSeconds)}</span
 		>
 		<span

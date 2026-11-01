@@ -47,3 +47,41 @@ test("run log decoding, line splitting and resume offsets", async (t) => {
     ["100%"],
   );
 });
+
+test("line times follow production chunks, partial lines, legacy logs and retries", async (t) => {
+  const vite = await createServer({
+    configFile: false,
+    server: { middlewareMode: true, ws: false },
+  });
+  t.after(() => vite.close());
+  const { RunLog } = await vite.ssrLoadModule("/src/lib/runlog.ts");
+  const log = new RunLog();
+  log.section("a1", "first", 10000);
+  log.bytes(0, enc.encode("one\ntw"), 11000);
+  assert.deepEqual(
+    log.lines(0).map((l) => l.offsetSeconds),
+    [1, 1],
+  );
+  log.bytes(6, enc.encode("o\nthree\npartial"), 16000);
+  assert.deepEqual(
+    log.lines(0).map((l) => l.offsetSeconds),
+    [1, 6, 6, 6],
+  );
+  log.bytes(6, enc.encode("o\nthree\npartial"), 99000);
+  assert.deepEqual(
+    log.lines(0).map((l) => l.offsetSeconds),
+    [1, 6, 6, 6],
+  );
+  log.bytes(log.offset, enc.encode("\nlegacy\n"));
+  assert.deepEqual(
+    log.lines(0).map((l) => l.offsetSeconds),
+    [1, 6, 6, 0, 0],
+  );
+  log.section("a2", "replay", 20000);
+  log.bytes(log.offset, enc.encode("new\n"), 21500);
+  log.bytes(log.offset, enc.encode("clock skew\n"), 19000);
+  assert.deepEqual(
+    log.lines(1).map((l) => l.offsetSeconds),
+    [1.5, 0],
+  );
+});

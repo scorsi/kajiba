@@ -84,6 +84,8 @@ message LogChunk {
   uint64 sequence = 2;
   uint32 step_index = 3;
   bytes data = 4;
+  // UTC epoch milliseconds at the executor pipe read; 0 for legacy runners.
+  int64 produced_at_ms = 5;
 }
 
 enum StepState {

@@ -1073,6 +1073,7 @@ async fn logs_and_results_are_acknowledged_and_counted() {
             attempt_id: attempt.clone(),
             sequence,
             step_index: 0,
+            produced_at_ms: 1234,
             data: data.to_vec(),
         })
     };
@@ -1170,6 +1171,7 @@ async fn a_reconnected_runner_continues_its_attempt_and_resends_unacknowledged_l
             attempt_id: attempt.clone(),
             sequence,
             step_index: 0,
+            produced_at_ms: 1234,
             data: format!("{sequence}\n").into_bytes(),
         })
     };

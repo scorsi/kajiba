@@ -235,6 +235,8 @@ message LogBytes {
   // Where `data` starts in the run's log: the attempts' logs one after the other.
   uint64 offset = 1;
   bytes data = 2;
+  // UTC epoch milliseconds of the original runner chunk; 0 if unknown.
+  int64 produced_at_ms = 3;
 }
 
 // A worktree run to create (0097, ADR 0118).

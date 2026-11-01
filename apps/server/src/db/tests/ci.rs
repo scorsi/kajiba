@@ -88,7 +88,10 @@ async fn ci_valid_rows_columns_nullability_and_indexes() {
             "step",
             "id attempt_id idx name state exit_code started_at finished_at",
         ),
-        ("log_chunk", "attempt_id seq step_idx offset length"),
+        (
+            "log_chunk",
+            "attempt_id seq step_idx offset length produced_at_ms",
+        ),
         (
             "artifact",
             "id public_id attempt_id name size sha256 created_at expires_at",
@@ -251,7 +254,7 @@ async fn ci_unique_keys_include_event_and_per_attempt_log_sequence() {
         if table == "log_chunk" {
             refuses(
                 &mut writer,
-                "INSERT INTO log_chunk VALUES (1, 0, 1, 10, 10)",
+                "INSERT INTO log_chunk VALUES (1, 0, 1, 10, 10, 0)",
                 "1555",
             )
             .await;
@@ -283,7 +286,7 @@ async fn ci_unique_keys_include_event_and_per_attempt_log_sequence() {
         UPDATE job_attempt SET job_id = 1, number = 2 WHERE id = 2;
         UPDATE step SET attempt_id = 1, idx = 1 WHERE id = 2;
         UPDATE artifact SET attempt_id = 1, name = 'other' WHERE id = 2;
-        INSERT INTO log_chunk VALUES (1, 1, 0, 10, 10)",
+        INSERT INTO log_chunk VALUES (1, 1, 0, 10, 10, 0)",
     )
     .execute(&mut writer)
     .await

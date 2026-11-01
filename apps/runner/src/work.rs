@@ -201,10 +201,13 @@ async fn execute<E: Executor>(
     let mut exit = Ok(Exit::Code(0));
     for (index, name) in steps.iter().enumerate() {
         status(index, name, StepState::Running, None);
-        let (log, mut output) = mpsc::channel(4);
+        let (log, mut output) = mpsc::channel::<kajiba_exec::Log>(4);
         let forward = async {
             while let Some(data) = output.recv().await {
-                worker.attempts.log(id, index as u32, data).await;
+                worker
+                    .attempts
+                    .log(id, index as u32, data.data, data.produced_at_ms)
+                    .await;
             }
         };
         let cancel = async {
