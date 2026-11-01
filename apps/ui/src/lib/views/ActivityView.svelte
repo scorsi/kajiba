@@ -237,7 +237,7 @@
 	{#snippet pipeSummary()}
 		{#each running as r (r.id)}<span class="flex items-center gap-1.5"
 				><RunBadge state={r.state} size={10} /><span class="text-fg-muted">{r.repo} #{r.short}</span
-				>{#if r.trigger === 'worktree'}<RunRef run={r} />{/if}</span
+				><RunRef run={r} /></span
 			>{/each}
 		<span class={failures.length ? 'text-danger' : ''}>{failures.length} failed · 7 days</span>
 	{/snippet}
@@ -254,7 +254,7 @@
 							class="flex flex-wrap items-center gap-2 rounded-md border border-border bg-bg px-3 py-2 text-[0.8125rem] hover:border-border-strong"
 						>
 							<RunBadge state={r.state} label />
-							<span class="min-w-0 truncate font-mono text-xs text-fg-muted">{r.repo} #{r.short}</span>{#if r.trigger === 'worktree'}<RunRef run={r} />{/if}
+							<span class="min-w-0 truncate font-mono text-xs text-fg-muted">{r.repo} #{r.short}</span><RunRef run={r} />
 							<span class="ml-auto"><DurationBar seconds={r.durationSeconds} max={durationMax} /></span>
 						</a>
 						<RunActions run={r} allowed={canManageRuns(forge.repos.find(p => p.key === r.repo)?.repo, forge.viewer)} rerun={false}
@@ -273,7 +273,7 @@
 									class="flex items-center gap-2 rounded-sm px-1 py-0.5 hover:bg-surface-2"
 									><RunBadge state={r.state} size={11} /><span
 										class="font-mono text-xs text-fg-muted">{r.repo} #{r.short}</span
-									>{#if r.trigger === 'worktree'}<RunRef run={r} />{/if}<span class="truncate text-xs text-fg-subtle"
+									><RunRef run={r} /><span class="truncate text-xs text-fg-subtle"
 										>{isFixed(r, forge.runs) ? 'fixed · ' : ''}{r.steps.find((s) => s.state === RunState.FAILED)?.name}</span
 									><span class="ml-auto text-xs text-fg-subtle"
 										>{relativeTime(toDate(r.createTime))}</span

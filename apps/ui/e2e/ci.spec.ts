@@ -5,7 +5,12 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fromBinary, toBinary } from "@bufbuild/protobuf";
 import { expect, test, type Page } from "@playwright/test";
+import {
+  ListRunsResponseSchema,
+  RunTrigger,
+} from "../src/lib/gen/kajiba/v1/run_pb";
 import { authenticator, enroll, enrollLink } from "./support";
 
 const env = (name: string) => {
@@ -193,6 +198,10 @@ test.describe.serial("CI runs", () => {
       page.getByRole("heading", { name: `Run #${id.slice(-8).toLowerCase()}` });
     await expect(heading(first)).toBeVisible();
 
+    await expect(pulse(page).locator('a[aria-current="page"]')).toHaveClass(
+      /ring-1/,
+    );
+
     // Same route, other id: each click shows the clicked run at once, with no reload.
     const others = pulse(page).locator(
       'a[href^="/-/runs/"]:not([aria-current])',
@@ -253,13 +262,44 @@ test.describe.serial("CI runs", () => {
       const label = `worktree by alice on ${env("KAJIBA_E2E_MAIN_SHA").slice(0, 7)} · checks: unit`;
       await page.goto(`/-/runs/${id}`);
       await expect(pulse(page)).toContainText(label);
+      const historyRun = pulse(page).locator(
+        `a[aria-current="page"][href="/-/runs/${id}"]`,
+      );
+      await expect(historyRun).toBeVisible();
+      await expect(historyRun).not.toHaveClass(/ring-1/);
+      await expect(historyRun).toHaveCSS("box-shadow", "none");
       await expect(
         page.getByRole("region", { name: "What changed" }),
       ).toHaveCount(0);
+      // The harness creates manual runs without refs; supply a pushed branch for the list assertion.
+      await page.route("**/kajiba.v1.RunService/ListRuns", async (route) => {
+        const response = await route.fetch();
+        const body = await response.body();
+        const length = body.readUInt32BE(1);
+        const data = fromBinary(
+          ListRunsResponseSchema,
+          body.subarray(5, 5 + length),
+        );
+        const branch = data.runs.find(
+          (r) => r.publicId === env("KAJIBA_E2E_PENDING_RUN"),
+        )!;
+        branch.ref = "refs/heads/main";
+        branch.trigger = RunTrigger.PUSH;
+        const bytes = toBinary(ListRunsResponseSchema, data);
+        const header = Buffer.alloc(5);
+        header.writeUInt32BE(bytes.length, 1);
+        await route.fulfill({
+          response,
+          body: Buffer.concat([header, bytes, body.subarray(5 + length)]),
+        });
+      });
       await page.goto("/alice/demo");
       const pipelines = page.getByRole("region", { name: "Pipelines" });
       await expect(
         pipelines.getByRole("heading", { name: "Worktree runs" }),
+      ).toBeVisible();
+      await expect(
+        pipelines.getByText("branch: main", { exact: true }).first(),
       ).toBeVisible();
       await expect(pipelines.locator(`a[href="/-/runs/${id}"]`)).toHaveCount(1);
       const row = pipelines.locator(`a[href="/-/runs/${id}"]`);

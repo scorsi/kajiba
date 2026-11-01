@@ -169,7 +169,7 @@
 				{#each older as r (r.id)}
 					<a
 						href={runHref(r.id)}
-						class="flex min-h-5 min-w-5 items-center justify-center gap-1 rounded-sm hover:bg-surface-2 {r.id === run.id
+						class="flex min-h-5 min-w-5 items-center justify-center gap-1 rounded-sm hover:bg-surface-2 {r.id === run.id && run.trigger !== 'worktree'
 							? 'ring-1 ring-fg'
 							: ''}"
 						aria-current={r.id === run.id ? 'page' : undefined}

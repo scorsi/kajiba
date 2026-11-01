@@ -415,7 +415,7 @@
 				title="{refShortName(r.ref)} · {r.commitId} · {r.runner}"
 				class="mt-1 truncate text-xs text-fg-muted"
 			>
-				{refShortName(r.ref)} · <span class="font-mono">{shortId(r.commitId)}</span> · {r.runner}
+				<RunRef run={r} /> · <span class="font-mono">{shortId(r.commitId)}</span> · {r.runner}
 			</p>
 			<div class="mt-2">{@render stepsBar(r, !compact)}</div>
 		</a>
@@ -652,6 +652,7 @@
 												><span class="tabular ml-auto text-fg-subtle">{dur(r.durationSeconds)}</span
 												></span
 											>
+											<div class="mt-1"><RunRef run={r} /></div>
 											<span
 												title="{relativeTime(toDate(r.createTime))} · {r.commitId}"
 												class="mt-0.5 block truncate text-fg-subtle"

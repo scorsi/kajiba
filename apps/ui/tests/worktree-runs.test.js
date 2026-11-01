@@ -34,8 +34,16 @@ test("worktree labels show user, base and checks; they never fail a branch", asy
   );
   assert.equal(
     runLabel({ ...run, trigger: "push", ref: "refs/heads/main" }),
-    "main",
+    "branch: main",
   );
+  for (const [ref, label] of [
+    ["refs/heads/feature/nested", "branch: feature/nested"],
+    ["refs/tags/v1.2", "tag: v1.2"],
+    ["", ""],
+    ["refs/other/topic", "refs/other/topic"],
+  ]) {
+    assert.equal(runLabel({ ...run, trigger: "manual", ref }), label);
+  }
   const forge = (runs) => ({
     repos: [
       {
