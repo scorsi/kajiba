@@ -70,7 +70,7 @@ export class RunLog<A> {
       at.partial + this.decoder.decode(data.subarray(skip), { stream: true });
     const parts = text.split("\n");
     at.partial = parts.pop()!;
-    for (const p of parts) at.lines.push(toLine(p, at.time));
+    for (const p of parts) at.lines.push(toLine(p.replace(/\r$/, ""), at.time));
   }
 
   /** Completed lines of an attempt, then its unfinished last line if any. */

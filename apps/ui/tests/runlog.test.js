@@ -48,6 +48,36 @@ test("run log decoding, line splitting and resume offsets", async (t) => {
   );
 });
 
+test("CRLF lines survive every chunk split alongside progress redraws", async (t) => {
+  const vite = await createServer({
+    configFile: false,
+    server: { middlewareMode: true, ws: false },
+  });
+  t.after(() => vite.close());
+  const { RunLog } = await vite.ssrLoadModule("/src/lib/runlog.ts");
+  const bytes = enc.encode(
+    "\x1b[31merror: failed\x1b[0m\r\n10%\r50%\r100%\r\n\r\nnext\npartial\rredrawn",
+  );
+  for (let split = 0; split <= bytes.length; split++) {
+    const log = new RunLog();
+    log.section("a1", "one");
+    log.bytes(0, bytes.subarray(0, split));
+    log.bytes(split, bytes.subarray(split));
+    assert.equal(log.offset, bytes.length);
+    assert.deepEqual(
+      log.lines(0).map((l) => [l.text, l.stream]),
+      [
+        ["error: failed", "err"],
+        ["100%", "out"],
+        ["", "out"],
+        ["next", "out"],
+        ["redrawn", "out"],
+      ],
+      `chunk split at byte ${split}`,
+    );
+  }
+});
+
 test("line times follow production chunks, partial lines, legacy logs and retries", async (t) => {
   const vite = await createServer({
     configFile: false,
