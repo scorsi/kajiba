@@ -102,7 +102,7 @@ import ./ci-common.nix (args // { kajibaGitPackage = heldGit; }) {
             assert code != 0 and "maintenance" in out.lower(), out
         # The client-streaming upload is refused at admission, before reading a bundle.
         token = forge.succeed("tail -n1 /root/writer-token").strip()
-        code, out = forge.execute(f"grpcurl -plaintext -import-path {proto} -proto kajiba/v1/run.proto -H 'authorization: Bearer {token}' -d '{{"spec":{{}}}}' 127.0.0.1:8080 kajiba.v1.RunService/CreateWorktreeRun 2>&1")
+        code, out = forge.execute(f"grpcurl -plaintext -import-path {proto} -proto kajiba/v1/run.proto -H 'authorization: Bearer {token}' -d {shlex.quote(json.dumps({'spec': {}}))} 127.0.0.1:8080 kajiba.v1.RunService/CreateWorktreeRun 2>&1")
         assert code != 0 and has_reason(out, "MAINTENANCE"), out
         forge.succeed("rm /var/lib/kajiba-git/hold-hook /var/lib/kajiba-fixtures/hold-import")
         done("push")
