@@ -43,6 +43,7 @@ pub(in crate::transport) async fn admin(dir: &Path, users: &str) -> Admin {
         state_dir: dir.into(),
         server_state_dir: dir.into(),
         dump_dir: dir.join("dumps"),
+        dump_keep: 7,
         registry: Arc::default(),
         retention: crate::db::retention::Pass {
             logs: dir.join("logs"),
@@ -626,6 +627,7 @@ async fn dump_drains_refuses_concurrency_and_publishes_only_success() {
     let mut admin = admin(&server_state, "[users.alice]").await;
     admin.state_dir = git_state.clone();
     admin.dump_dir = dir.0.join("dumps");
+    admin.dump_keep = 1;
     fs::create_dir(&admin.dump_dir).unwrap();
     let mut git = Fake::start(&git_state).await;
     admin
@@ -695,7 +697,15 @@ async fn dump_drains_refuses_concurrency_and_publishes_only_success() {
     );
     assert_eq!(fs::read_dir(&admin.dump_dir).unwrap().count(), 1);
     fs::remove_file(git_state.join("tmp/orphans/unsafe")).unwrap();
-    assert!(admin.create_dump(&mut git.client).await.is_ok());
+    let next = admin
+        .create_dump(&mut git.client)
+        .await
+        .unwrap()
+        .into_inner()
+        .dir;
+    assert!(!completed.exists());
+    assert!(PathBuf::from(next).is_dir());
+    assert_eq!(fs::read_dir(&admin.dump_dir).unwrap().count(), 1);
 }
 
 #[tokio::test]

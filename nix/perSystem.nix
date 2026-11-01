@@ -220,6 +220,13 @@
             kajibaRunnerPackage = config.packages.kajiba-runner;
             kajibaCliPackage = config.packages.kajiba-cli;
           };
+          nixos-ops-timers = import ./tests/ops-timers.nix {
+            inherit pkgs testLib;
+            kajibaServerPackage = config.packages.kajiba-server;
+            kajibaGitPackage = config.packages.kajiba-git;
+            kajibaRunnerPackage = config.packages.kajiba-runner;
+            kajibaCliPackage = config.packages.kajiba-cli;
+          };
           nixos-ops-restore = import ./tests/ops-restore.nix {
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;

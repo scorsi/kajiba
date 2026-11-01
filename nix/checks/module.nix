@@ -419,6 +419,46 @@ in
           group = "kajiba-git";
         };
       });
+    # Daily dump runs through the peer-checked admin command, never direct state writes.
+    assert lib.all
+      (
+        evaluated:
+        let
+          inherit (evaluated.config) systemd services;
+          timer = systemd.timers.kajiba-dump;
+          service = systemd.services.kajiba-dump;
+          unit = service.serviceConfig;
+        in
+        timer.wantedBy == [ "timers.target" ]
+        && timer.timerConfig.OnCalendar == "daily"
+        && timer.timerConfig.Persistent
+        && timer.timerConfig.Unit == "kajiba-dump.service"
+        && service.requires == [ "kajiba-server.service" ]
+        && service.after == [ "kajiba-server.service" ]
+        && unit.ExecStart == "${lib.getExe services.kajiba-server.package} admin dump"
+        && unit.Type == "oneshot"
+        && unit.StandardOutput == "null"
+        && unit.StandardError == "journal"
+        && unit.User == "kajiba-server"
+        && unit.Group == "kajiba-server"
+        && !(unit.DynamicUser or false)
+        && unit.UMask == "0027"
+        && unit.ProtectSystem == "strict"
+        && unit.ProtectHome
+        && unit.PrivateTmp
+        && unit.NoNewPrivileges
+        && unit.CapabilityBoundingSet == ""
+        && unit.RestrictAddressFamilies == [ "AF_UNIX" ]
+        && unit.ReadOnlyPaths == [ "/run/kajiba" ]
+        && (unit.ReadWritePaths or [ ]) == [ ]
+        && unit.TimeoutStartSec == "infinity"
+      )
+      [
+        (evaluate false { })
+        (evaluateWith false [ ])
+      ];
+    assert (evaluateWith false [ ]).config.services.kajiba-server.dump.dir == "/var/lib/kajiba-dumps";
+    assert (evaluateWith false [ ]).config.services.kajiba-server.dump.keep == null;
     # Generated unit, identity and persisted paths (0012, 0015, 0022), full then default options.
     assert
       let

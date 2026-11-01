@@ -265,6 +265,7 @@ async fn main() -> ExitCode {
                 retention: retention.clone(),
                 server_state_dir: config.state_dir.clone(),
                 dump_dir: config.dump.dir.clone(),
+                dump_keep: config.dump.keep,
                 registry: registry.clone(),
             };
             health.set_runners(transport::runners::Declared {

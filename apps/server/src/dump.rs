@@ -176,6 +176,60 @@ async fn create_payload(
     result.map_err(|e| format!("dump: {e}"))
 }
 
+/// Rotate only verified published dumps; the caller still owns maintenance (0171).
+pub(crate) async fn retain(destination: &Path, keep: u32, current: &Path) -> Result<()> {
+    real_directory(destination).map_err(|e| e.to_string())?;
+    let destination = destination.canonicalize().map_err(|e| e.to_string())?;
+    let mut completed = Vec::new();
+    for entry in fs::read_dir(&destination).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some((date, id)) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("dump-"))
+            .and_then(|n| n.split_once('-'))
+        else {
+            continue;
+        };
+        let Ok(date) = date.parse::<u64>() else {
+            continue;
+        };
+        if validate_id(id).is_err() || name != OsStr::new(&format!("dump-{date}-{id}")) {
+            continue;
+        }
+        if let Ok(manifest) = verify(&entry.path()).await {
+            if manifest.created_at_ms == date {
+                completed.push((date, entry.path()));
+            }
+        }
+    }
+    if !completed.iter().any(|(_, path)| path == current) {
+        return Err("newly published dump failed retention verification".into());
+    }
+    prune(completed, keep, current, |path| fs::remove_dir_all(path))
+        .and_then(|()| crate::state::sync_dir(&destination))
+        .map_err(|e| e.to_string())
+}
+
+fn prune(
+    mut completed: Vec<(u64, PathBuf)>,
+    keep: u32,
+    current: &Path,
+    mut remove: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    completed.sort();
+    // Reserve one slot for the new dump even if the host clock moved backwards.
+    completed.retain(|(_, path)| path != current);
+    let count = completed.len().saturating_sub(keep.max(1) as usize - 1);
+    for (_, path) in completed.into_iter().take(count) {
+        remove(&path)?;
+    }
+    Ok(())
+}
+
 async fn snapshot(source: &mut SqliteConnection, path: &Path) -> Result<()> {
     let mut destination = SqliteConnection::connect_with(
         &SqliteConnectOptions::new()

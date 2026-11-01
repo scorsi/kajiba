@@ -33,6 +33,7 @@ pub struct Admin {
     pub state_dir: PathBuf,
     pub server_state_dir: PathBuf,
     pub dump_dir: PathBuf,
+    pub dump_keep: u32,
     pub registry: Arc<Registry>,
     pub git_socket: PathBuf,
     /// The retention pass run on demand (ADR 0115, 0097).
@@ -242,6 +243,11 @@ impl Admin {
                         &quiescent,
                     )
                     .await?;
+                    if let Err(err) =
+                        crate::dump::retain(&admin.dump_dir, admin.dump_keep, &dir).await
+                    {
+                        tracing::warn!(event = "dump-retention-failed", %err);
+                    }
                     admin
                         .registry
                         .dump_succeeded(crate::db::runs::now().max(0) as u64 / 1000);

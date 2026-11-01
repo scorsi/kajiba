@@ -779,6 +779,32 @@ in
         SocketMode = "0600";
       };
     };
+    systemd.timers.kajiba-dump = {
+      description = "Daily verified kajiba dump";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = "daily";
+        Persistent = true;
+        Unit = "kajiba-dump.service";
+      };
+    };
+    systemd.services.kajiba-dump = {
+      description = "Create and rotate verified kajiba dumps";
+      requires = [ "kajiba-server.service" ];
+      after = [ "kajiba-server.service" ];
+      serviceConfig = hardening // {
+        Type = "oneshot";
+        ExecStart = "${lib.getExe cfg.package} admin dump";
+        StandardOutput = "null";
+        StandardError = "journal";
+        User = "kajiba-server";
+        Group = "kajiba-server";
+        UMask = "0027";
+        TimeoutStartSec = "infinity";
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+        ReadOnlyPaths = [ "/run/kajiba" ];
+      };
+    };
     systemd.services.kajiba-server = {
       description = "kajiba forge server";
       # Socket-triggered starts share this budget; hitting it also fails the sockets.
