@@ -23,7 +23,8 @@ import ./ci-common.nix args {
     services.kajiba-server.dump.keep = 2;
     # Fire the real timer once shortly after boot; subsequent invocations below are manual.
     systemd.timers.kajiba-dump.timerConfig = {
-      OnCalendar = lib.mkForce "";
+      # An empty OnCalendar= would also clear OnActiveSec, so park the calendar far away instead.
+      OnCalendar = lib.mkForce "2999-01-01";
       OnActiveSec = "5s";
     };
     # Invoke gc explicitly so the calendar cannot race the dump rotation assertions.
@@ -43,9 +44,10 @@ import ./ci-common.nix args {
         assert forge.succeed("systemctl show -P Result kajiba-dump.service").strip() == "success"
 
     with subtest("timer invokes the admitted dump command as the server identity"):
-        # The one-shot OnActiveSec timer is inactive once elapsed, so wait for its dump instead.
+        forge.wait_for_unit("kajiba-dump.timer")
         forge.wait_until_succeeds("test -n \"$(find /var/lib/kajiba-dumps -maxdepth 1 -name 'dump-*' -type d -print -quit)\"")
         forge.wait_until_succeeds("test \"$(systemctl show -P ActiveState kajiba-dump.service)\" = inactive")
+        forge.succeed("systemctl stop kajiba-dump.timer")
         assert len(dumps()) == 1
         first = dumps()[0]
         assert forge.succeed(f"stat -c '%U:%G:%a' {first}").strip() == "kajiba-server:kajiba-server:700"
