@@ -172,7 +172,8 @@ import ./ci-common.nix args {
         runner.wait_until_succeeds(f"test ! -d /var/lib/kajiba-runner/jobs/{stale}")
         runner.fail(f"systemctl is-active --quiet {unit}")
         assert sql(f"SELECT state, failure_reason FROM run WHERE public_id = '{active}'") == terminal
-        assert attempts(active) == [(stale, "1", "failed")]
+        # ADR 0183: restore loses the non-terminal attempt; the runner's later result is ignored.
+        assert attempts(active) == [(stale, "1", "lost")], attempts(active)
         assert finishes(active) == 1
         assert sql(history_query.replace("r.trigger != 'worktree'", f"r.public_id = '{active}'")) == recovered_active
         assert sql(history_query) == history
