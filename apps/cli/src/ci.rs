@@ -215,9 +215,14 @@ fn row(run: &Run) -> Result<String, Error> {
         short(state(run).as_str_name(), "RUN_STATE_"),
         short(trigger.as_str_name(), "RUN_TRIGGER_"),
         run.sha,
-        match run.r#ref.as_str() {
-            "" => "-",
-            reference => reference,
+        if trigger == RunTrigger::Worktree {
+            format!("worktree:{}", run.triggered_by)
+        } else {
+            match run.r#ref.as_str() {
+                "" => "-",
+                reference => reference,
+            }
+            .to_owned()
         },
     ))
 }

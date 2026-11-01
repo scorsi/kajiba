@@ -86,7 +86,7 @@
 	<div
 		id="L{step + 1}-{n}"
 		data-err={line.stream === 'err' ? '' : undefined}
-		class="grid scroll-mt-20 grid-cols-[2.75rem_minmax(0,1fr)] target:bg-accent-soft hover:bg-surface-2 sm:grid-cols-[2.75rem_3rem_minmax(0,1fr)] {line.stream ===
+		class="grid scroll-mt-20 grid-cols-[calc(6ch+1.5rem)_minmax(0,1fr)] target:bg-accent-soft hover:bg-surface-2 sm:grid-cols-[calc(6ch+1.5rem)_3rem_minmax(0,1fr)] {line.stream ===
 		'err'
 			? 'bg-danger-soft text-danger'
 			: ''}"

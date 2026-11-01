@@ -1571,6 +1571,7 @@ async fn a_worktree_attempt_gets_the_base_it_lacks_then_its_stored_bundle() {
                 correlation_id: "worktree",
                 now: 1,
                 worktree: Some(crate::db::runs::Worktree {
+                    base_sha: "",
                     checks: &["a".into(), "b".into()],
                     arch: "aarch64",
                     os: "linux",

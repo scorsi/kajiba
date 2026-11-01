@@ -14,6 +14,7 @@
 	history, files, kind (History filter).
 -->
 <script lang="ts">
+	import RunRef from '#lib/components/RunRef.svelte';
 	import { uniqueCommits } from '#lib/data/forge.ts';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
@@ -100,8 +101,12 @@
 			: []
 	);
 	const runs = resource(() => listRuns({ repo: repoKey, pageSize: 60 }).then((r) => r.runs));
-	const runByCommit = $derived(new Map((runs.data ?? []).map((r) => [r.commitId, r])));
-	const current = $derived(runs.data?.find((r) => r.state === RunState.RUNNING) ?? runs.data?.[0]);
+	const branchRuns = $derived(
+		(runs.data ?? []).filter((r) => r.trigger !== 'worktree' && (!r.ref || r.ref === head))
+	);
+	const worktreeRuns = $derived((runs.data ?? []).filter((r) => r.trigger === 'worktree'));
+	const runByCommit = $derived(new Map(branchRuns.map((r) => [r.commitId, r])));
+	const current = $derived(branchRuns.find((r) => r.state === RunState.RUNNING) ?? branchRuns[0]);
 
 	let logMore = $state(false);
 	const log = resource(async () => {
@@ -616,7 +621,7 @@
 						>
 						· {dur(current.durationSeconds)}</span
 					>{/if}
-				{@render runChain(runs.data ?? [], 12)}
+				{@render runChain(branchRuns, 12)}
 			{/snippet}
 			{@render strip('Pipelines', pipelinesOpen, 'pipelines', null, '0', pipeSummary)}
 			{#if pipelinesOpen}
@@ -628,7 +633,7 @@
 						{#if current}{@render currentRun(current, false)}{/if}
 						<div class="min-w-0">
 							<ul class="relative flex gap-2 overflow-x-auto pb-1">
-								{#each (runs.data ?? []).slice(1, 9) as r (r.id)}
+								{#each branchRuns.slice(1, 9) as r (r.id)}
 									<li class="shrink-0">
 										<a
 											href="/-/runs/{r.id}"
@@ -652,6 +657,18 @@
 							</ul>
 						</div>
 					</div>
+					{#if worktreeRuns.length}
+						<h2 class="mt-3 text-xs text-fg-subtle">Worktree runs</h2>
+						<ul class="mt-1 space-y-1">
+							{#each worktreeRuns as r (r.id)}
+								<li>
+									<a href="/-/runs/{r.id}" class="flex flex-wrap items-center gap-2 text-xs hover:underline">
+										<RunBadge state={r.state} size={11} />#{r.short} <RunRef run={r} />
+									</a>
+								</li>
+							{/each}
+						</ul>
+					{/if}
 				</section>
 			{/if}
 		{/if}

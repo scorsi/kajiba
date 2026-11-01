@@ -293,6 +293,7 @@ fn spec(repo: &str) -> WorktreeRunSpec {
         system: "x86_64-linux".into(),
         checks: vec![],
         features: vec![],
+        base_sha: String::new(),
     }
 }
 
@@ -369,6 +370,11 @@ async fn worktree_admission_refuses_in_order() {
     let invalid = (Code::InvalidArgument, "INVALID_FIELD");
     let no_runner = (Code::FailedPrecondition, "NO_MATCHING_RUNNER");
     let cases = [
+        (
+            BOB,
+            with("alice/ci", |s| s.base_sha = "bad".into()),
+            invalid,
+        ),
         (BOB, spec("alice/nope"), (Code::NotFound, "REPO_NOT_FOUND")),
         (
             ALICE,
@@ -1323,6 +1329,7 @@ async fn a_worktree_bundle_becomes_a_run_outside_the_repository() {
     git(&work, &["branch", "wip"]);
     let bytes = bundle(&work, &["wip", "--not", &tip]);
     let selected = WorktreeRunSpec {
+        base_sha: tip.clone(),
         checks: vec!["vm".into(), "unit".into()],
         features: vec!["kvm".into()],
         ..spec("alice/ci")
@@ -1345,6 +1352,22 @@ async fn a_worktree_bundle_becomes_a_run_outside_the_repository() {
         )
     );
     assert_eq!(run.checks, ["vm", "unit"]);
+    assert_eq!(run.base_sha, tip);
+    let reread = runs
+        .get_run(as_user(
+            BOB,
+            GetRunRequest {
+                run: run.public_id.clone(),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+    assert_eq!(reread.base_sha, tip);
+    assert_eq!(reread.checks, run.checks);
+    assert_eq!(reread.triggered_by, "bob");
     let state = fixture.dir.join("server");
     assert_eq!(
         std::fs::read(state.join(format!("ci/bundles/{}.bundle", run.public_id))).unwrap(),

@@ -19,6 +19,9 @@
 	);
 </script>
 
+{#if run.trigger === 'worktree'}
+	<p class="text-[0.8125rem] text-fg-muted">Local worktree sources cannot be browsed on the forge.</p>
+{:else}
 <div class="grid gap-x-10 gap-y-4 text-[0.8125rem] lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
 	<div class="min-w-0">
 		<p class="text-fg-muted">
@@ -74,3 +77,5 @@
 		</ul>
 	</div>
 </div>
+
+{/if}

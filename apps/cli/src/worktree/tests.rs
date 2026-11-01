@@ -185,6 +185,7 @@ async fn a_dirty_tree_sends_its_tracked_files_over_the_forge_base() {
     clone.untouched();
     let state = fake.0.lock().unwrap();
     let spec = &state.specs[0];
+    assert_eq!(spec.base_sha, clone.second);
     assert_eq!(
         (
             spec.repo.as_str(),
@@ -243,6 +244,7 @@ async fn a_clean_tree_sends_head_alone_when_the_forge_has_it() {
     create_with(&url, &clone, choice(&[])).await.unwrap();
     clone.untouched();
     let state = fake.0.lock().unwrap();
+    assert_eq!(state.specs[0].base_sha, clone.second);
     let bundle = &state.uploads[0].2;
     assert!(header(bundle).starts_with(&format!("# v2 git bundle\n-{} ", clone.first)));
     assert_eq!(clone.apply(bundle).unwrap(), clone.second);

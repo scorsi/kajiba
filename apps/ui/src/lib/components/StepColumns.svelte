@@ -186,7 +186,7 @@
 {/snippet}
 
 <div
-	class="flex flex-col border-b border-border sm:h-[min(72vh,46rem)] sm:min-h-[26rem] sm:flex-row"
+	class="flex min-h-64 flex-1 flex-col border-b border-border sm:flex-row"
 	id="steps"
 >
 	{#each run.steps as st, i (i)}
@@ -265,7 +265,7 @@
 										bind:this={pane}
 						{onscroll}
 										tabindex="0"
-										class="relative min-h-0 flex-1 overflow-y-auto py-1 max-sm:max-h-[60vh]"
+										class="relative min-h-0 flex-1 overflow-y-auto py-1"
 									>
 										<LogView
 											flat
@@ -303,7 +303,7 @@
 						bind:this={pane}
 						{onscroll}
 						tabindex="0"
-						class="relative min-h-0 flex-1 overflow-y-auto py-1 max-sm:max-h-[60vh]"
+						class="relative min-h-0 flex-1 overflow-y-auto py-1"
 					>
 						<LogView
 							flat

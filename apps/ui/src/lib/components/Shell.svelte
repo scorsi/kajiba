@@ -99,7 +99,7 @@
 				const d = Math.floor((now - (toDate(c.commitTime)?.getTime() ?? 0)) / 86400000);
 				if (d < 30) days[29 - d]++;
 			}
-			const lastRun: Run | undefined = runs.find((x) => x.repo === `${r.owner}/${r.name}`);
+			const lastRun: Run | undefined = runs.find((x) => x.trigger !== 'worktree' && x.repo === `${r.owner}/${r.name}`);
 			return { repo: r, days, last: logs[i][0], lastRun };
 		});
 	});

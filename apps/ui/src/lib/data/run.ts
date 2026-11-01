@@ -118,8 +118,12 @@ export async function loadRun(id: string): Promise<RunPage> {
   const worktree = run.trigger === "worktree";
   const [repos, history, commits, diff, log] = await Promise.all([
     allRepos(),
-    listRuns({ repo: run.repo, ref: run.ref, pageSize: 40 }).then(
-      (r) => r.runs,
+    listRuns({ repo: run.repo, ref: run.ref, pageSize: 40 }).then((r) =>
+      r.runs.filter((r) =>
+        worktree
+          ? r.trigger === "worktree"
+          : r.trigger !== "worktree" && (!run.ref ? !r.ref : r.ref === run.ref),
+      ),
     ),
     // A worktree run's commit is a local one the forge may not have.
     worktree
@@ -137,6 +141,7 @@ export async function loadRun(id: string): Promise<RunPage> {
   const created = (r: Run) => Number(r.createTime?.seconds ?? 0n);
   const lastGreen = history.find(
     (r) =>
+      !worktree &&
       r.id !== run.id &&
       created(r) < created(run) &&
       r.state === RunState.SUCCEEDED,

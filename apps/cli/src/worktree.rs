@@ -47,10 +47,11 @@ pub async fn create(
         )));
     }
     let system = choice.system.unwrap_or_else(own_system);
-    let captured = capture(&local.dir)?;
+    let (captured, base_sha) = capture(&local.dir)?;
     let transient = Transient::new(&local.dir, &captured)?;
     let features = features(local, &system, &choice.checks)?;
     let spec = WorktreeRunSpec {
+        base_sha,
         repo,
         system,
         checks: choice.checks,
@@ -217,11 +218,18 @@ fn addressed(url: &str, forge: &str) -> Option<String> {
 
 /// The tracked files of the working tree and index as a commit: `git stash create`, or
 /// `HEAD` when nothing tracked changed (0097).
-fn capture(dir: &Path) -> Result<String, Error> {
+fn capture(dir: &Path) -> Result<(String, String), Error> {
     let head = git(dir, &["rev-parse", "--verify", "-q", "HEAD^{commit}"], None)
         .map_err(|_| Error("HEAD has no commit yet: commit once, then run again".into()))?;
     let stash = git(dir, &["stash", "create"], None)?;
-    Ok(if stash.is_empty() { head } else { stash })
+    Ok((
+        if stash.is_empty() {
+            head.clone()
+        } else {
+            stash
+        },
+        head,
+    ))
 }
 
 /// The union of the selected checks' `requiredSystemFeatures` (all checks of the system

@@ -7,6 +7,7 @@
 	URL: ?step, ?check (StepColumns), ?steps=0 folds Steps, ?changed=0|1.
 -->
 <script lang="ts">
+	import RunRef from '#lib/components/RunRef.svelte';
 	import { page } from '$app/state';
 	import { RunState } from '#lib/api.ts';
 	import { relativeTime, toDate } from '#lib/format.ts';
@@ -37,20 +38,8 @@
 	}
 	const stepHref = (i: number) => hrefFor({ step: String(i + 1), check: null, steps: null });
 	const stepsOpen = $derived(q.get('steps') !== '0');
-	const changedOpen = $derived(
-		q.get('changed') === '1' || (run.state !== RunState.SUCCEEDED && q.get('changed') !== '0')
-	);
-	const changedHref = $derived(
-		hrefFor({
-			changed: changedOpen
-				? run.state !== RunState.SUCCEEDED
-					? '0'
-					: null
-				: run.state !== RunState.SUCCEEDED
-					? null
-					: '1'
-		})
-	);
+	const changedOpen = $derived(q.get('changed') === '1');
+	const changedHref = $derived(hrefFor({ changed: changedOpen ? null : '1' }));
 
 	const running = $derived(run.state === RunState.RUNNING);
 	const elapsedOf = (i: number) => {
@@ -81,10 +70,10 @@
 	};
 </script>
 
-<div class="relative min-h-0 flex-1 overflow-y-auto">
+<div class="relative flex min-h-0 flex-1 flex-col overflow-y-auto [&>*]:shrink-0">
 	<!-- Pulse -->
 	<BandStrip label="Pulse" open={pulseOpen} href={hrefFor({ pulse: pulseOpen ? '0' : null })}>
-		<span>Run #{run.short}</span>
+		<span>Run #{run.short}</span>{#if run.trigger === 'worktree'}<RunRef {run} />{/if}
 	</BandStrip>
 	{#if pulseOpen}
 	<section class="border-b border-border bg-surface px-4 py-4 sm:px-6" aria-label="Pulse">
@@ -164,20 +153,20 @@
 		<!-- runs on the same ref -->
 		<div class="mt-5 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-fg-subtle">
 			<span
-				>Runs on <span class="font-mono text-fg-muted">{run.ref.replace('refs/heads/', '')}</span
+				>{run.trigger === 'worktree' ? 'Worktree runs' : 'Runs on'} <span class="font-mono text-fg-muted">{run.ref.replace('refs/heads/', '')}</span
 				></span
 			>
 			<span class="flex flex-wrap gap-1">
 				{#each older as r (r.id)}
 					<a
 						href={runHref(r.id)}
-						class="grid size-5 place-items-center rounded-sm hover:bg-surface-2 {r.id === run.id
+						class="flex min-h-5 min-w-5 items-center justify-center gap-1 rounded-sm hover:bg-surface-2 {r.id === run.id
 							? 'ring-1 ring-fg'
 							: ''}"
 						aria-current={r.id === run.id ? 'page' : undefined}
 						title="#{r.short} · {RUN_LABEL[r.state]} · {clock(r.durationSeconds)} · {relativeTime(
 							toDate(r.createTime)
-						)}"><RunBadge state={r.state} size={11} /></a
+						)}"><RunBadge state={r.state} size={11} />{#if r.trigger === 'worktree'}<RunRef run={r} />{/if}</a
 					>
 				{/each}
 			</span>

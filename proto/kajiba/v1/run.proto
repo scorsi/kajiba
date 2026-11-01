@@ -121,6 +121,8 @@ message Run {
   FailureSummary failure = 12;
   // A worktree run's selected checks; empty for the whole `nix flake check` (0097).
   repeated string checks = 13;
+  // Client-reported HEAD before capture; display metadata only (ADR 0151).
+  string base_sha = 14;
 }
 
 enum JobState {
@@ -221,6 +223,8 @@ message WorktreeRunSpec {
   repeated string checks = 3;
   // The selected checks' `requiredSystemFeatures`, required as runner tags.
   repeated string features = 4;
+  // Client-reported HEAD before capture; empty for older clients (ADR 0151).
+  string base_sha = 5;
 }
 
 message GetWorktreeBaseRequest {

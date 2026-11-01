@@ -6,6 +6,7 @@
 	feed time-travels inside a repository or jumps into one from the forge.
 -->
 <script lang="ts">
+	import RunRef from '#lib/components/RunRef.svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { SvelteSet } from 'svelte/reactivity';
@@ -226,17 +227,18 @@
 									Run <a href={runHref(e.run.id)} class="font-mono text-xs text-fg hover:underline"
 										>#{e.run.short}</a
 									>
+									<RunRef run={e.run} />
 									<span class="text-danger">failed</span>
 									{#if repoHref}in {@render repoName(e.repo)}{/if}
 								</p>
 								<p class="text-xs text-fg-subtle">
 									{#if failedStep(e.run)}at <span class="text-fg-muted">{failedStep(e.run)}</span
 										>{' · '}{/if}{dur(e.run.durationSeconds)} · {e.run.runner} ·
-									<a
+									{#if e.run.trigger === 'worktree'}<span class="font-mono">{shortId(e.run.commitId)}</span>{:else}<a
 										href={commitHref(e.repo, e.run.commitId)}
 										data-sveltekit-noscroll
 										class="font-mono hover:underline">{shortId(e.run.commitId)}</a
-									>
+									>{/if}
 								</p>
 							{:else if e.kind === 'mirror'}
 								<p class="text-fg-muted">

@@ -153,6 +153,7 @@ export function attention(forge: Forge) {
       const tip = r.commits[0]?.id;
       const last = r.runs.find(
         (x) =>
+          x.trigger !== "worktree" &&
           (x.ref === r.repo.defaultBranch || (!x.ref && x.commitId === tip)) &&
           x.state !== RunState.RUNNING &&
           x.state !== RunState.QUEUED,

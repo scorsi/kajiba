@@ -12,6 +12,7 @@
 	Band state lives in the URL: runners, mirrors, users, history, kind.
 -->
 <script lang="ts">
+	import RunRef from '#lib/components/RunRef.svelte';
 	import { page } from '$app/state';
 	import {
 		MirrorState,
@@ -226,7 +227,7 @@
 		<span class="tabular">{online.length}/{forge.runners.length} online</span>
 		{#each busy as r (r.name)}{#if r.currentRun}<span class="flex items-center gap-1.5"
 					><RunBadge state={RunState.RUNNING} size={10} /><span class="font-mono">{r.name}</span>
-					#{r.currentRun.short}</span
+					#{r.currentRun.short}<RunRef run={r.currentRun.run} /></span
 				>{/if}{/each}
 	</BandStrip>
 	{#if runnersOpen}
@@ -287,8 +288,8 @@
 											class="flex items-center gap-1.5 hover:underline"
 											><RunBadge state={RunState.RUNNING} size={10} /><span class="font-mono"
 												>#{r.currentRun.short}</span
-											><span class="truncate font-mono text-fg-muted">{r.currentRun.repo}</span
-											><span class="tabular ml-auto text-fg-subtle"
+											><span class="truncate font-mono text-fg-muted">{r.currentRun.repo}</span><RunRef run={r.currentRun.run} />
+											<span class="tabular ml-auto text-fg-subtle"
 												>{relativeTime(toDate(r.currentRun.startTime))}</span
 											></a
 										>
@@ -313,7 +314,7 @@
 												<a href="/-/runs/{s.runs[0].id}" class="font-mono hover:underline"
 													>#{s.runs[0].short}</a
 												>
-												{relativeTime(toDate(s.runs[0].createTime))}{/if}</span
+												<RunRef run={s.runs[0]} />{relativeTime(toDate(s.runs[0].createTime))}{/if}</span
 										>
 									{/if}
 								</span>

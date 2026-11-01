@@ -137,6 +137,7 @@ pub struct NewRun<'a> {
 
 /// What a worktree run builds and where (0097).
 pub struct Worktree<'a> {
+    pub base_sha: &'a str,
     /// Check names; empty for the whole `nix flake check`.
     pub checks: &'a [String],
     pub arch: &'a str,
@@ -153,8 +154,8 @@ pub async fn create_run(
 ) -> Result<String, sqlx::Error> {
     let public_id = new_public_id(tx, run.now as u128).await?;
     let run_id = sqlx::query(
-        "INSERT INTO run (public_id, repo_id, sha, ref, trigger, event_id, triggered_by, state, created_at, checks)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
+        "INSERT INTO run (public_id, repo_id, sha, ref, trigger, event_id, triggered_by, state, created_at, checks, base_sha)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
     )
     .bind(&public_id)
     .bind(run.repo_id)
@@ -170,6 +171,7 @@ pub async fn create_run(
             .filter(|worktree| !worktree.checks.is_empty())
             .map(|worktree| serde_json::json!(worktree.checks).to_string()),
     )
+    .bind(run.worktree.as_ref().map(|worktree| worktree.base_sha))
     .execute(&mut *tx)
     .await?
     .last_insert_rowid();

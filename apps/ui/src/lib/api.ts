@@ -381,6 +381,7 @@ export interface Runner {
   lastSeenTime?: Timestamp;
   /** The oldest attempt running now. */
   currentRun?: {
+    run: Run;
     id: string;
     short: string;
     repo: RepoRef;
@@ -395,30 +396,33 @@ const administration = createClient(AdministrationService, transport);
 export async function listRunners() {
   const { runners } = await administration.listRunners({});
   return {
-    runners: runners.map<Runner>((r) => {
-      const now = r.current[0];
-      return {
-        name: r.name,
-        host: r.hostname,
-        backend: r.backends.join(" · "),
-        labels: [`${r.arch}-${r.os}`, ...r.tags],
-        state: !r.connected
-          ? RunnerState.OFFLINE
-          : now
-            ? RunnerState.BUSY
-            : RunnerState.IDLE,
-        disabled: r.disabled,
-        version: r.version,
-        lastSeenTime: r.lastContactAt,
-        currentRun: now && {
-          id: now.runId,
-          short: shortRunId(now.runId),
-          repo: now.repo,
-          ref: now.ref,
-          startTime: now.startedAt,
-        },
-      };
-    }),
+    runners: await Promise.all(
+      runners.map(async (r): Promise<Runner> => {
+        const now = r.current[0];
+        return {
+          name: r.name,
+          host: r.hostname,
+          backend: r.backends.join(" · "),
+          labels: [`${r.arch}-${r.os}`, ...r.tags],
+          state: !r.connected
+            ? RunnerState.OFFLINE
+            : now
+              ? RunnerState.BUSY
+              : RunnerState.IDLE,
+          disabled: r.disabled,
+          version: r.version,
+          lastSeenTime: r.lastContactAt,
+          currentRun: now && {
+            run: await getRun({ id: now.runId }),
+            id: now.runId,
+            short: shortRunId(now.runId),
+            repo: now.repo,
+            ref: now.ref,
+            startTime: now.startedAt,
+          },
+        };
+      }),
+    ),
   };
 }
 
@@ -825,6 +829,8 @@ export interface Run {
   /** Full ref the run was triggered for; empty for a manual or worktree run. */
   ref: string;
   commitId: string;
+  baseCommitId: string;
+  checks: string[];
   state: RunState;
   createTime?: Timestamp;
   /** Elapsed so far while running. */
@@ -886,6 +892,8 @@ function toRun(m: RunMessage, repo: RepoRef): Run {
     repo,
     ref: m.ref,
     commitId: m.sha,
+    baseCommitId: m.baseSha,
+    checks: m.checks,
     state: m.state as number as RunState,
     createTime: m.createdAt,
     durationSeconds: elapsed(m.startedAt, m.finishedAt),

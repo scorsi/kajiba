@@ -6,6 +6,7 @@
 	every repository as a small card. Same folding strips as the repository view.
 -->
 <script lang="ts">
+	import RunRef from '#lib/components/RunRef.svelte';
 	import { page } from '$app/state';
 	import type { Snippet } from 'svelte';
 	import BandStrip from '#lib/components/BandStrip.svelte';
@@ -39,7 +40,9 @@
 			.sort((a, b) => Number(b.c.commitTime!.seconds - a.c.commitTime!.seconds))
 	);
 	const inWindow = $derived(all.filter((x) => commitDay(x.c) >= since));
-	const runByCommit = $derived(new Map(forge.runs.map((r) => [r.commitId, r])));
+	const runByCommit = $derived(
+		new Map(forge.runs.filter((r) => r.trigger !== 'worktree').map((r) => [r.commitId, r]))
+	);
 
 	const ribbon = $derived.by(() => {
 		const n = new Map<string, number>();
@@ -229,7 +232,7 @@
 	{#snippet pipeSummary()}
 		{#each running as r (r.id)}<span class="flex items-center gap-1.5"
 				><RunBadge state={r.state} size={10} /><span class="text-fg-muted">{r.repo} #{r.short}</span
-				></span
+				>{#if r.trigger === 'worktree'}<RunRef run={r} />{/if}</span
 			>{/each}
 		<span class={failures.length ? 'text-danger' : ''}>{failures.length} failed · 7 days</span>
 	{/snippet}
@@ -245,7 +248,7 @@
 							class="flex items-center gap-2 rounded-md border border-border bg-bg px-3 py-2 text-[0.8125rem] hover:border-border-strong"
 						>
 							<RunBadge state={r.state} label />
-							<span class="font-mono text-xs text-fg-muted">{r.repo} #{r.short}</span>
+							<span class="font-mono text-xs text-fg-muted">{r.repo} #{r.short}</span>{#if r.trigger === 'worktree'}<RunRef run={r} />{/if}
 							<span class="ml-auto flex w-32 gap-0.5" aria-hidden="true"
 								>{#each r.steps as s, si (si)}<span
 										class="h-1 flex-1 rounded-full {s.state === RunState.SUCCEEDED
@@ -271,7 +274,7 @@
 									class="flex items-center gap-2 rounded-sm px-1 py-0.5 hover:bg-surface-2"
 									><RunBadge state={r.state} size={11} /><span
 										class="font-mono text-xs text-fg-muted">{r.repo} #{r.short}</span
-									><span class="truncate text-xs text-fg-subtle"
+									>{#if r.trigger === 'worktree'}<RunRef run={r} />{/if}<span class="truncate text-xs text-fg-subtle"
 										>{r.steps.find((s) => s.state === RunState.FAILED)?.name}</span
 									><span class="ml-auto text-xs text-fg-subtle"
 										>{relativeTime(toDate(r.createTime))}</span
@@ -327,7 +330,7 @@
 			{#each cards as r (r.key)}
 				{@const s = spark(r.commits)}
 				{@const last = r.commits[0]}
-				{@const run = r.runs[0]}
+				{@const run = r.runs.find((run) => run.trigger !== 'worktree')}
 				<li>
 					<a
 						href={repoHref(r.key)}

@@ -2,7 +2,9 @@
 // why; once the harness's runner starts it succeeds; a failing run shows its summary; both
 // appear in the repository's Pipelines band. The runner is real, its `nix` a script (nix/apps/e2e.nix).
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { authenticator, enroll, enrollLink } from "./support";
 
@@ -92,6 +94,32 @@ test.describe.serial("CI runs", () => {
     await expect(log).toContainText("building 'fmt'");
     await expect(pulse(page)).toContainText("passed", { timeout: 30_000 });
     await expect(pulse(page)).toContainText("e2e-host");
+    await expect(
+      page.getByRole("region", { name: "What changed" }),
+    ).toHaveCount(0);
+    const consolePane = log.locator("..");
+    const bounds = await consolePane.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(
+      Math.abs(bounds!.y + bounds!.height - page.viewportSize()!.height),
+    ).toBeLessThan(4);
+    await expect(consolePane).toHaveCSS("overflow-y", "auto");
+    const gutterFits = await log
+      .locator('a[aria-label^="Line "]')
+      .first()
+      .evaluate((a) => {
+        const context = document.createElement("canvas").getContext("2d")!;
+        context.font = getComputedStyle(a).font;
+        return (
+          a.getBoundingClientRect().width >=
+          context.measureText("999999").width + 12
+        );
+      });
+    expect(gutterFits).toBe(true);
+    await page.getByRole("link", { name: /What changed/ }).click();
+    await expect(
+      page.getByRole("region", { name: "What changed" }),
+    ).toBeVisible();
   });
 
   test("a failing run shows its failure, and Pipelines lists the runs", async ({
@@ -108,6 +136,9 @@ test.describe.serial("CI runs", () => {
       );
     }).toPass({ timeout: 60_000 });
     await expect(page.locator("[data-failure]")).toContainText("exit status 1");
+    await expect(
+      page.getByRole("region", { name: "What changed" }),
+    ).toHaveCount(0);
 
     await page.goto("/alice/demo");
     const pipelines = page.getByRole("region", { name: "Pipelines" });
@@ -143,5 +174,61 @@ test.describe.serial("CI runs", () => {
     await pulse(page).locator(`a[href="/-/runs/${first}"]`).first().click();
     await expect(heading(first)).toBeVisible();
     await expect(heading(next)).toHaveCount(0);
+  });
+
+  test("worktree runs carry their own identity and stay out of branch pipelines", async ({
+    page,
+  }) => {
+    await signedIn(page);
+    const dir = mkdtempSync(join(tmpdir(), "kajiba-worktree-"));
+    try {
+      const work = join(dir, "work");
+      execFileSync("git", [
+        "clone",
+        "--quiet",
+        `${env("KAJIBA_E2E_URL")}/alice/demo.git`,
+        work,
+      ]);
+      // The harness fixture has no flake; stub the CLI's routing hint, as the runner's Nix already is.
+      writeFileSync(join(dir, "nix"), "#!/bin/sh\nprintf '[]\\n'\n", {
+        mode: 0o755,
+      });
+      const id = execFileSync(
+        "kajiba",
+        [
+          "--token-file",
+          env("KAJIBA_E2E_TOKEN_FILE"),
+          "--development",
+          "ci",
+          "run",
+          "--worktree",
+          "--check",
+          "unit",
+          "--detach",
+        ],
+        {
+          cwd: work,
+          encoding: "utf8",
+          env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+        },
+      ).trim();
+      const label = `worktree by alice on ${env("KAJIBA_E2E_MAIN_SHA").slice(0, 7)} · checks: unit`;
+      await page.goto(`/-/runs/${id}`);
+      await expect(pulse(page)).toContainText(label);
+      await expect(
+        page.getByRole("region", { name: "What changed" }),
+      ).toHaveCount(0);
+      await page.goto("/alice/demo");
+      const pipelines = page.getByRole("region", { name: "Pipelines" });
+      await expect(
+        pipelines.getByRole("heading", { name: "Worktree runs" }),
+      ).toBeVisible();
+      await expect(pipelines.locator(`a[href="/-/runs/${id}"]`)).toHaveCount(1);
+      await expect(pipelines.locator(`a[href="/-/runs/${id}"]`)).toContainText(
+        label,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

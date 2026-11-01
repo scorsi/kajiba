@@ -503,3 +503,13 @@ fn list_parses_states_repeated_or_comma_separated() {
     assert!(Cli::try_parse_from(["kajiba", "list", "--state", "done"]).is_err());
     assert!(Cli::try_parse_from(["kajiba", "list", "--limit", "0"]).is_err());
 }
+
+#[test]
+fn list_marks_worktree_user_in_ref_column() {
+    let run = Run {
+        trigger: RunTrigger::Worktree.into(),
+        triggered_by: "alice".into(),
+        ..run_in(RunState::Succeeded)
+    };
+    assert!(row(&run).unwrap().contains("  worktree:alice  "));
+}

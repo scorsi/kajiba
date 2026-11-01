@@ -51,11 +51,12 @@ type Row = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 const SELECT: &str = "SELECT run.id, run.public_id, repo.public_id, run.sha, run.ref, run.trigger,
         user.name, run.state, run.created_at, run.started_at, run.finished_at,
-        run.failure_check, run.failure_reason, run.checks
+        run.failure_check, run.failure_reason, run.checks, run.base_sha
     FROM run JOIN repo ON repo.id = run.repo_id LEFT JOIN user ON user.id = run.triggered_by";
 
 fn time(ms: Option<i64>) -> Option<Timestamp> {
@@ -178,6 +179,7 @@ impl Runs {
             finished_at: time(finished),
             job,
             failure,
+            base_sha: row.14.unwrap_or_default(),
             checks: checks
                 .and_then(|checks| serde_json::from_str(&checks).ok())
                 .unwrap_or_default(),
@@ -369,6 +371,18 @@ impl Runs {
             return Err(cursor::invalid_field(
                 "spec.checks",
                 "a check name is [A-Za-z0-9_-]+",
+            ));
+        }
+        if !spec.base_sha.is_empty()
+            && (spec.base_sha.len() != 40
+                || !spec
+                    .base_sha
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        {
+            return Err(cursor::invalid_field(
+                "spec.base_sha",
+                "a base commit is 40 lowercase hex digits",
             ));
         }
         let (arch, os) = system(&spec.system)
@@ -899,6 +913,7 @@ impl RunService for Runs {
                 correlation_id: &correlation_id,
                 now: crate::db::runs::now(),
                 worktree: Some(crate::db::runs::Worktree {
+                    base_sha: &spec.base_sha,
                     checks: &spec.checks,
                     arch: &admitted.arch,
                     os: &admitted.os,
