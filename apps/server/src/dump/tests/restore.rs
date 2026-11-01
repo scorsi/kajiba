@@ -215,7 +215,7 @@ async fn installation_refuses_occupied_locks_and_either_nonempty_destination() {
     for (path, name) in [(&server, "kajiba.lock"), (&git, "kajiba-git.lock")] {
         let held = crate::state::StateLock::acquire(&path.join(name)).unwrap();
         assert!(
-            crate::restore::install(&dump, &server, &git, owner, owner, &mut |_| Ok(()))
+            crate::restore::install(&dump, &server, &git, owner, owner, &f.root, &mut |_| Ok(()))
                 .await
                 .unwrap_err()
                 .contains("another instance holds")
@@ -225,7 +225,7 @@ async fn installation_refuses_occupied_locks_and_either_nonempty_destination() {
     for path in [&server, &git] {
         fs::write(path.join("preserve"), "existing").unwrap();
         assert!(
-            crate::restore::install(&dump, &server, &git, owner, owner, &mut |_| Ok(()))
+            crate::restore::install(&dump, &server, &git, owner, owner, &f.root, &mut |_| Ok(()))
                 .await
                 .unwrap_err()
                 .contains("not empty")
@@ -246,18 +246,29 @@ async fn installation_rolls_back_copy_and_either_switch_failure_then_can_retry()
     for phase in ["copy", "switch"] {
         for fail_at in [1, 2] {
             let mut count = 0;
-            let error = crate::restore::install(&dump, &server, &git, owner, owner, &mut |point| {
-                if point == phase {
-                    count += 1;
-                    if count == fail_at {
-                        return Err("injected filesystem failure".into());
+            let error = crate::restore::install(
+                &dump,
+                &server,
+                &git,
+                owner,
+                owner,
+                &f.root,
+                &mut |point| {
+                    if point == phase {
+                        count += 1;
+                        if count == fail_at {
+                            return Err("injected filesystem failure".into());
+                        }
                     }
-                }
-                Ok(())
-            })
+                    Ok(())
+                },
+            )
             .await
             .unwrap_err();
-            assert!(error.contains("injected filesystem failure"));
+            assert!(
+                error.contains("injected filesystem failure"),
+                "phase={phase}, fail_at={fail_at}, checkpoints={count}: {error}"
+            );
             for (path, lock) in [(&server, "kajiba.lock"), (&git, "kajiba-git.lock")] {
                 assert_eq!(
                     fs::read_dir(path)
@@ -271,7 +282,7 @@ async fn installation_rolls_back_copy_and_either_switch_failure_then_can_retry()
             assert_eq!(contents(&dump), before);
         }
     }
-    crate::restore::install(&dump, &server, &git, owner, owner, &mut |_| Ok(()))
+    crate::restore::install(&dump, &server, &git, owner, owner, &f.root, &mut |_| Ok(()))
         .await
         .unwrap();
     assert!(server.join("db/restore-pending").is_file());
@@ -303,18 +314,22 @@ async fn installation_refuses_overlapping_destinations_and_lock_symlinks() {
     let before = contents(&dump);
     let (server, git, owner) = destinations(&f);
     assert!(
-        crate::restore::install(&dump, &server, &server, owner, owner, &mut |_| Ok(()))
-            .await
-            .unwrap_err()
-            .contains("overlap")
+        crate::restore::install(&dump, &server, &server, owner, owner, &f.root, &mut |_| Ok(
+            ()
+        ))
+        .await
+        .unwrap_err()
+        .contains("overlap")
     );
     let nested = server.join("nested");
     fs::create_dir(&nested).unwrap();
     assert!(
-        crate::restore::install(&dump, &server, &nested, owner, owner, &mut |_| Ok(()))
-            .await
-            .unwrap_err()
-            .contains("overlap")
+        crate::restore::install(&dump, &server, &nested, owner, owner, &f.root, &mut |_| Ok(
+            ()
+        ))
+        .await
+        .unwrap_err()
+        .contains("overlap")
     );
     fs::remove_dir(nested).unwrap();
     let saved = f.root.join("preserve");
@@ -322,7 +337,7 @@ async fn installation_refuses_overlapping_destinations_and_lock_symlinks() {
     for (path, name) in [(&server, "kajiba.lock"), (&git, "kajiba-git.lock")] {
         symlink(&saved, path.join(name)).unwrap();
         assert!(
-            crate::restore::install(&dump, &server, &git, owner, owner, &mut |_| Ok(()))
+            crate::restore::install(&dump, &server, &git, owner, owner, &f.root, &mut |_| Ok(()))
                 .await
                 .unwrap_err()
                 .contains("not empty")
@@ -344,20 +359,21 @@ async fn installation_pins_staging_before_a_service_replaces_its_path() {
     fs::create_dir(&outside).unwrap();
     let before = contents(&outside);
     let mut replaced = false;
-    let _result = crate::restore::install(&dump, &server, &git, owner, owner, &mut |point| {
-        if point == "copy" && !replaced {
-            let stage = fs::read_dir(&server)
-                .unwrap()
-                .map(|e| e.unwrap().path())
-                .find(|p| p.file_name().unwrap().as_bytes().starts_with(b".restore-"))
-                .unwrap();
-            fs::rename(&stage, f.root.join("displaced-stage")).unwrap();
-            symlink(&outside, &stage).unwrap();
-            replaced = true;
-        }
-        Ok(())
-    })
-    .await;
+    let _result =
+        crate::restore::install(&dump, &server, &git, owner, owner, &f.root, &mut |point| {
+            if point == "copy" && !replaced {
+                let stage = fs::read_dir(&server)
+                    .unwrap()
+                    .map(|e| e.unwrap().path())
+                    .find(|p| p.file_name().unwrap().as_bytes().starts_with(b".restore-"))
+                    .unwrap();
+                fs::rename(&stage, f.root.join("displaced-stage")).unwrap();
+                symlink(&outside, &stage).unwrap();
+                replaced = true;
+            }
+            Ok(())
+        })
+        .await;
     assert!(replaced);
     // Refusal or successful installation must never touch the replacement target.
     assert_eq!(contents(&outside), before);

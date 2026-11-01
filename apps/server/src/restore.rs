@@ -72,6 +72,7 @@ pub(crate) async fn run(root: &Path, config: &ServerConfig) -> Result<()> {
         &config.git.state_dir,
         server_owner,
         git_owner,
+        &std::env::temp_dir(),
         &mut |_| Ok(()),
     )
     .await
@@ -190,6 +191,7 @@ pub(super) async fn install(
     git: &Path,
     server_owner: Identity,
     git_owner: Identity,
+    temporary: &Path,
     checkpoint: &mut impl FnMut(&str) -> Result<()>,
 ) -> Result<()> {
     for path in [root, server, git] {
@@ -263,7 +265,7 @@ pub(super) async fn install(
             stages.push((side, destination, stage, owner, pinned));
         }
         validate(&root).await?;
-        clear_staged_logs(&stages[0].4.path.join("server/db/kajiba.sqlite")).await?;
+        clear_staged_logs(&stages[0].4.path.join("server/db/kajiba.sqlite"), temporary).await?;
         fs::write(stages[0].4.path.join("server").join(MARKER), b"").map_err(|e| e.to_string())?;
         for (side, _, _, owner, pinned) in &stages {
             let stage = pinned.path.join(".");
@@ -338,20 +340,32 @@ fn permissions(path: &Path, owner: Identity) -> std::io::Result<()> {
     Ok(())
 }
 
-async fn clear_staged_logs(path: &Path) -> Result<()> {
-    // SQLite resolves descriptor paths: keep its scratch pathname outside service-owned parents.
-    let temporary = std::env::temp_dir()
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
+fn protected_directory(uid: u32, mode: u32, effective_uid: u32) -> bool {
+    [0, effective_uid].contains(&uid) && (mode & 0o022 == 0 || uid == 0 && mode & 0o1000 != 0)
+}
+
+fn protected_temporary(temporary: &Path) -> Result<PathBuf> {
+    let metadata = fs::symlink_metadata(temporary).map_err(|e| e.to_string())?;
+    if !metadata.is_dir() {
+        return Err("restore requires a protected temporary directory".into());
+    }
+    let temporary = temporary.canonicalize().map_err(|e| e.to_string())?;
     for parent in temporary.ancestors() {
         let metadata = fs::metadata(parent).map_err(|e| e.to_string())?;
-        if ![0, kajiba_core::local::effective_uid()].contains(&metadata.uid())
-            || metadata.permissions().mode() & 0o022 != 0
-                && metadata.permissions().mode() & 0o1000 == 0
-        {
+        if !protected_directory(
+            metadata.uid(),
+            metadata.permissions().mode(),
+            kajiba_core::local::effective_uid(),
+        ) {
             return Err("restore requires a protected temporary directory".into());
         }
     }
+    Ok(temporary)
+}
+
+async fn clear_staged_logs(path: &Path, temporary: &Path) -> Result<()> {
+    // SQLite resolves descriptor paths: keep its scratch pathname outside service-owned parents.
+    let temporary = protected_temporary(temporary)?;
     let scratch = temporary.join(format!(
         "kajiba-restore-db-{}",
         kajiba_core::new_id().map_err(|e| e.to_string())?
@@ -395,6 +409,60 @@ async fn clear_logs(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn temporary_directory_ownership_and_modes() {
+        // Synthetic IDs cover foreign ownership without requiring chown privileges.
+        for (uid, mode, accepted) in [
+            (1000, 0o700, true),
+            (1000, 0o750, true),
+            (0, 0o755, true),
+            (0, 0o1777, true),
+            (1000, 0o770, false),
+            (1000, 0o707, false),
+            (1000, 0o1777, false),
+            (0, 0o777, false),
+            (2000, 0o700, false),
+            (2000, 0o1777, false),
+        ] {
+            assert_eq!(
+                protected_directory(uid, mode, 1000),
+                accepted,
+                "uid={uid}, mode={mode:o}"
+            );
+        }
+        assert!(protected_directory(0, 0o700, 0));
+    }
+
+    #[test]
+    fn temporary_directory_paths_reject_symlinks_files_and_unsafe_ancestors() {
+        let root = Path::new("/tmp").canonicalize().unwrap().join(format!(
+            "kajiba-restore-temp-{}",
+            kajiba_core::new_id().unwrap()
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let mut created = Created(vec![root.clone()]);
+        assert_eq!(protected_temporary(&root).unwrap(), root);
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        assert!(protected_temporary(&link).is_err());
+        let file = root.join("file");
+        fs::write(&file, b"").unwrap();
+        assert!(protected_temporary(&file).is_err());
+        let child = root.join("child");
+        fs::DirBuilder::new().mode(0o700).create(&child).unwrap();
+        for mode in [0o770, 0o707, 0o777] {
+            fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(protected_temporary(&root).is_err(), "mode={mode:o}");
+            assert!(
+                protected_temporary(&child).is_err(),
+                "ancestor mode={mode:o}"
+            );
+        }
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(protected_temporary(&child).is_ok());
+        created.rollback().unwrap();
+    }
+
     #[test]
     fn sockets_must_be_stopped_without_pending_jobs() {
         assert!(stopped_state(

@@ -1,5 +1,5 @@
 use super::*;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
 
 mod restore;
 mod retention;
@@ -26,8 +26,15 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-        let root =
-            std::env::temp_dir().join(format!("kajiba-dump-{}", kajiba_core::new_id().unwrap()));
+        let root = Path::new("/tmp")
+            .canonicalize()
+            .unwrap()
+            .join(format!("kajiba-dump-{}", kajiba_core::new_id().unwrap()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let metadata = fs::symlink_metadata(&root).unwrap();
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.uid(), kajiba_core::local::effective_uid());
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o700);
         let server = root.join("server");
         let git = root.join("git");
         let dumps = root.join("dumps");
