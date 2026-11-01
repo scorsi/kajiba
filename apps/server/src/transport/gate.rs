@@ -423,7 +423,7 @@ impl Gate {
                 "repository not found",
             )
         })?;
-        if archived {
+        if archived && kind != SessionKind::Maintenance {
             return Err(rpc_error(
                 tonic::Code::FailedPrecondition,
                 "INVALID_STATE",

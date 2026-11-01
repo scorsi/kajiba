@@ -498,7 +498,7 @@ async fn repository_rpc_routes_correlate_errors_and_logs() {
             .iter()
             .filter(|line| line["event"] == "request")
             .collect();
-        assert_eq!(requests.len(), 4, "{logs:?}");
+        assert_eq!(requests.len(), 5, "{logs:?}");
         let ids: std::collections::BTreeSet<_> = requests
             .iter()
             .map(|line| line["request_id"].as_str().unwrap())
@@ -560,6 +560,10 @@ async fn repository_rpc_routes_correlate_errors_and_logs() {
     fs::write(temp.0.join("repos"), "not a directory").unwrap();
     let internal = client.create_repository(request).await.unwrap_err();
     assert_eq!(internal.message(), "internal error");
+    let gc = client
+        .gc(kajiba_proto::git::v1::GcRequest {})
+        .await
+        .unwrap_err();
     let hook = HookServiceClient::new(app)
         .pre_receive(PreReceiveRequest::default())
         .await
@@ -573,6 +577,7 @@ async fn repository_rpc_routes_correlate_errors_and_logs() {
             "ALREADY_EXISTS",
         ),
         (internal, tonic::Code::Internal, "INTERNAL", "INTERNAL"),
+        (gc, tonic::Code::Internal, "INTERNAL", "INTERNAL"),
         (
             hook,
             tonic::Code::InvalidArgument,

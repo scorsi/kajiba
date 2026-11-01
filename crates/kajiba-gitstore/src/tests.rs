@@ -1549,3 +1549,47 @@ fn history_keeps_distinct_author_and_committer_identities() {
     }
     assert_eq!(filtered.0.len(), 1);
 }
+
+#[test]
+fn auto_gc_finishes_packing_without_hooks_or_ref_changes() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let f = fixture("auto-gc");
+    let date = "1700000300 +0000";
+    git(&f.bare, &["repack", "-ad"], date);
+    let tree = git(&f.bare, &["rev-parse", "main^{tree}"], date);
+    let commit = git(
+        &f.bare,
+        &["commit-tree", &tree, "-p", &f.second, "-m", "gc fixture"],
+        date,
+    );
+    git(&f.bare, &["update-ref", "refs/heads/main", &commit], date);
+    git(&f.bare, &["repack", "-d"], date);
+    let packs = || {
+        fs::read_dir(f.bare.join("objects/pack"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "pack"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(packs().len(), 2);
+    git(&f.bare, &["config", "gc.autoPackLimit", "1"], date);
+    git(&f.bare, &["config", "gc.autoDetach", "true"], date);
+    fs::create_dir_all(f.bare.join("hooks")).unwrap();
+    let hook = f.bare.join("hooks/pre-auto-gc");
+    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o750)).unwrap();
+    let refs = Gix.refs(&f.bare).unwrap();
+    let head = fs::read(f.bare.join("HEAD")).unwrap();
+    assert!(super::gc(&f.bare).unwrap().success());
+    assert_eq!(packs().len(), 1);
+    assert!(!f.bare.join("gc.pid").exists());
+    assert_eq!(Gix.refs(&f.bare).unwrap(), refs);
+    assert_eq!(fs::read(f.bare.join("HEAD")).unwrap(), head);
+    assert_eq!(
+        Gix.blob(&f.bare, &commit, "README.md", 1024).unwrap(),
+        b"hello again\n"
+    );
+    for pack in packs() {
+        assert_eq!(fs::metadata(pack).unwrap().mode() & 0o070, 0o040);
+    }
+}

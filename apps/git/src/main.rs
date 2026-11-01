@@ -27,6 +27,8 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Run admitted git gc --auto through the running daemon.
+    Gc,
     /// Inspect configuration offline.
     Config {
         #[command(subcommand)]
@@ -84,6 +86,7 @@ async fn main() -> ExitCode {
         Command::Config {
             command: ConfigCommand::Check { path },
         } => path,
+        Command::Gc => return local::gc(std::path::Path::new(local::SOCKET_PATH)).await,
         Command::SshKeys { fingerprint } => {
             return ssh_keys(
                 std::path::Path::new(local::SOCKET_PATH),
@@ -123,7 +126,9 @@ async fn main() -> ExitCode {
         };
     match command {
         Command::Config { .. } => ExitCode::SUCCESS,
-        Command::SshKeys { .. } | Command::Hook { .. } | Command::ServeSsh { .. } => unreachable!(),
+        Command::Gc | Command::SshKeys { .. } | Command::Hook { .. } | Command::ServeSsh { .. } => {
+            unreachable!()
+        }
         Command::Serve { .. } => {
             if let Err(err) = log::init(&config.log.level) {
                 log::error("fatal", &err);
@@ -181,6 +186,17 @@ mod tests {
             authorized_key("01ARZ3NDEKTSV4RRFFQ69G5FAV", "ssh-ed25519 AAAA"),
             "command=\"kajiba-git serve-ssh --user 01ARZ3NDEKTSV4RRFFQ69G5FAV\",restrict ssh-ed25519 AAAA"
         );
+    }
+
+    #[test]
+    fn parses_only_argument_free_gc() {
+        assert_eq!(
+            Args::try_parse_from(["kajiba-git", "gc"]).unwrap().command,
+            Command::Gc
+        );
+        for arg in ["/tmp/repo.git", "--aggressive", "--prune=now"] {
+            assert!(Args::try_parse_from(["kajiba-git", "gc", arg]).is_err());
+        }
     }
 
     #[test]

@@ -343,6 +343,26 @@ fn git() -> Command {
     command
 }
 
+/// Fixed foreground maintenance: the daemon must keep its session until all writes end.
+pub fn gc(path: &Path) -> std::io::Result<std::process::ExitStatus> {
+    git()
+        .args([
+            "-c",
+            "gc.autoDetach=false",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .arg("--git-dir")
+        .arg(path)
+        .args(["gc", "--auto"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+}
+
 /// Name under which the import source is configured in the child's environment:
 /// the child's command line only ever names the remote. The transport helper git
 /// starts from it (`git-remote-https`, `ssh`) gets the full source as an argument

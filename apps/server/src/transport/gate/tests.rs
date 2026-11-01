@@ -1830,3 +1830,126 @@ async fn maintenance_refuses_retained_pending_push_and_reopens() {
         .unwrap();
     assert_eq!(remaining, 1);
 }
+
+#[tokio::test]
+async fn gc_sessions_serialize_push_and_import_allow_archives_and_respect_maintenance() {
+    use kajiba_proto::git::v1::SessionKind;
+    let (_state, admin, gate, alice) = session_fixture().await;
+    let gc = OpenSessionRequest {
+        generation: gate.admission.generation().unwrap(),
+        kind: SessionKind::Maintenance.into(),
+        repository: Some(open_session_request::Repository::RepoAddress(
+            "alice/demo".into(),
+        )),
+        session_id: kajiba_core::new_id().unwrap(),
+        correlation_id: "gc-test".into(),
+        ..Default::default()
+    };
+    let push = OpenSessionRequest {
+        kind: SessionKind::ReceivePack.into(),
+        user_public_id: alice,
+        session_id: kajiba_core::new_id().unwrap(),
+        ..gc.clone()
+    };
+    gate.open_session(Request::new(gc.clone())).await.unwrap();
+    assert_eq!(
+        gate.open_session(Request::new(push.clone()))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
+    assert!(matches!(
+        gate.admission
+            .admit(
+                &mut *admin.writer.lock().await,
+                1,
+                None,
+                "import",
+                &[],
+                None
+            )
+            .await,
+        Err(crate::db::pushes::Refused::InProgress)
+    ));
+    gate.session_exited(Request::new(SessionExitedRequest {
+        session_id: gc.session_id.clone(),
+        exit_status: 1,
+    }))
+    .await
+    .unwrap();
+    gate.open_session(Request::new(push.clone())).await.unwrap();
+    let mut retry = gc.clone();
+    retry.session_id = kajiba_core::new_id().unwrap();
+    assert_eq!(
+        gate.open_session(Request::new(retry.clone()))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
+    gate.session_exited(Request::new(SessionExitedRequest {
+        session_id: push.session_id,
+        exit_status: 0,
+    }))
+    .await
+    .unwrap();
+    // A durable import reservation also excludes gc before its child is opened.
+    gate.admission
+        .admit(
+            &mut *admin.writer.lock().await,
+            1,
+            None,
+            "import",
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        gate.open_session(Request::new(retry.clone()))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
+    sqlx::query("DELETE FROM pending_push")
+        .execute(&mut *admin.writer.lock().await)
+        .await
+        .unwrap();
+    gate.admission.exited(1);
+    sqlx::query("UPDATE repo SET archived_at = 1")
+        .execute(&mut *admin.writer.lock().await)
+        .await
+        .unwrap();
+    let closed = admin.maintenance.close().unwrap();
+    let err = gate
+        .open_session(Request::new(retry.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::Unavailable);
+    assert_eq!(
+        err.get_error_details().error_info().unwrap().reason,
+        "MAINTENANCE"
+    );
+    drop(closed);
+    let mut wrong_user = retry.clone();
+    wrong_user.user_public_id = "00000000000000000000000001".into();
+    assert_eq!(
+        gate.open_session(Request::new(wrong_user))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    gate.open_session(Request::new(retry.clone()))
+        .await
+        .unwrap();
+    gate.session_exited(Request::new(SessionExitedRequest {
+        session_id: retry.session_id,
+        exit_status: 0,
+    }))
+    .await
+    .unwrap();
+    assert!(!gate.admission.running(1));
+}

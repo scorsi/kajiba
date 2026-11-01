@@ -1,5 +1,6 @@
 // Tonic handlers return Status by value across the blocking filesystem work.
 #![allow(clippy::result_large_err)]
+mod gc;
 mod hooks;
 use kajiba_core::local::{channel, rpc_error, version_error};
 use kajiba_proto::{gate::v1 as gate, git::v1::*};
@@ -7,6 +8,7 @@ use std::{path::Path, time::Duration};
 use tonic::{Request, Response, Status};
 use tracing::Instrument;
 
+#[derive(Clone)]
 pub struct Git {
     pub generation: String,
     pub server_socket: std::path::PathBuf,
@@ -189,6 +191,14 @@ impl git_service_server::GitService for Git {
         .await
         .map_err(|_| Status::internal("import supervisor failed"))??;
         Ok(Response::new(FetchResponse {}))
+    }
+    async fn gc(&self, _: Request<GcRequest>) -> Result<Response<GcResponse>, Status> {
+        let git = self.clone();
+        // The supervisor and its child outlive cancellation of the requesting CLI.
+        let exit_status = tokio::spawn(async move { git.gc_all().await }.in_current_span())
+            .await
+            .map_err(|_| Status::internal("gc supervisor failed"))??;
+        Ok(Response::new(GcResponse { exit_status }))
     }
     // Reserved RPC; SSH children start through the raw descriptor handoff (ADR 0070).
     async fn spawn(&self, _: Request<SpawnRequest>) -> Result<Response<SpawnResponse>, Status> {

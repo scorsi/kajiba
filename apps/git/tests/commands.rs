@@ -24,6 +24,7 @@ fn help_succeeds_and_usage_errors_exit_two() {
     for args in [
         vec!["--help"],
         vec!["serve", "--help"],
+        vec!["gc", "--help"],
         vec!["config", "check", "--help"],
     ] {
         let output = run(&args);
@@ -33,6 +34,8 @@ fn help_succeeds_and_usage_errors_exit_two() {
     for args in [
         vec![],
         vec!["unknown"],
+        vec!["gc", "/tmp/repo.git"],
+        vec!["gc", "--prune=now"],
         vec!["--config", "git.toml"],
         vec!["serve"],
         vec!["serve", "--config"],

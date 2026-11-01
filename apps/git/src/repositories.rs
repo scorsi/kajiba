@@ -75,6 +75,35 @@ impl Repositories {
         Ok(path)
     }
 
+    pub fn gc_inventory(&self) -> Result<Vec<String>, Status> {
+        let root = self.root.join("repos");
+        real_dir(&root).map_err(internal)?;
+        let mut ids = Vec::new();
+        for entry in fs::read_dir(root).map_err(internal)? {
+            let entry = entry.map_err(internal)?;
+            let name = entry.file_name();
+            let id = name
+                .to_str()
+                .and_then(|s| s.strip_suffix(".git"))
+                .filter(|id| is_public_id(id))
+                .ok_or_else(|| internal("invalid repository directory"))?;
+            self.present(id)?;
+            ids.push(id.to_owned());
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    pub fn gc(&self, id: &str) -> Result<i32, Status> {
+        use std::os::unix::process::ExitStatusExt;
+        let mutation = self.mutation(id);
+        let _guard = mutation.lock().unwrap();
+        let status = kajiba_gitstore::gc(&self.present(id)?).map_err(internal)?;
+        Ok(status
+            .code()
+            .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)))
+    }
+
     pub fn create(&self, id: &str, branch: &str) -> Result<(), Status> {
         let mutation = self.mutation(id);
         let _guard = mutation.lock().unwrap();
@@ -268,7 +297,13 @@ impl Repositories {
     pub fn register(&self, session: Session, allowed_signers: String) -> Result<(), Status> {
         let mut sessions = self.sessions.lock().unwrap();
         // Already accepted SSH handoffs may still be awaiting server admission.
-        if sessions.draining && session.kind == kajiba_proto::git::v1::SessionKind::Import as i32 {
+        if sessions.draining
+            && matches!(
+                kajiba_proto::git::v1::SessionKind::try_from(session.kind),
+                Ok(kajiba_proto::git::v1::SessionKind::Import
+                    | kajiba_proto::git::v1::SessionKind::Maintenance)
+            )
+        {
             return Err(Status::unavailable("the git daemon is stopping"));
         }
         if sessions.running.contains_key(&session.session_id)

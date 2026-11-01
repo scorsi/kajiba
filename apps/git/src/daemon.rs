@@ -198,6 +198,7 @@ async fn rpc_request(
         }
         "/kajiba.git.v1.GitService/ListRemoteRefs" => "/kajiba.git.v1.GitService/ListRemoteRefs",
         "/kajiba.git.v1.GitService/Fetch" => "/kajiba.git.v1.GitService/Fetch",
+        "/kajiba.git.v1.GitService/Gc" => "/kajiba.git.v1.GitService/Gc",
         "/kajiba.git.v1.GitService/Spawn" => "/kajiba.git.v1.GitService/Spawn",
         "/kajiba.hook.v1.HookService/GetAuthKey" => "/kajiba.hook.v1.HookService/GetAuthKey",
         "/kajiba.hook.v1.HookService/PreReceive" => "/kajiba.hook.v1.HookService/PreReceive",

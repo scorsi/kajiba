@@ -46,3 +46,31 @@ pub async fn post_receive(
     client.post_receive(request).await?;
     Ok(())
 }
+
+/// The daemon owns the operation even if this client disconnects.
+pub async fn gc(path: &Path) -> std::process::ExitCode {
+    use kajiba_proto::git::v1::{GcRequest, git_service_client::GitServiceClient};
+    let result = async {
+        let mut client = GitServiceClient::new(channel(path, None).await?);
+        Ok::<_, Box<dyn std::error::Error>>(client.gc(GcRequest {}).await?.into_inner().exit_status)
+    }
+    .await;
+    match result {
+        Ok(status) => {
+            if status != 0 {
+                kajiba_core::log::error(
+                    "gc-failed",
+                    &format!("git gc exited with status {status}"),
+                );
+            }
+            std::process::ExitCode::from(u8::try_from(status).unwrap_or(1))
+        }
+        Err(err) => {
+            let message = err
+                .downcast_ref::<tonic::Status>()
+                .map_or_else(|| err.to_string(), |s| s.message().to_owned());
+            kajiba_core::log::error("gc-failed", &message);
+            std::process::ExitCode::FAILURE
+        }
+    }
+}

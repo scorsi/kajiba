@@ -11,6 +11,8 @@ service GitService {
   rpc QuarantineRepository(QuarantineRepositoryRequest) returns (QuarantineRepositoryResponse);
   rpc ListRemoteRefs(ListRemoteRefsRequest) returns (ListRemoteRefsResponse);
   rpc Fetch(FetchRequest) returns (FetchResponse);
+  // Fixed daemon-owned gc across registered repositories (0172).
+  rpc Gc(GcRequest) returns (GcResponse);
   rpc Spawn(SpawnRequest) returns (SpawnResponse);
 }
 
@@ -93,5 +95,10 @@ message SpawnRequest {
   SessionKind service = 3;
 }
 message SpawnResponse {
+  int32 exit_status = 1;
+}
+
+message GcRequest {}
+message GcResponse {
   int32 exit_status = 1;
 }

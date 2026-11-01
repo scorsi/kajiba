@@ -80,6 +80,9 @@ impl git_service_server::GitService for Daemon {
     async fn fetch(&self, _: Request<FetchRequest>) -> Result<Response<FetchResponse>, Status> {
         Err(Status::unimplemented("test"))
     }
+    async fn gc(&self, _: Request<GcRequest>) -> Result<Response<GcResponse>, Status> {
+        Err(Status::unimplemented("test"))
+    }
     async fn spawn(&self, _: Request<SpawnRequest>) -> Result<Response<SpawnResponse>, Status> {
         Err(Status::unimplemented("test"))
     }

@@ -9,6 +9,10 @@ use std::{
 const ID: &str = "00000000000000000000000001";
 
 fn service(root: &Path) -> Git {
+    service_with_refusal(root, None)
+}
+
+fn service_with_refusal(root: &Path, refusal: Option<Status>) -> Git {
     let git = Git {
         generation: kajiba_core::new_id().unwrap(),
         repositories: Arc::new(crate::repositories::Repositories::new(root.into())),
@@ -23,6 +27,7 @@ fn service(root: &Path) -> Git {
     .unwrap();
     let server = ImportGate {
         repositories: git.repositories.clone(),
+        refusal,
     };
     tokio::spawn(local.serve(
         tonic::service::Routes::new(gate::gate_service_server::GateServiceServer::new(server)),
@@ -33,6 +38,7 @@ fn service(root: &Path) -> Git {
 
 struct ImportGate {
     repositories: Arc<crate::repositories::Repositories>,
+    refusal: Option<Status>,
 }
 
 #[tonic::async_trait]
@@ -50,12 +56,23 @@ impl gate::gate_service_server::GateService for ImportGate {
         request: Request<gate::OpenSessionRequest>,
     ) -> Result<Response<gate::OpenSessionResponse>, Status> {
         let request = request.into_inner();
-        let session = self
-            .repositories
-            .sessions()
-            .into_iter()
-            .find(|s| s.correlation_id == request.correlation_id)
-            .unwrap();
+        if let Some(refusal) = &self.refusal {
+            return Err(refusal.clone());
+        }
+        let session = Session {
+            session_id: request.session_id,
+            kind: request.kind,
+            repo_public_id: match request.repository.unwrap() {
+                gate::open_session_request::Repository::RepoPublicId(id) => id,
+                _ => panic!("public id required"),
+            },
+            user_public_id: request.user_public_id,
+            correlation_id: request.correlation_id,
+            generation: request.generation,
+        };
+        if session.kind == SessionKind::Import as i32 {
+            assert!(self.repositories.sessions().contains(&session));
+        }
         Ok(Response::new(gate::OpenSessionResponse {
             session: Some(session),
             ..Default::default()
@@ -638,4 +655,66 @@ async fn cgroup_kill_during_fetch_empties_the_group_before_a_new_generation() {
     }
     assert_ne!(generations[0], generations[1]);
     std::fs::remove_dir(cgroup).unwrap();
+}
+
+#[tokio::test]
+async fn gc_admission_exit_reporting_and_maintenance_refusal() {
+    for refusal in [
+        None,
+        Some(kajiba_core::local::rpc_error(
+            tonic::Code::Unavailable,
+            "MAINTENANCE",
+            "maintenance; retry later",
+        )),
+    ] {
+        let temp = TempDir::new();
+        let _lock = prepare(&temp.0).unwrap();
+        let git = service_with_refusal(&temp.0, refusal.clone());
+        git.repositories.create(ID, "main").unwrap();
+        let path = temp.0.join(format!("repos/{ID}.git"));
+        if refusal.is_some() {
+            // If admission were bypassed, Git would fail reading this config.
+            std::fs::write(path.join("config"), "[broken\n").unwrap();
+            let err = git.gc(Request::new(GcRequest {})).await.unwrap_err();
+            assert_eq!(err.code(), tonic::Code::Unavailable);
+            assert!(err.message().contains("maintenance"));
+            assert!(git.repositories.sessions().is_empty());
+            assert_eq!(git.repositories.exits().len(), 1);
+            continue;
+        }
+        let head = std::fs::read(path.join("HEAD")).unwrap();
+        let refs = Gix.refs(&path).unwrap();
+        assert_eq!(
+            git.gc(Request::new(GcRequest {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .exit_status,
+            0
+        );
+        assert_eq!(std::fs::read(path.join("HEAD")).unwrap(), head);
+        assert_eq!(Gix.refs(&path).unwrap(), refs);
+        assert!(git.repositories.sessions().is_empty());
+        assert!(git.repositories.exits().is_empty());
+        assert!(
+            git.repositories
+                .metrics()
+                .contains("kajiba_git_sessions_total{kind=\"maintenance\",result=\"ok\"} 1\n")
+        );
+        std::fs::write(path.join("config"), "[broken\n").unwrap();
+        assert_ne!(
+            git.gc(Request::new(GcRequest {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .exit_status,
+            0
+        );
+        assert!(git.repositories.sessions().is_empty());
+        assert!(
+            git.repositories
+                .metrics()
+                .contains("kajiba_git_sessions_total{kind=\"maintenance\",result=\"error\"} 1\n")
+        );
+    }
 }

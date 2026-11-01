@@ -439,3 +439,89 @@ fn quarantine_accepts_only_immediate_directory_names_and_preserves_bytes() {
         assert_eq!(fs::read_to_string(first).unwrap(), "collision");
     }
 }
+
+#[test]
+fn gc_inventory_rejects_malformed_paths_and_excludes_quarantine() {
+    let temp = TempDir::new();
+    let _lock = prepare(&temp.0).unwrap();
+    let repos = Repositories::new(temp.0.clone());
+    repos.create(ID, "main").unwrap();
+    fs::create_dir(temp.0.join("tmp/orphans/reserved.git")).unwrap();
+    assert_eq!(repos.gc_inventory().unwrap(), [ID]);
+    let invalid = temp.0.join("repos/unregistered");
+    fs::create_dir(&invalid).unwrap();
+    assert!(repos.gc_inventory().is_err());
+    fs::remove_dir(&invalid).unwrap();
+    let other = temp.0.join("repos/00000000000000000000000002.git");
+    symlink(temp.0.join(format!("repos/{ID}.git")), &other).unwrap();
+    assert!(repos.gc_inventory().is_err());
+}
+
+#[test]
+fn gc_serializes_with_import_and_reports_child_failure() {
+    use std::{sync::mpsc, time::Duration};
+    let temp = TempDir::new();
+    let _lock = prepare(&temp.0).unwrap();
+    let repos = Repositories::new(temp.0.clone());
+    repos.create(ID, "main").unwrap();
+    let path = temp.0.join(format!("repos/{ID}.git"));
+    assert_eq!(repos.gc(ID).unwrap(), 0);
+    let (entered, started) = mpsc::channel();
+    let (release, resume) = mpsc::channel();
+    let (done, completed) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let repos = &repos;
+        scope.spawn(move || {
+            repos
+                .fetch_with(
+                    FetchRequest {
+                        repo_public_id: ID.into(),
+                        refs: vec![kajiba_proto::git::v1::RemoteRef {
+                            ref_name: "refs/heads/main".into(),
+                            object_id: "1".repeat(40),
+                        }],
+                        ..Default::default()
+                    },
+                    |_, _, _, _| {
+                        entered.send(()).unwrap();
+                        resume.recv().unwrap();
+                        Ok(())
+                    },
+                )
+                .unwrap()
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        scope.spawn(move || done.send(repos.gc(ID)).unwrap());
+        let waiting = completed.recv_timeout(Duration::from_millis(100));
+        release.send(()).unwrap();
+        assert!(matches!(waiting, Err(mpsc::RecvTimeoutError::Timeout)));
+        assert_eq!(
+            completed
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    });
+    fs::write(path.join("config"), "[invalid\n").unwrap();
+    assert_ne!(repos.gc(ID).unwrap(), 0);
+    assert!(repos.gc("../escape").is_err());
+}
+
+#[test]
+fn shutdown_refuses_new_gc_sessions() {
+    let repos = Repositories::new("/unused".into());
+    repos.stop_accepting();
+    let err = repos
+        .register(
+            Session {
+                session_id: ID.into(),
+                kind: kajiba_proto::git::v1::SessionKind::Maintenance.into(),
+                ..Default::default()
+            },
+            String::new(),
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), Code::Unavailable);
+    assert!(repos.sessions().is_empty());
+}
