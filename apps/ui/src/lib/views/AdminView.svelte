@@ -52,7 +52,6 @@
 		return s[Math.floor(s.length / 2)];
 	};
 	const durationMax = $derived(Math.max(1, ...forge.runs.map((r) => r.durationSeconds)));
-	const runsById = $derived(new Map(forge.runs.map((r) => [r.id, r])));
 	const queued = $derived(forge.runs.filter((r) => r.state === RunState.QUEUED));
 	const online = $derived(forge.runners.filter((r) => r.state !== RunnerState.OFFLINE));
 	const busy = $derived(forge.runners.filter((r) => r.state === RunnerState.BUSY));
@@ -227,15 +226,15 @@
 	<!-- Runners -->
 	<BandStrip label="Runners" open={runnersOpen} href={toggle('runners', runnersOpen, true)}>
 		<span class="tabular">{online.length}/{forge.runners.length} online</span>
-		{#each busy as r (r.name)}{#if r.currentRun}<span class="flex items-center gap-1.5"
-					><RunBadge state={RunState.RUNNING} size={10} /><span class="font-mono">{r.name}</span>
-					#{r.currentRun.short}<RunRef run={r.currentRun.run} /></span
-				>{/if}{/each}
+		{#each busy as r (r.name)}<span class="flex items-center gap-1.5">
+			<span class="font-mono">{r.name}</span>
+			<RunnerStateDot state={r.state} used={r.currentRuns.length} maxJobs={r.maxJobs} label />
+		</span>{/each}
 	</BandStrip>
 	{#if runnersOpen}
 		<section id="runners" class="scroll-mt-10 border-b border-border" aria-label="Runners">
 			<div
-				class="hidden grid-cols-[6rem_9rem_minmax(0,1fr)_minmax(0,1.4fr)_15rem] gap-x-5 border-b border-border/60 px-6 py-1.5 text-xs text-fg-subtle lg:grid"
+				class="hidden grid-cols-[10rem_9rem_minmax(0,1fr)_minmax(0,1.4fr)_15rem] gap-x-5 border-b border-border/60 px-6 py-1.5 text-xs text-fg-subtle lg:grid"
 				aria-hidden="true"
 			>
 				<span>State</span><span>Runner</span><span>Labels</span><span>Now</span><span
@@ -255,14 +254,13 @@
 					<ul>
 						{#each h.runners as r (r.name)}
 							{@const s = stats(r)}
-							{@const run = r.currentRun ? runsById.get(r.currentRun.id) : undefined}
 							<li
 								id="runner-{r.name}"
-								class="grid scroll-mt-10 grid-cols-[minmax(0,1fr)] gap-x-5 gap-y-1.5 px-4 py-2.5 text-[0.8125rem] target:bg-accent-soft sm:px-6 lg:grid-cols-[6rem_9rem_minmax(0,1fr)_minmax(0,1.4fr)_15rem] lg:items-center"
+								class="grid scroll-mt-10 grid-cols-[minmax(0,1fr)] gap-x-5 gap-y-1.5 px-4 py-2.5 text-[0.8125rem] target:bg-accent-soft sm:px-6 lg:grid-cols-[10rem_9rem_minmax(0,1fr)_minmax(0,1.4fr)_15rem] lg:items-center"
 							>
 								<span class="flex items-center gap-3 lg:contents">
 									<span class={r.state === RunnerState.OFFLINE ? 'text-fg-subtle' : 'text-fg-muted'}
-										><RunnerStateDot state={r.state} label /></span
+										><RunnerStateDot state={r.state} used={r.currentRuns.length} maxJobs={r.maxJobs} label /></span
 									>
 									<span class="min-w-0">
 										<span
@@ -284,29 +282,34 @@
 									{/each}
 								</span>
 								<span class="min-w-0 text-xs">
-									{#if r.state === RunnerState.BUSY && r.currentRun}
-										<a
-											href="/-/runs/{r.currentRun.id}"
-											class="flex items-center gap-1.5 hover:underline"
-											><RunBadge state={RunState.RUNNING} size={10} /><span class="font-mono"
-												>#{r.currentRun.short}</span
-											><span class="truncate font-mono text-fg-muted">{r.currentRun.repo}</span><RunRef run={r.currentRun.run} />
-											<span class="tabular ml-auto text-fg-subtle"
-												>{relativeTime(toDate(r.currentRun.startTime))}</span
-											></a
-										>
-										{#if run}
-											<span class="mt-1.5 block"><DurationBar seconds={run.durationSeconds} max={durationMax} /></span>
-											<span
-												class="mt-1.5 flex gap-0.5"
-												role="img"
-												aria-label="Steps of run #{run.short}"
-												>{#each run.steps as st, si (si)}<span
-														class="h-1 flex-1 rounded-full {stepClass(st.state)}"
-														title="{st.name} · {RUN_LABEL[st.state]}"
-													></span>{/each}</span
+									{#if r.currentRuns.length}
+										{#each r.currentRuns as current, i (i)}
+											{@const run = current.run}
+										<span class="mb-2 block last:mb-0">
+											<a
+												href="/-/runs/{current.id}"
+												class="flex items-center gap-1.5 hover:underline"
+												><RunBadge state={RunState.RUNNING} size={10} /><span class="font-mono"
+													>#{current.short}</span
+												><span class="truncate font-mono text-fg-muted">{current.repo}</span><RunRef run={current.run} />
+												<span class="tabular ml-auto text-fg-subtle" title={absoluteTime(toDate(current.startTime))}
+													>{relativeTime(toDate(current.startTime))}</span
+												></a
 											>
-										{/if}
+											{#if run}
+												<span class="mt-1.5 block"><DurationBar seconds={run.durationSeconds} max={durationMax} /></span>
+												<span
+													class="mt-1.5 flex gap-0.5"
+													role="img"
+													aria-label="Steps of run #{run.short}"
+													>{#each run.steps as st, si (si)}<span
+															class="h-1 flex-1 rounded-full {stepClass(st.state)}"
+															title="{st.name} · {RUN_LABEL[st.state]}"
+														></span>{/each}</span
+												>
+											{/if}
+										</span>
+										{/each}
 									{:else if r.state === RunnerState.OFFLINE}
 										<span class="text-fg-muted" title={absoluteTime(toDate(r.lastSeenTime))}
 											>offline · last seen {relativeTime(toDate(r.lastSeenTime))}</span

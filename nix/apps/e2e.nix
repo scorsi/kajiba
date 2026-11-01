@@ -118,7 +118,7 @@ writeShellApplication {
     bundle_file = "$dir/svid/bundle.pem"
     [runners.e2e]
     spiffe_id = "spiffe://example.org/runner/kajiba-runner"
-    capabilities = { arch = "$arch", os = "$os" }
+    capabilities = { arch = "$arch", os = "$os", max_jobs = 2 }
     [repos.demo]
     owner = "alice"
     description = "Demo repository"
@@ -218,6 +218,7 @@ writeShellApplication {
     sleep 2
     echo "building 'tests'"
     sleep 2
+    while [ -e "$KAJIBA_E2E_HOLD_FLAG" ]; do sleep 0.2; done
     echo "all checks passed"
     EOF
     chmod +x "$dir/bin/nix"
@@ -229,7 +230,7 @@ writeShellApplication {
     url = "https://127.0.0.1:$rport"
     hostname = "e2e-host"
     backends = ["nix"]
-    max_jobs = 1
+    max_jobs = 2
     state_dir = "$dir/runner"
     [tls]
     trust_domain = "example.org"
@@ -244,6 +245,7 @@ writeShellApplication {
     export KAJIBA_E2E_PENDING_RUN
     # while this file exists every run fails (the activity scenario fails one on main)
     export KAJIBA_E2E_FAIL_FLAG="$dir/fail-runs"
+    export KAJIBA_E2E_HOLD_FLAG="$dir/hold-runs"
     export KAJIBA_E2E_START_RUNNER="$dir/start-runner"
     (
       while [ ! -e "$dir/start-runner" ]; do sleep 0.2; done

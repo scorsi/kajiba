@@ -109,7 +109,7 @@ async fn only_administrators_with_the_admin_scope_are_answered() {
 }
 
 #[tokio::test]
-async fn runners_show_state_and_the_attempt_running_now() {
+async fn runners_show_state_and_all_attempts_running_now() {
     let fixture = fixture().await;
     let config = kajiba_core::config::ServerConfig::parse(
         "[http]\npublic_url = 'https://example.org'\n\
@@ -146,6 +146,24 @@ async fn runners_show_state_and_the_attempt_running_now() {
          SELECT '01ARZ3NDEKTSV4RRFFQ69G5FA3', 1, 1, id, 'running', 9000, 2000 FROM runner WHERE name = 'build-1'",
     )
     .await;
+    sql(
+        &fixture,
+        "INSERT INTO run (public_id, repo_id, sha, trigger, triggered_by, state, created_at, started_at)
+         VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FB1', 1, 'def', 'worktree', 1, 'running', 1000, 3000)",
+    )
+    .await;
+    sql(
+        &fixture,
+        "INSERT INTO job (public_id, run_id, name, requirements, replayable, max_attempts, state, created_at)
+         VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FB2', 2, 'check', '{}', 0, 1, 'running', 1000)",
+    )
+    .await;
+    sql(
+        &fixture,
+        "INSERT INTO job_attempt (public_id, job_id, number, runner_id, state, lease_expires_at, started_at)
+         SELECT '01ARZ3NDEKTSV4RRFFQ69G5FB3', 2, 1, id, 'running', 9000, 3000 FROM runner WHERE name = 'build-1'",
+    )
+    .await;
     let service = Administration(fixture.repos.0.clone());
     let listed = runners(&service).await;
     assert_eq!(
@@ -167,17 +185,34 @@ async fn runners_show_state_and_the_attempt_running_now() {
     assert_eq!(busy.last_contact_at.as_ref().unwrap().seconds, 5);
     assert_eq!(
         busy.current,
-        [RunnerAttempt {
-            run_id: "01ARZ3NDEKTSV4RRFFQ69G5FA1".into(),
-            repo: "alice/demo".into(),
-            r#ref: "refs/heads/main".into(),
-            started_at: Some(timestamp(2000)),
-        }]
+        [
+            RunnerAttempt {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FA1".into(),
+                repo: "alice/demo".into(),
+                r#ref: "refs/heads/main".into(),
+                started_at: Some(timestamp(2000)),
+            },
+            RunnerAttempt {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB1".into(),
+                repo: "alice/demo".into(),
+                r#ref: String::new(),
+                started_at: Some(timestamp(3000)),
+            }
+        ]
     );
     let idle = &listed[1];
     assert!(!idle.connected && idle.current.is_empty() && idle.last_contact_at.is_none());
 
-    // The attempt shows only while it runs.
+    // Completing one attempt frees one slot without hiding the other.
+    sql(
+        &fixture,
+        "UPDATE job_attempt SET state = 'succeeded' WHERE job_id = 1",
+    )
+    .await;
+    let partial = runners(&service).await;
+    assert_eq!(partial[0].current.as_slice(), &busy.current[1..]);
+
+    // Attempts show only while they run.
     sql(&fixture, "UPDATE job_attempt SET state = 'succeeded'").await;
     assert!(runners(&service).await.iter().all(|r| r.current.is_empty()));
 }

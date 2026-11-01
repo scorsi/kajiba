@@ -1,6 +1,7 @@
 // Administration on the real API (0139, 0144): the administrator sees the harness runner
 // connected, then its current run, and the server facts; another user gets 403 and no entry.
 // Its name sorts after ci.spec.ts, which starts the runner.
+import { writeFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { expect, test, type Page } from "@playwright/test";
 import { authenticator, enroll, enrollLink } from "./support";
@@ -29,30 +30,45 @@ test("the administrator sees the runner, its current run and the server", async 
     "e2e-host",
   );
 
-  const id = execFileSync(
-    "kajiba",
-    [
-      "--token-file",
-      env("KAJIBA_E2E_TOKEN_FILE"),
-      "--development",
-      "ci",
-      "run",
-      "--detach",
-      "alice/demo",
-      env("KAJIBA_E2E_MAIN_SHA"),
-    ],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-  ).trim();
+  const trigger = () =>
+    execFileSync(
+      "kajiba",
+      [
+        "--token-file",
+        env("KAJIBA_E2E_TOKEN_FILE"),
+        "--development",
+        "ci",
+        "run",
+        "--detach",
+        "alice/demo",
+        env("KAJIBA_E2E_MAIN_SHA"),
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+  const hold = env("KAJIBA_E2E_HOLD_FLAG");
+  writeFileSync(hold, "");
+  try {
+    const id = trigger();
+    await expect(async () => {
+      await page.reload();
+      await expect(runner.locator(`a[href="/-/runs/${id}"]`)).toBeVisible({
+        timeout: 1_500,
+      });
+    }).toPass({ timeout: 30_000 });
+    await expect(runner).toContainText("1/2 busy · partially busy");
+    const second = trigger();
+    await expect(async () => {
+      await page.reload();
+      await expect(runner).toContainText("2/2 busy · full");
+      await expect(runner.locator(`a[href="/-/runs/${id}"]`)).toBeVisible();
+      await expect(runner.locator(`a[href="/-/runs/${second}"]`)).toBeVisible();
+    }).toPass({ timeout: 30_000 });
+  } finally {
+    rmSync(hold, { force: true });
+  }
   await expect(async () => {
     await page.reload();
-    await expect(runner.locator(`a[href="/-/runs/${id}"]`)).toBeVisible({
-      timeout: 1_500,
-    });
-  }).toPass({ timeout: 30_000 });
-  await expect(runner).toContainText("busy");
-  await expect(async () => {
-    await page.reload();
-    await expect(runner).toContainText("idle", { timeout: 1_500 });
+    await expect(runner).toContainText("0/2 idle", { timeout: 1_500 });
   }).toPass({ timeout: 30_000 });
 
   // The declared repository has no mirror; the server facts are the server's.

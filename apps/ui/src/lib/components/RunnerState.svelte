@@ -11,7 +11,21 @@
 </script>
 
 <script lang="ts">
-	let { state, label = false }: { state: RunnerState; label?: boolean } = $props();
+	let {
+		state,
+		label = false,
+		used,
+		maxJobs
+	}: { state: RunnerState; label?: boolean; used?: number; maxJobs?: number } = $props();
+	const description = $derived(
+		used === undefined || maxJobs === undefined
+			? RUNNER_STATE_LABEL[state]
+			: `${used}/${maxJobs} ${
+					state === RunnerState.BUSY
+						? used >= maxJobs ? 'busy · full' : 'busy · partially busy'
+						: RUNNER_STATE_LABEL[state]
+				}`
+	);
 
 	const DOT: Record<RunnerState, string> = {
 		[RunnerState.UNSPECIFIED]: 'border border-fg-subtle',
@@ -23,10 +37,10 @@
 
 <span
 	class="inline-flex items-center gap-1.5"
-	title={label ? undefined : RUNNER_STATE_LABEL[state]}
+	title={label ? undefined : description}
 >
 	<span class="inline-block size-2 shrink-0 rounded-full {DOT[state]}" aria-hidden="true"></span>
-	{#if label}<span>{RUNNER_STATE_LABEL[state]}</span>{:else}<span class="sr-only"
-			>{RUNNER_STATE_LABEL[state]}</span
+	{#if label}<span>{description}</span>{:else}<span class="sr-only"
+			>{description}</span
 		>{/if}
 </span>

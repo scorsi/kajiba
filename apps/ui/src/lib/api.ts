@@ -379,15 +379,16 @@ export interface Runner {
   disabled: boolean;
   version: string;
   lastSeenTime?: Timestamp;
-  /** The oldest attempt running now. */
-  currentRun?: {
+  maxJobs: number;
+  /** Every attempt running now, oldest first. */
+  currentRuns: {
     run: Run;
     id: string;
     short: string;
     repo: RepoRef;
     ref: string;
     startTime?: Timestamp;
-  };
+  }[];
 }
 
 const administration = createClient(AdministrationService, transport);
@@ -398,7 +399,6 @@ export async function listRunners() {
   return {
     runners: await Promise.all(
       runners.map(async (r): Promise<Runner> => {
-        const now = r.current[0];
         return {
           name: r.name,
           host: r.hostname,
@@ -406,20 +406,23 @@ export async function listRunners() {
           labels: [`${r.arch}-${r.os}`, ...r.tags],
           state: !r.connected
             ? RunnerState.OFFLINE
-            : now
+            : r.current.length
               ? RunnerState.BUSY
               : RunnerState.IDLE,
           disabled: r.disabled,
           version: r.version,
           lastSeenTime: r.lastContactAt,
-          currentRun: now && {
-            run: await getRun({ id: now.runId }),
-            id: now.runId,
-            short: shortRunId(now.runId),
-            repo: now.repo,
-            ref: now.ref,
-            startTime: now.startedAt,
-          },
+          maxJobs: r.maxJobs,
+          currentRuns: await Promise.all(
+            r.current.map(async (now) => ({
+              run: await getRun({ id: now.runId }),
+              id: now.runId,
+              short: shortRunId(now.runId),
+              repo: now.repo,
+              ref: now.ref,
+              startTime: now.startedAt,
+            })),
+          ),
         };
       }),
     ),
