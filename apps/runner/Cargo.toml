@@ -8,6 +8,11 @@ license.workspace = true
 name = "kajiba-runner"
 path = "src/main.rs"
 
+[features]
+default = ["systemd"]
+# Disabled only by the unprivileged fake-Nix e2e harness.
+systemd = []
+
 [dependencies]
 # Already transitive (tonic): the loopback `/metrics` listener (0022).
 axum.workspace = true
@@ -21,6 +26,8 @@ kajiba-exec = { path = "../../crates/kajiba-exec" }
 libc.workspace = true
 # Reads `nix config show --json` (0009).
 serde_json.workspace = true
+# Persist restart-safe attempt records (0155).
+serde.workspace = true
 tokio.workspace = true
 # Already transitive (tonic): the outbound half of the runner stream.
 tokio-stream.workspace = true

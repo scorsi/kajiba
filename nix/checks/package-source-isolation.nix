@@ -108,4 +108,11 @@ let
     ) (builtins.attrNames packages);
 in
 assert lib.all check probes;
+# Crane consumes cargoExtraArgs before overrideAttrs; the e2e override must reach both phases.
+assert
+  let
+    runner = packages.kajiba-runner.override { withSystemd = false; };
+  in
+  lib.hasInfix "--no-default-features" runner.buildPhase
+  && lib.hasInfix "--no-default-features" runner.checkPhase;
 pkgs.runCommand "package-source-isolation" { } "touch $out"

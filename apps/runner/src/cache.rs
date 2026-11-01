@@ -34,11 +34,14 @@ pub struct Cache {
 pub struct Checkout {
     pub dir: PathBuf,
     _lock: OwnedMutexGuard<()>,
+    pub preserved: bool,
 }
 
 impl Drop for Checkout {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        if !self.preserved {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
 
@@ -104,6 +107,7 @@ impl Cache {
         let checkout = Checkout {
             dir: self.dir.join("scratch").join(attempt),
             _lock: lock.lock_owned().await,
+            preserved: false,
         };
         let cache = self.dir.join("cache").join(format!("{repo}.git"));
         if !cache.join("HEAD").exists() {

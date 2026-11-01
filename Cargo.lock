@@ -2250,6 +2250,7 @@ dependencies = [
  "kajiba-gitstore",
  "kajiba-proto",
  "libc",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-rustls",

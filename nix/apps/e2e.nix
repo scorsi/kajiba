@@ -22,6 +22,8 @@
   svidCa,
 }:
 let
+  # The fake-Nix harness runs without a system manager or the privileged job broker (0156).
+  runner = kajibaRunner.override { withSystemd = false; };
   # The suite with its node_modules (same lockfile and pnpm store as kajiba-ui).
   suite = stdenvNoCC.mkDerivation {
     pname = "kajiba-e2e-suite";
@@ -56,7 +58,7 @@ writeShellApplication {
     nodejs
     kajibaServer
     kajibaGit
-    kajibaRunner
+    runner
     kajibaCli
   ];
   text = ''

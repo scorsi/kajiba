@@ -22,12 +22,28 @@ pub struct Worker<E> {
     pub executor: E,
     pub metrics: Arc<Metrics>,
     pub max_jobs: usize,
+    pub state_dir: Option<std::path::PathBuf>,
 }
 
 /// Consume the connection's jobs until the channel closes.
-pub async fn serve<E: Executor>(worker: Worker<E>, mut jobs: mpsc::Receiver<Job>) {
+pub async fn serve<E: Executor>(
+    worker: Worker<E>,
+    mut jobs: mpsc::Receiver<Job>,
+    recovered: Vec<crate::durable::Shared>,
+) {
     let worker = Arc::new(worker);
     let running: Arc<Mutex<BTreeMap<String, oneshot::Sender<()>>>> = Arc::default();
+    for state in recovered {
+        let id = state.lock().unwrap().attempt.clone();
+        let (cancel, cancelled) = oneshot::channel();
+        running.lock().unwrap().insert(id.clone(), cancel);
+        let (worker, running) = (worker.clone(), running.clone());
+        tokio::spawn(async move {
+            let outcome = crate::unit::follow(state, &worker.attempts, cancelled).await;
+            complete(&worker, &id, outcome);
+            running.lock().unwrap().remove(&id);
+        });
+    }
     while let Some(job) = jobs.recv().await {
         match job {
             Job::Assigned(assignment) => {
@@ -56,8 +72,16 @@ pub async fn serve<E: Executor>(worker: Worker<E>, mut jobs: mpsc::Receiver<Job>
                 });
             }
             Job::Cancelled(id) => {
-                if let Some(cancel) = running.lock().unwrap().remove(&id) {
+                let cancel = running.lock().unwrap().remove(&id);
+                if let Some(cancel) = cancel {
                     let _ = cancel.send(());
+                } else if let Some(root) = &worker.state_dir {
+                    // A completed monitor may have exited before a stale attempt is cancelled.
+                    if let Ok(state) = crate::durable::State::load(root, &id) {
+                        if crate::unit::control("stop", &id).await.is_ok() {
+                            state.remove();
+                        }
+                    }
                 }
             }
         }
@@ -76,7 +100,15 @@ async fn attempt<E: Executor>(
         sha = assignment.sha
     );
     worker.attempts.accept(id);
-    let (exit, failing_check) = match execute(worker, assignment, cancelled).await {
+    complete(worker, id, execute(worker, assignment, cancelled).await);
+}
+
+fn complete<E: Executor>(
+    worker: &Worker<E>,
+    id: &str,
+    outcome: Result<(Exit, Option<String>), String>,
+) {
+    let (exit, failing_check) = match outcome {
         Ok((exit, check)) => (Ok(exit), check.unwrap_or_default()),
         Err(err) => (Err(err), String::new()),
     };
@@ -131,10 +163,26 @@ async fn execute<E: Executor>(
     mut cancelled: oneshot::Receiver<()>,
 ) -> Result<(Exit, Option<String>), String> {
     let id = assignment.attempt_id.as_str();
-    let checkout = tokio::select! {
+    let mut checkout = tokio::select! {
         checkout = worker.cache.prepare(assignment) => checkout?,
         _ = &mut cancelled => return Ok((Exit::Cancelled, None)),
     };
+    if let Some(root) = &worker.state_dir {
+        let state = crate::durable::State::new(root, assignment, checkout.dir.clone())?;
+        let state = Arc::new(Mutex::new(state));
+        if !worker.attempts.bind(id, state.clone()) {
+            state.lock().unwrap().remove();
+            return Ok((Exit::Cancelled, None));
+        }
+        // The unit owns the checkout until cancellation or ResultAck, even if this task drops.
+        checkout.preserved = true;
+        if let Err(err) = crate::unit::control("start", id).await {
+            // The broker may have started the unit before the connection failed; recover it.
+            tracing::error!(event = "job-start-failed", err);
+            std::process::exit(1);
+        }
+        return crate::unit::follow(state, &worker.attempts, cancelled).await;
+    }
     let (env, steps) = worker.executor.prepare(&kajiba_exec::Job {
         source: &checkout.dir,
         sha: &assignment.sha,

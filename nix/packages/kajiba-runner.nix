@@ -5,13 +5,16 @@
   commonCargoArgs,
   cargoArtifacts,
   git,
+  lib,
+  withSystemd ? true,
 }:
 craneLib.buildPackage (
   commonCargoArgs
   // {
     inherit cargoArtifacts;
     pname = "kajiba-runner";
-    cargoExtraArgs = "--locked -p kajiba-runner";
+    cargoExtraArgs =
+      "--locked -p kajiba-runner" + lib.optionalString (!withSystemd) " --no-default-features";
     # Tests build Git fixtures for the source cache (0106).
     nativeCheckInputs = [ git ];
     meta.mainProgram = "kajiba-runner";

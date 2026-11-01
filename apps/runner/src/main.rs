@@ -1,8 +1,10 @@
 mod cache;
+mod durable;
 mod host;
 mod metrics;
 mod session;
 mod tls;
+mod unit;
 mod work;
 
 use clap::{Parser, Subcommand};
@@ -23,6 +25,11 @@ struct Args {
 
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 enum Command {
+    /// Internal fixed entry points for the transient unit, never a shell command from a job.
+    #[command(hide = true)]
+    ExecuteJob { attempt: String },
+    #[command(hide = true)]
+    RecordJob { attempt: String },
     /// Inspect configuration offline.
     Config {
         #[command(subcommand)]
@@ -97,6 +104,41 @@ async fn main() -> ExitCode {
     log::install_panic_hook();
     let (path, files) = match Args::try_parse() {
         Ok(Args {
+            command: Some(Command::ExecuteJob { attempt }),
+            ..
+        }) => {
+            return match unit::execute(
+                &PathBuf::from(std::env::var_os("HOME").unwrap_or_default()),
+                &attempt,
+            )
+            .await
+            {
+                Ok(kajiba_exec::Exit::Code(code)) => {
+                    ExitCode::from(u8::try_from(code).unwrap_or(1))
+                }
+                Ok(_) => ExitCode::FAILURE,
+                Err(err) => {
+                    log::error("job-failed", &err);
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Ok(Args {
+            command: Some(Command::RecordJob { attempt }),
+            ..
+        }) => {
+            return match unit::record(
+                &PathBuf::from(std::env::var_os("HOME").unwrap_or_default()),
+                &attempt,
+            ) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    log::error("job-result-failed", &err);
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Ok(Args {
             command:
                 Some(Command::Config {
                     command: ConfigCommand::Check { files, path },
@@ -166,14 +208,26 @@ async fn serve(config: RunnerConfig) -> Result<(), String> {
     let client = kajiba_proto::runner::v1::runner_service_client::RunnerServiceClient::new(
         endpoint.connect_with_connector_lazy(tls.clone()),
     );
+    // Darwin has no systemd: retain the child-process backend until a launchd equivalent exists.
+    let state_dir = if cfg!(all(target_os = "linux", feature = "systemd")) {
+        Some(config.state_dir.clone())
+    } else {
+        None
+    };
+    let recovered = if let Some(root) = &state_dir {
+        unit::adopt(root, &attempts).await?
+    } else {
+        Vec::new()
+    };
     let worker = work::Worker {
         attempts: attempts.clone(),
         cache: Arc::new(cache::Cache::new(&config.state_dir, client)),
         executor: kajiba_exec::Nix::default(),
         metrics,
         max_jobs: config.max_jobs as usize,
+        state_dir,
     };
-    tokio::spawn(work::serve(worker, assigned));
+    tokio::spawn(work::serve(worker, assigned, recovered));
     tracing::info!(event = "ready");
     let connect = || endpoint.connect_with_connector(tls.clone());
     let connection = session::run(connect, identity, attempts, jobs, tokio::time::sleep);

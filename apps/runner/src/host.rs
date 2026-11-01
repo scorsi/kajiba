@@ -28,10 +28,21 @@ pub fn prepare_state(path: &Path) -> Result<StateLock, String> {
     };
     check().map_err(|err| format!("state_dir ({}): {err}", path.display()))?;
     let lock = StateLock::acquire(&path.join("kajiba-runner.lock"))?;
-    match fs::remove_dir_all(path.join("scratch")) {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => return Err(format!("scratch ({}): {err}", path.display())),
+    // A durable job owns its checkout across runner restarts; adoption cleans stale records.
+    if path.join("scratch").exists() {
+        for entry in fs::read_dir(path.join("scratch")).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if !path
+                .join("jobs")
+                .join(entry.file_name())
+                .join("state.json")
+                .exists()
+            {
+                fs::remove_dir_all(entry.path()).map_err(|e| e.to_string())?;
+            }
+        }
+        // Keep the old empty-directory cleanup guarantee.
+        let _ = fs::remove_dir(path.join("scratch"));
     }
     Ok(lock)
 }
@@ -179,6 +190,22 @@ mod tests {
         drop(lock);
         let _lock = prepare_state(&state).unwrap();
         fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn startup_preserves_only_checkouts_with_durable_attempt_records() {
+        let root =
+            std::env::temp_dir().join(format!("kajiba-preserved-scratch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        fs::create_dir_all(root.join("scratch/held")).unwrap();
+        fs::create_dir_all(root.join("scratch/orphan")).unwrap();
+        fs::create_dir_all(root.join("jobs/held")).unwrap();
+        fs::write(root.join("jobs/held/state.json"), "{}").unwrap();
+        let _lock = prepare_state(&root).unwrap();
+        assert!(root.join("scratch/held").exists());
+        assert!(!root.join("scratch/orphan").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

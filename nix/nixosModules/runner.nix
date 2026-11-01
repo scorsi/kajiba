@@ -11,6 +11,70 @@ let
   common = import ../runnerCommon.nix { inherit config lib pkgs; };
   inVarLib = lib.hasPrefix "/var/lib/";
   trusted = config.nix.settings.trusted-users or [ ];
+  # The caller supplies only an operation and a canonical attempt id, never unit properties,
+  # executable paths or arguments. Prefix-only manage-units polkit rules are not sufficient.
+  jobProperties = {
+    User = "kajiba-runner";
+    Group = "kajiba-runner";
+    UMask = "0077";
+    ReadWritePaths = "\"${lib.replaceStrings [ "\\" "\"" ] [ "\\\\" "\\\"" ] cfg.stateDir}\"";
+    ProtectSystem = "strict";
+    ProtectHome = "yes";
+    PrivateTmp = "yes";
+    PrivateDevices = "yes";
+    NoNewPrivileges = "yes";
+    CapabilityBoundingSet = "";
+    AmbientCapabilities = "";
+    RestrictAddressFamilies = "AF_UNIX AF_INET AF_INET6";
+    RestrictNamespaces = "yes";
+    RestrictRealtime = "yes";
+    RestrictSUIDSGID = "yes";
+    LockPersonality = "yes";
+    ProtectClock = "yes";
+    ProtectControlGroups = "yes";
+    ProtectHostname = "yes";
+    ProtectKernelLogs = "yes";
+    ProtectKernelModules = "yes";
+    ProtectKernelTunables = "yes";
+    ProtectProc = "invisible";
+    RemoveIPC = "yes";
+    SystemCallArchitectures = "native";
+    SystemCallFilter = "@system-service";
+    PrivateIPC = "yes";
+    LimitCORE = "0";
+    SocketBindDeny = "any";
+    TimeoutStopSec = "10s";
+    KillMode = "control-group";
+  };
+  jobBroker = pkgs.writeShellScript "kajiba-job-broker" ''
+    set -eu
+    IFS=' ' read -r operation attempt extra
+    [[ -z "$extra" && "$attempt" =~ ^[0-7][0-9A-HJKMNP-TV-Z]{25}$ ]] || exit 1
+    unit="kajiba-job-$attempt.service"
+    case "$operation" in
+      start)
+        ${pkgs.systemd}/bin/systemd-run --quiet --collect --service-type=exec --unit="$unit" \
+          ${
+            lib.concatStringsSep " " (
+              lib.mapAttrsToList (name: value: lib.escapeShellArg "--property=${name}=${value}") jobProperties
+            )
+          } \
+          ${lib.escapeShellArg "--setenv=HOME=${cfg.stateDir}"} \
+          ${lib.escapeShellArg "--setenv=PATH=${lib.makeBinPath common.path}"} \
+          --property=SystemCallFilter=~@privileged \
+          --property=StandardOutput=null --property=StandardError=journal \
+          --property="ExecStopPost=${lib.getExe cfg.package} record-job $attempt" \
+          -- ${lib.getExe cfg.package} execute-job "$attempt" >&2
+        ;;
+      stop)
+        if ! ${pkgs.systemd}/bin/systemctl stop "$unit" >&2; then
+          [[ "$(${pkgs.systemd}/bin/systemctl show --property=LoadState --value "$unit")" = not-found ]] || exit 1
+        fi
+        ;;
+      *) exit 1 ;;
+    esac
+    printf 'ok\n'
+  '';
 in
 {
   inherit (common) options;
@@ -50,11 +114,44 @@ in
         mode = "0700";
       };
     };
+    # Socket activation is the narrow root authority for starting/stopping job units.
+    # It does not depend on the runner service and survives its restart.
+    systemd.sockets.kajiba-job = {
+      wantedBy = [ "sockets.target" ];
+      socketConfig = {
+        ListenStream = "/run/kajiba-job/control";
+        Accept = true;
+        SocketUser = "kajiba-runner";
+        SocketGroup = "kajiba-runner";
+        SocketMode = "0600";
+        DirectoryMode = "0755";
+        MaxConnections = 16;
+      };
+    };
+    systemd.services."kajiba-job@" = {
+      serviceConfig = {
+        ExecStart = jobBroker;
+        StandardInput = "socket";
+        StandardOutput = "socket";
+        StandardError = "journal";
+        User = "root";
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        CapabilityBoundingSet = "";
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+        TimeoutStartSec = 30;
+        RuntimeMaxSec = 30;
+      };
+    };
     systemd.services.kajiba-runner = {
       description = "kajiba runner";
       wantedBy = [ "multi-user.target" ];
+      requires = [ "kajiba-job.socket" ];
       # The runner reconnects with backoff (0105): no wait for network-online.
       after = [
+        "kajiba-job.socket"
         "network.target"
         "nix-daemon.socket"
       ];
@@ -62,7 +159,7 @@ in
         common.configFile
         cfg.package
       ];
-      inherit (common) path;
+      path = common.path ++ [ pkgs.systemd ];
       # Nix keeps its fetcher and evaluation caches under $HOME.
       environment.HOME = cfg.stateDir;
       serviceConfig = {

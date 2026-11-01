@@ -50,6 +50,7 @@ pub enum Job {
 #[derive(Default)]
 struct Attempt {
     next: u64,
+    disk: Option<crate::durable::Shared>,
     unacknowledged: VecDeque<LogChunk>,
     steps: BTreeMap<u32, StepStatus>,
     result: Option<RunResult>,
@@ -103,6 +104,43 @@ impl Attempts {
         }));
     }
 
+    /// Attach persistence only while the server still holds this newly accepted attempt.
+    pub fn bind(&self, id: &str, disk: crate::durable::Shared) -> bool {
+        let mut inner = self.0.lock().unwrap();
+        let Some(held) = inner.attempts.get_mut(id) else {
+            return false;
+        };
+        held.disk = Some(disk);
+        true
+    }
+
+    /// Restore exactly the indexed chunks, before the first hello.
+    pub fn adopt(&self, disk: crate::durable::Shared) -> Result<(), String> {
+        let state = disk.lock().unwrap();
+        let chunks = state.chunks()?;
+        let held = Attempt {
+            next: state.sequence(),
+            unacknowledged: chunks
+                .into_iter()
+                .enumerate()
+                .map(|(i, data)| LogChunk {
+                    attempt_id: state.attempt.clone(),
+                    sequence: state.acked_sequence + i as u64 + 1,
+                    step_index: 0,
+                    data,
+                })
+                .collect(),
+            disk: Some(disk.clone()),
+            ..Default::default()
+        };
+        self.0
+            .lock()
+            .unwrap()
+            .attempts
+            .insert(state.attempt.clone(), held);
+        Ok(())
+    }
+
     /// Append log bytes (at most 64 KiB), waiting for acknowledgments when full.
     pub async fn log(&self, attempt: &str, step_index: u32, data: Vec<u8>) {
         assert!(data.len() <= kajiba_exec::CHUNK);
@@ -117,6 +155,9 @@ impl Attempts {
                     return;
                 };
                 if held.unacknowledged.len() < LOG_WINDOW {
+                    if let Some(disk) = &held.disk {
+                        persist(disk.lock().unwrap().index(data.len()));
+                    }
                     held.next += 1;
                     let chunk = LogChunk {
                         attempt_id: attempt.into(),
@@ -192,6 +233,9 @@ impl Attempts {
             }
             Server::LogAck(ack) => {
                 let held = inner.attempts.get_mut(&ack.attempt_id)?;
+                if let Some(disk) = &held.disk {
+                    persist(disk.lock().unwrap().acknowledge(ack.sequence));
+                }
                 while held
                     .unacknowledged
                     .front()
@@ -216,11 +260,23 @@ impl Attempts {
                 }
             }
             Server::ResultAck(ack) => {
-                inner.attempts.remove(&ack.attempt_id);
+                if let Some(held) = inner.attempts.remove(&ack.attempt_id) {
+                    if let Some(disk) = held.disk {
+                        disk.lock().unwrap().remove();
+                    }
+                }
                 self.1.notify_waiters();
             }
         }
         None
+    }
+}
+
+// A persistence error must stop the runner before any unindexed bytes reach the server.
+fn persist(result: Result<(), String>) {
+    if let Err(err) = result {
+        tracing::error!(event = "attempt-state-failed", err);
+        std::process::exit(1);
     }
 }
 

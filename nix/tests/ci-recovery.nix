@@ -1,7 +1,7 @@
 # J6 task 20: recovery around a long job. A WatchRun stream outlives the request timeout with
 # keepalives (0129), a server restart loses or doubles nothing, a frozen runner loses its lease
-# and the job is replayed, its late result ignored (0105); a restarted runner process loses its
-# attempt at reconnection and the job is replayed (0008).
+# and the job is replayed, its late result ignored (0105); a restarted runner re-adopts its
+# system unit and completes the same attempt with an exact log (0156).
 {
   kajibaServerPackage,
   kajibaRunnerPackage,
@@ -38,6 +38,10 @@ import ./ci-common.nix args {
   script = ''
     # Outlasts the 10 s request timeout and lease, and several 5 s keepalive periods.
     LONG = '        long = check "long" "echo long-start; /tools/sleep 20; echo long-end; echo > $out";\n'
+
+    with subtest("the runner cannot choose transient-unit commands or privileged properties"):
+        code, out = runner.execute("runuser -u kajiba-runner -- systemd-run --no-ask-password --unit=kajiba-job-01K00000000000000000000000 --property=User=root /run/current-system/sw/bin/true 2>&1")
+        assert code != 0, out
 
     with subtest("a WatchRun stream outlives the 10 s request timeout with keepalives; status says 75 meanwhile"):
         c4 = commit(LONG, "fourth")
@@ -99,17 +103,37 @@ import ./ci-common.nix args {
         assert "attempt-lost" in kinds and "attempt-replayed" in kinds, kinds
         assert finishes(r6) == 1
 
-    with subtest("a restarted runner process: its hello lists nothing, the attempt is lost and the job replayed"):
+    with subtest("a runner restart re-adopts its job unit and completes the SAME attempt without log gaps or duplicates"):
+        mark = int(sql("SELECT MAX(id) FROM event"))
         c7 = commit(LONG, "seventh")
         r7 = push(c7)
         started(r7)
         first = attempts(r7)[0][0]
+        unit = f"kajiba-job-{first}.service"
+        job_pid = runner.succeed(f"systemctl show --property=MainPID --value {unit}").strip()
+        job_cgroup = runner.succeed(f"systemctl show --property=ControlGroup --value {unit}").strip()
+        runner_cgroup = runner.succeed("systemctl show --property=ControlGroup --value kajiba-runner.service").strip()
+        assert job_pid != "0" and not job_cgroup.startswith(runner_cgroup + "/"), (job_pid, job_cgroup, runner_cgroup)
+        # Keep the private local log until after ResultAck removes the attempt state.
+        runner.succeed(f"ln /var/lib/kajiba-runner/jobs/{first}/output.log /var/lib/kajiba-runner/r7.saved.log")
         runner.succeed("systemctl restart kajiba-runner.service")
-        # Lost on reconnection: the new process's heartbeats must not keep it alive.
-        forge.wait_until_succeeds(f"test \"$(sqlite3 {db} \"SELECT state FROM job_attempt WHERE public_id = '{first}'\")\" = lost", timeout=60)
+        runner.wait_for_unit("kajiba-runner.service")
+        assert runner.succeed(f"systemctl show --property=MainPID --value {unit}").strip() == job_pid
         assert finished(r7) == "succeeded"
         tries = attempts(r7)
-        assert tries[0] == (first, "1", "lost") and len(tries) == 2 and tries[1][2] == "succeeded", tries
+        assert tries == [(first, "1", "succeeded")], tries
+        text = log_of(first)
+        assert text.count("long-start") == 1 and text.count("long-end") == 1, text
+        # Capture file bytes before cleanup, independently of the server's chunk boundaries.
+        forge.succeed(f"base64 -w0 {logs_dir}/{first}.log > /tmp/r7.remote.b64")
+        remote = forge.succeed("cat /tmp/r7.remote.b64").strip()
+        runner.wait_until_succeeds(f"test $(stat -c %s /var/lib/kajiba-runner/r7.saved.log) = {len(base64.b64decode(remote))}")
+        assert runner.succeed("base64 -w0 /var/lib/kajiba-runner/r7.saved.log").strip() == remote
+        chunks = sql(f"SELECT COUNT(*), MIN(seq), MAX(seq), SUM(length) FROM log_chunk WHERE attempt_id = (SELECT id FROM job_attempt WHERE public_id = '{first}')").split("|")
+        assert chunks[0] == chunks[2] and chunks[1] == "1" and int(chunks[3]) == len(base64.b64decode(remote)), chunks
+        kinds = sql(f"SELECT kind FROM event WHERE id > {mark}").splitlines()
+        assert "attempt-lost" not in kinds and "attempt-replayed" not in kinds, kinds
         assert finishes(r7) == 1
+        runner.wait_until_succeeds(f"test ! -d /var/lib/kajiba-runner/jobs/{first}")
   '';
 }

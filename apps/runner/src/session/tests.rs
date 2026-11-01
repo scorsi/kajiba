@@ -528,3 +528,67 @@ async fn full_log_window_backpressures_until_acknowledged_or_cancelled() {
     assert!(sent.try_recv().is_err());
     assert!(attempts.ids().is_empty());
 }
+
+#[tokio::test]
+async fn restart_replays_identical_chunks_after_the_servers_authoritative_ack() {
+    use crate::durable::State;
+    let root = std::env::temp_dir().join(format!("kajiba-session-durable-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let id = "01K00000000000000000000001";
+    let assignment = Assignment {
+        attempt_id: id.into(),
+        ..Default::default()
+    };
+    let mut state = State::new(&root, &assignment, root.join("scratch").join(id)).unwrap();
+    std::fs::write(&state.log, b"acceptedpendingnew").unwrap();
+    state.index(8).unwrap();
+    state.index(7).unwrap();
+    // Die before receiving the ack for sequence 1. Re-adopt both durable boundaries.
+    let attempts = Attempts::default();
+    let disk = Arc::new(Mutex::new(State::load(&root, id).unwrap()));
+    attempts.adopt(disk.clone()).unwrap();
+    assert_eq!(attempts.reconcile(), [id]);
+    let (outbound, mut sent) = mpsc::unbounded_channel();
+    attempts.attach(Some(outbound));
+    attempts.receive(connect_response::Message::ContinueAttempt(
+        ContinueAttempt {
+            attempt_id: id.into(),
+        },
+    ));
+    attempts.receive(connect_response::Message::LogAck(LogAck {
+        attempt_id: id.into(),
+        sequence: 1,
+    }));
+    let replay: Vec<_> = std::iter::from_fn(|| sent.try_recv().ok())
+        .map(|r| r.message.unwrap())
+        .collect();
+    assert_eq!(
+        replay,
+        [
+            Message::Accept(Accept {
+                attempt_id: id.into()
+            }),
+            Message::LogChunk(LogChunk {
+                attempt_id: id.into(),
+                sequence: 2,
+                step_index: 0,
+                data: b"pending".to_vec()
+            }),
+        ]
+    );
+    attempts.log(id, 0, b"new".to_vec()).await;
+    let Message::LogChunk(chunk) = sent.try_recv().unwrap().message.unwrap() else {
+        panic!("chunk expected")
+    };
+    assert_eq!((chunk.sequence, chunk.data), (3, b"new".to_vec()));
+    let saved = State::load(&root, id).unwrap();
+    assert_eq!(
+        (saved.acked_sequence, saved.acked_offset, saved.pending),
+        (1, 8, vec![15, 18])
+    );
+    attempts.receive(connect_response::Message::ResultAck(ResultAck {
+        attempt_id: id.into(),
+    }));
+    assert!(!state.dir().exists());
+    std::fs::remove_dir_all(root).unwrap();
+}

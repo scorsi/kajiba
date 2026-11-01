@@ -89,7 +89,7 @@ in
     stateDir = mkOption {
       type = types.strMatching "/.+";
       default = defaultStateDir;
-      description = "Source cache and scratch checkouts (0106).";
+      description = "Source cache, scratch checkouts and restart-safe job records/logs (0106, 0156).";
     };
     log.level = optional types.str "info" "tracing filter, overridden by RUST_LOG (0022).";
     metrics.listen = optional types.str "no listener" "Loopback socket address of /metrics (0022).";

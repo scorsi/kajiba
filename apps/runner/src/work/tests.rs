@@ -68,8 +68,10 @@ async fn start(name: &str, max_jobs: usize) -> Running {
             executor: Fake,
             metrics: metrics.clone(),
             max_jobs,
+            state_dir: None,
         },
         assigned,
+        Vec::new(),
     ));
     Running {
         setup,
