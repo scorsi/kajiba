@@ -996,7 +996,7 @@ export interface RunLogLine {
   group?: string;
 }
 
-/** Gives up a stream after this many consecutive failures; any message resets the count. */
+/** Gives up after this many consecutive retries without new log bytes. */
 const WATCH_RETRIES = 5;
 
 const pause = (ms: number, signal?: AbortSignal) =>
@@ -1040,7 +1040,6 @@ export async function watchRun(req: {
           { run: req.id, offset: BigInt(log.offset), follow: req.follow },
           { signal },
         )) {
-          failures = 0;
           const e = m.event;
           if (e.case === "section" && e.value.attempt)
             log.section(
@@ -1049,13 +1048,15 @@ export async function watchRun(req: {
               Number(e.value.attempt.startedAt?.seconds ?? 0n) * 1000 +
                 (e.value.attempt.startedAt?.nanos ?? 0) / 1e6,
             );
-          else if (e.case === "log")
+          else if (e.case === "log") {
+            const offset = log.offset;
             log.bytes(
               Number(e.value.offset),
               e.value.data,
               Number(e.value.producedAtMs),
             );
-          else if (e.case === "finished") return toRun(e.value, req.repo);
+            if (log.offset > offset) failures = 0;
+          } else if (e.case === "finished") return toRun(e.value, req.repo);
           else continue;
           changed();
         }
