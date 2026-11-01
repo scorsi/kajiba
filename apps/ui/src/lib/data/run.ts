@@ -7,6 +7,8 @@ import { sortChanges } from "../repo-navigation.ts";
 
 import {
   ChangeKind,
+  canManageRuns,
+  getViewer,
   RunState,
   getCommitDiff,
   getRun,
@@ -31,6 +33,7 @@ export interface StepLog {
 
 export interface RunPage {
   run: Run;
+  canManage: boolean;
   repo?: Repo;
   commit?: Commit;
   /** Files changed since the last green run (or by this commit). */
@@ -116,7 +119,7 @@ const median = (xs: number[]) => {
 export async function loadRun(id: string): Promise<RunPage> {
   const run = await getRun({ id });
   const worktree = run.trigger === "worktree";
-  const [repos, history, commits, diff, log] = await Promise.all([
+  const [repos, history, commits, diff, log, viewer] = await Promise.all([
     allRepos(),
     listRuns({ repo: run.repo, ref: run.ref, pageSize: 40 }).then((r) =>
       r.runs.filter((r) =>
@@ -137,6 +140,7 @@ export async function loadRun(id: string): Promise<RunPage> {
           .then((d) => d.changes)
           .catch(() => [] as Change[]),
     readRunLog(run.id, run.repo),
+    getViewer(),
   ]);
   const created = (r: Run) => Number(r.createTime?.seconds ?? 0n);
   const lastGreen = history.find(
@@ -167,6 +171,10 @@ export async function loadRun(id: string): Promise<RunPage> {
   return withLog(
     {
       run,
+      canManage: canManageRuns(
+        repos.find((r) => `${r.owner}/${r.name}` === run.repo),
+        viewer,
+      ),
       repo: repos.find((r) => `${r.owner}/${r.name}` === run.repo),
       commit: commits[0],
       changes: sortChanges([...changes.values()]),

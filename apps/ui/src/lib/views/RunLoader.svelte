@@ -34,5 +34,5 @@
 {:else if !data.data}
 	<div class="p-6"><Skeleton lines={12} /></div>
 {:else}
-	<RunView data={live ?? data.data} />
+	<RunView data={live ?? data.data} onchange={data.retry} />
 {/if}

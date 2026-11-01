@@ -228,6 +228,16 @@ async fn methods_require_their_scope() {
     let path = |method: &str| format!("/kajiba.v1.RunService/{method}");
     for (method, token, message) in [
         ("TriggerRun", &read, trigger.clone()),
+        (
+            "CancelRun",
+            &read,
+            CancelRunRequest::default().encode_to_vec(),
+        ),
+        (
+            "RerunRun",
+            &read,
+            RerunRunRequest::default().encode_to_vec(),
+        ),
         ("GetWorktreeBase", &read, base.clone()),
         (
             "CreateWorktreeRun",
@@ -1682,4 +1692,254 @@ async fn an_upload_silent_past_its_idle_time_ends_with_deadline_exceeded() {
         .err()
         .unwrap();
     assert_eq!(status.code(), Code::DeadlineExceeded, "{status:?}");
+}
+
+async fn cancel_run(runs: &Runs, user: i64, id: &str) -> Result<Run, Status> {
+    runs.cancel_run(as_user(user, CancelRunRequest { run: id.into() }))
+        .await
+        .map(|r| r.into_inner().run.unwrap())
+}
+
+async fn rerun_run(runs: &Runs, user: i64, id: &str) -> Result<Run, Status> {
+    runs.rerun_run(as_user(user, RerunRunRequest { run: id.into() }))
+        .await
+        .map(|r| r.into_inner().run.unwrap())
+}
+
+#[tokio::test]
+async fn cancel_queued_running_and_finished_records_each_result_once() {
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    for running in [false, true] {
+        let run = trigger(&runs, ALICE, "alice/ci", &tip).await.unwrap();
+        let mut cancellations = runs.0.ci_cancellations.subscribe();
+        let attempt = if running {
+            let progress = Progress::new(&fixture, &runs, &run.public_id).await;
+            let attempt = progress.attempt(1).await;
+            let mut writer = fixture.writer.lock().await;
+            sqlx::query("UPDATE job SET state = 'running' WHERE id = ?")
+                .bind(progress.job)
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE run SET state = 'running' WHERE public_id = ?")
+                .bind(&run.public_id)
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+            Some(attempt)
+        } else {
+            None
+        };
+        let cancelled = cancel_run(&runs, BOB, &run.public_id).await.unwrap();
+        assert_eq!(cancelled.state(), RunState::Cancelled);
+        assert_eq!(cancelled.job.as_ref().unwrap().state(), JobState::Cancelled);
+        assert!(cancelled.finished_at.is_some());
+        if let Some(attempt) = attempt {
+            assert_eq!(cancellations.recv().await.unwrap(), (1, attempt.clone()));
+            assert_eq!(
+                cancelled
+                    .job
+                    .as_ref()
+                    .unwrap()
+                    .current_attempt
+                    .as_ref()
+                    .unwrap()
+                    .state(),
+                AttemptState::Cancelled
+            );
+            let mut writer = fixture.writer.lock().await;
+            for _ in 0..2 {
+                assert_eq!(
+                    crate::db::attempts::finish(
+                        &mut writer,
+                        (1, "build-1"),
+                        &attempt,
+                        &crate::db::attempts::Finish {
+                            state: crate::db::runs::AttemptState::Succeeded,
+                            exit_code: Some(0),
+                            check: "",
+                            reason: ""
+                        },
+                        "late",
+                        1
+                    )
+                    .await
+                    .unwrap(),
+                    crate::db::attempts::Outcome::Done(vec![])
+                );
+            }
+        } else {
+            assert!(cancellations.try_recv().is_err());
+        }
+        assert_eq!(
+            cancel_run(&runs, BOB, &run.public_id).await.unwrap(),
+            cancelled
+        );
+        let events: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT kind, count(*) FROM event WHERE json_extract(payload, '$.run') = ? GROUP BY kind ORDER BY kind"
+        ).bind(&run.public_id).fetch_all(runs.readers().unwrap()).await.unwrap();
+        let mut expected = vec![
+            ("run-cancelled".into(), 1),
+            ("run-created".into(), 1),
+            ("run-finished".into(), 1),
+        ];
+        if running {
+            expected.insert(0, ("attempt-cancelled".into(), 1));
+        }
+        assert_eq!(events, expected);
+    }
+    for state in ["succeeded", "failed", "cancelled"] {
+        let run = trigger(&runs, ALICE, "alice/ci", &tip).await.unwrap();
+        sqlx::query("UPDATE run SET state = ?, finished_at = 123 WHERE public_id = ?")
+            .bind(state)
+            .bind(&run.public_id)
+            .execute(&mut *fixture.writer.lock().await)
+            .await
+            .unwrap();
+        let done = cancel_run(&runs, BOB, &run.public_id).await.unwrap();
+        assert_eq!(done.finished_at, time(Some(123)));
+        assert_eq!(
+            done.state,
+            match state {
+                "succeeded" => RunState::Succeeded,
+                "failed" => RunState::Failed,
+                _ => RunState::Cancelled,
+            } as i32
+        );
+    }
+}
+
+#[tokio::test]
+async fn run_actions_follow_trigger_authorization_order() {
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, ALICE, "alice/ci", &tip).await.unwrap();
+    for (sql, user, expected) in [
+        (
+            "UPDATE repo SET archived_at = 1 WHERE id = 1",
+            BOB,
+            (Code::FailedPrecondition, "INVALID_STATE"),
+        ),
+        (
+            "UPDATE repo SET archived_at = NULL, ci_mode = 'off' WHERE id = 1",
+            BOB,
+            (Code::FailedPrecondition, "CI_DISABLED"),
+        ),
+        (
+            "UPDATE repo SET owner_id = 2 WHERE id = 1",
+            ALICE,
+            (Code::PermissionDenied, "ROLE_MISSING"),
+        ),
+        ("SELECT 1", 999, (Code::NotFound, "REPO_NOT_FOUND")),
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *fixture.writer.lock().await)
+            .await
+            .unwrap();
+        for result in [
+            cancel_run(&runs, user, &run.public_id).await,
+            rerun_run(&runs, user, &run.public_id).await,
+        ] {
+            assert_eq!(
+                refusal(result.unwrap_err()),
+                (expected.0, expected.1.into())
+            );
+        }
+    }
+    assert_eq!(
+        refusal(cancel_run(&runs, BOB, "absent").await.unwrap_err()),
+        (Code::NotFound, "RUN_NOT_FOUND".into())
+    );
+}
+
+#[tokio::test]
+async fn rerun_clones_source_and_requirements_and_keeps_the_original() {
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let original = trigger(&runs, ALICE, "alice/ci", &tip).await.unwrap();
+    sqlx::query("UPDATE run SET trigger = 'push', ref = 'refs/heads/main' WHERE public_id = ?")
+        .bind(&original.public_id)
+        .execute(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    let new = rerun_run(&runs, BOB, &original.public_id).await.unwrap();
+    assert_ne!(new.public_id, original.public_id);
+    assert_eq!(new.rerun_of, original.public_id);
+    assert_eq!(new.sha, tip);
+    assert_eq!(new.r#ref, "refs/heads/main");
+    assert_eq!(new.trigger(), RunTrigger::Push);
+    assert_eq!(new.triggered_by, "bob");
+    assert_eq!(new.state(), RunState::Queued);
+    assert_eq!(new.job.unwrap().state(), JobState::Pending);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM run WHERE public_id = ?")
+            .bind(&original.public_id)
+            .fetch_one(runs.readers().unwrap())
+            .await
+            .unwrap(),
+        "queued"
+    );
+    let bundles = runs.0.state_dir.join("ci/bundles");
+    std::fs::create_dir_all(&bundles).unwrap();
+    sqlx::query("UPDATE run SET trigger = 'worktree', checks = '[\"unit\"]', base_sha = 'base' WHERE public_id = ?")
+        .bind(&original.public_id).execute(&mut *fixture.writer.lock().await).await.unwrap();
+    sqlx::query("UPDATE job SET requirements = '{\"backend\":\"nix\",\"arch\":\"x86_64\",\"os\":\"linux\",\"tags\":[\"kvm\"]}' WHERE public_id = ?")
+        .bind(original.job.unwrap().public_id).execute(&mut *fixture.writer.lock().await).await.unwrap();
+    assert_eq!(
+        refusal(
+            rerun_run(&runs, BOB, &original.public_id)
+                .await
+                .unwrap_err()
+        ),
+        (Code::FailedPrecondition, "BUNDLE_MISSING".into())
+    );
+    std::fs::write(
+        bundles.join(format!("{}.bundle", original.public_id)),
+        b"retained bundle",
+    )
+    .unwrap();
+    let new = rerun_run(&runs, BOB, &original.public_id).await.unwrap();
+    assert_eq!(new.checks, ["unit"]);
+    assert_eq!(new.base_sha, "base");
+    assert_eq!(
+        std::fs::read(bundles.join(format!("{}.bundle", new.public_id))).unwrap(),
+        b"retained bundle"
+    );
+    let requirements: Vec<String> = sqlx::query_scalar("SELECT requirements FROM job WHERE run_id IN (SELECT id FROM run WHERE trigger = 'worktree')")
+        .fetch_all(runs.readers().unwrap()).await.unwrap();
+    assert_eq!(requirements.len(), 2);
+    assert_eq!(requirements[0], requirements[1]);
+}
+
+#[tokio::test]
+async fn worktree_rerun_counts_concurrent_uploads_against_the_callers_limit() {
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, ALICE, "alice/ci", &tip).await.unwrap();
+    sqlx::query("UPDATE run SET trigger = 'worktree' WHERE public_id = ?")
+        .bind(&run.public_id)
+        .execute(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    let bundles = runs.0.state_dir.join("ci/bundles");
+    std::fs::create_dir_all(&bundles).unwrap();
+    std::fs::write(
+        bundles.join(format!("{}.bundle", run.public_id)),
+        b"retained",
+    )
+    .unwrap();
+    let _uploads: Vec<_> = (0..WORKTREE_RUNS)
+        .map(|_| runs.0.uploads.take(BOB, WORKTREE_RUNS).unwrap())
+        .collect();
+    assert_eq!(
+        refusal(rerun_run(&runs, BOB, &run.public_id).await.unwrap_err()),
+        (Code::ResourceExhausted, "WORKTREE_RUNS_LIMIT".into())
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM run")
+        .fetch_one(runs.readers().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(std::fs::read_dir(bundles).unwrap().count(), 1);
 }

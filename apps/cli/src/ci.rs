@@ -5,8 +5,9 @@ use crate::repo::{pretty, protojson};
 use crate::worktree::{self, Local};
 use clap::Subcommand;
 use kajiba_proto::v1::{
-    GetRunRequest, ListRunsRequest, Run, RunState, RunTrigger, TriggerRunRequest, WatchRunRequest,
-    run_service_client::RunServiceClient, watch_run_response::Event,
+    CancelRunRequest, GetRunRequest, ListRunsRequest, RerunRunRequest, Run, RunState, RunTrigger,
+    TriggerRunRequest, WatchRunRequest, run_service_client::RunServiceClient,
+    watch_run_response::Event,
 };
 use std::{io::Write, process::ExitCode, time::Duration};
 use tonic::Code;
@@ -48,6 +49,15 @@ pub enum Command {
     /// Print a run's state without waiting: exit 0 succeeded, 1 failed or cancelled,
     /// 75 pending or running.
     Status { run: String },
+    /// Cancel an unfinished run; a finished run is unchanged.
+    Cancel { run: String },
+    /// Create a new run of the same source and follow its log.
+    Rerun {
+        run: String,
+        /// Print the new run id and return at once.
+        #[arg(short, long)]
+        detach: bool,
+    },
     /// Follow a run's log until it ends.
     Watch { run: String },
     /// Print a run's stored log.
@@ -125,6 +135,24 @@ pub async fn run(
             if detach {
                 let text = format!("{}\n", run.public_id);
                 print(out, &describe(&run, json, text)?)?;
+                return Ok(ExitCode::SUCCESS);
+            }
+            let _ = writeln!(err, "kajiba: run {}", run.public_id);
+            follow(&mut runs, &run.public_id, true, out, err).await
+        }
+        Command::Cancel { run } => {
+            let run = client::answer(runs.cancel_run(CancelRunRequest { run }).await)?
+                .run
+                .ok_or_else(|| Error("the forge answered no run".into()))?;
+            print(out, &describe(&run, json, format!("{}\n", run.public_id))?)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Rerun { run, detach } => {
+            let run = client::answer(runs.rerun_run(RerunRunRequest { run }).await)?
+                .run
+                .ok_or_else(|| Error("the forge answered no run".into()))?;
+            if detach {
+                print(out, &describe(&run, json, format!("{}\n", run.public_id))?)?;
                 return Ok(ExitCode::SUCCESS);
             }
             let _ = writeln!(err, "kajiba: run {}", run.public_id);

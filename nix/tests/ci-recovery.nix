@@ -135,5 +135,24 @@ import ./ci-common.nix args {
         assert "attempt-lost" not in kinds and "attempt-replayed" not in kinds, kinds
         assert finishes(r7) == 1
         runner.wait_until_succeeds(f"test ! -d /var/lib/kajiba-runner/jobs/{first}")
+
+    with subtest("cancel stops a running transient job and records its result once"):
+        source = commit(LONG, "cancel running job")
+        run = push(source)
+        started(run)
+        attempt = attempts(run)[0][0]
+        unit = f"kajiba-job-{attempt}.service"
+        runner.succeed(f"systemctl is-active {unit}")
+        forge.succeed(f"{writer_cli} ci cancel {run}")
+        assert finished(run) == "cancelled"
+        runner.wait_until_succeeds(f"! systemctl is-active --quiet {unit}", timeout=30)
+        # A late result or a duplicate cancel cannot replace the recorded terminal result.
+        forge.succeed(f"{writer_cli} ci cancel {run}")
+        assert finishes(run) == 1
+        assert sql(f"SELECT state FROM job_attempt WHERE public_id = '{attempt}'") == "cancelled"
+        assert sql(f"SELECT COUNT(*) FROM event WHERE kind = 'attempt-cancelled' AND json_extract(payload, '$.attempt') = '{attempt}'") == "1"
+        rerun = forge.succeed(f"{writer_cli} ci rerun {run} -d").strip()
+        assert rerun != run and sql(f"SELECT rerun_of FROM run WHERE public_id = '{rerun}'") == run
+        assert finished(rerun) == "succeeded"
   '';
 }

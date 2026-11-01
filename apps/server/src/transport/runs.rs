@@ -12,9 +12,10 @@ use kajiba_gitstore::{GitStore, Gix};
 use kajiba_proto::{
     google::protobuf::Timestamp,
     v1::{
-        Attempt, AttemptState, CreateWorktreeRunRequest, CreateWorktreeRunResponse, FailureSummary,
-        GetRunRequest, GetRunResponse, GetWorktreeBaseRequest, GetWorktreeBaseResponse, Job,
-        JobState, ListRunsRequest, ListRunsResponse, LogBytes, LogSection, Run, RunState,
+        Attempt, AttemptState, CancelRunRequest, CancelRunResponse, CreateWorktreeRunRequest,
+        CreateWorktreeRunResponse, FailureSummary, GetRunRequest, GetRunResponse,
+        GetWorktreeBaseRequest, GetWorktreeBaseResponse, Job, JobState, ListRunsRequest,
+        ListRunsResponse, LogBytes, LogSection, RerunRunRequest, RerunRunResponse, Run, RunState,
         RunTrigger, TriggerRunRequest, TriggerRunResponse, WatchKeepalive, WatchRunRequest,
         WatchRunResponse, WorktreeRunSpec, create_worktree_run_request::Part,
         run_service_server::RunService, watch_run_response,
@@ -52,11 +53,12 @@ type Row = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 const SELECT: &str = "SELECT run.id, run.public_id, repo.public_id, run.sha, run.ref, run.trigger,
         user.name, run.state, run.created_at, run.started_at, run.finished_at,
-        run.failure_check, run.failure_reason, run.checks, run.base_sha
+        run.failure_check, run.failure_reason, run.checks, run.base_sha, run.rerun_of
     FROM run JOIN repo ON repo.id = run.repo_id LEFT JOIN user ON user.id = run.triggered_by";
 
 fn time(ms: Option<i64>) -> Option<Timestamp> {
@@ -180,6 +182,7 @@ impl Runs {
             job,
             failure,
             base_sha: row.14.unwrap_or_default(),
+            rerun_of: row.15.unwrap_or_default(),
             checks: checks
                 .and_then(|checks| serde_json::from_str(&checks).ok())
                 .unwrap_or_default(),
@@ -321,6 +324,12 @@ fn system(name: &str) -> Option<(&str, &str)> {
 }
 
 impl Runs {
+    async fn action_repo(&self, user: i64, repo: &str) -> Result<i64, Status> {
+        let (id, _) = find_readable(self.readers()?, user, repo).await?;
+        self.may_run(user, id).await?;
+        Ok(id)
+    }
+
     /// ADR 0114 and 0118: not archived, then the `write` role, then CI not `off` (0133).
     async fn may_run(&self, user: i64, repo_id: i64) -> Result<(), Status> {
         let (archived, ci_off): (bool, bool) = sqlx::query_as(
@@ -943,6 +952,175 @@ impl RunService for Runs {
         Ok(Response::new(CreateWorktreeRunResponse { run: Some(run) }))
     }
 
+    async fn cancel_run(
+        &self,
+        request: Request<CancelRunRequest>,
+    ) -> Result<Response<CancelRunResponse>, Status> {
+        let user = caller(&request)?;
+        let correlation = request
+            .extensions()
+            .get::<super::correlation::RequestId>()
+            .map_or_else(String::new, |id| id.0.clone());
+        let (Some(writer), Some(declared)) = (self.0.writer.get(), self.0.runners.get()) else {
+            return Err(Status::unavailable("starting"));
+        };
+        let mut writer = writer.lock().await;
+        let mut tx = sqlx::Connection::begin(&mut *writer)
+            .await
+            .map_err(internal)?;
+        let row = readable_run(&mut tx, user, &request.get_ref().run).await?;
+        let repo_id = self.action_repo(user, &row.2).await?;
+        let active = matches!(row.7.as_str(), "queued" | "running");
+        let mut cancelled = Vec::new();
+        if active {
+            let now = crate::db::runs::now();
+            cancelled = sqlx::query_as::<_, (i64, String)>(
+                "SELECT runner_id, job_attempt.public_id FROM job_attempt JOIN job ON job.id = job_id
+                 WHERE job.run_id = ? AND job_attempt.state = 'running'",
+            ).bind(row.0).fetch_all(&mut *tx).await.map_err(internal)?;
+            crate::db::retention::stop(
+                &mut tx,
+                (row.0, &row.1, repo_id),
+                crate::db::runs::RunState::Cancelled,
+                None,
+                &correlation,
+                now,
+            )
+            .await
+            .map_err(internal)?;
+            for (_, attempt) in &cancelled {
+                action_event(
+                    &mut tx,
+                    "attempt-cancelled",
+                    user,
+                    repo_id,
+                    &correlation,
+                    serde_json::json!({"run": row.1, "attempt": attempt}),
+                    now,
+                )
+                .await?;
+            }
+            action_event(
+                &mut tx,
+                "run-cancelled",
+                user,
+                repo_id,
+                &correlation,
+                serde_json::json!({"run": row.1}),
+                now,
+            )
+            .await?;
+        }
+        let row = sqlx::query_as(&format!("{SELECT} WHERE run.id = ?"))
+            .bind(row.0)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(internal)?;
+        let run = self.message(&mut tx, row).await?;
+        declared.bus.commit(tx).await.map_err(internal)?;
+        if active {
+            if let Some(registry) = self.0.ci_registry.get() {
+                registry.run_finished("cancelled");
+            }
+            for attempt in cancelled {
+                let _ = self.0.ci_cancellations.send(attempt);
+            }
+            self.0.ci_progress.send_replace(());
+            declared.wake.notify_one();
+            tracing::info!(
+                event = "run-state",
+                run = run.public_id,
+                state = "cancelled"
+            );
+        }
+        Ok(Response::new(CancelRunResponse { run: Some(run) }))
+    }
+
+    async fn rerun_run(
+        &self,
+        request: Request<RerunRunRequest>,
+    ) -> Result<Response<RerunRunResponse>, Status> {
+        let user = caller(&request)?;
+        let correlation = request
+            .extensions()
+            .get::<super::correlation::RequestId>()
+            .map_or_else(String::new, |id| id.0.clone());
+        let (Some(writer), Some(declared)) = (self.0.writer.get(), self.0.runners.get()) else {
+            return Err(Status::unavailable("starting"));
+        };
+        let mut writer = writer.lock().await;
+        let mut tx = sqlx::Connection::begin(&mut *writer)
+            .await
+            .map_err(internal)?;
+        let old = readable_run(&mut tx, user, &request.get_ref().run).await?;
+        let repo_id = self.action_repo(user, &old.2).await?;
+        let bundles = self.0.state_dir.join("ci/bundles");
+        let source = bundles.join(format!("{}.bundle", old.1));
+        if old.5 == "worktree" {
+            if !source.is_file() {
+                return Err(refused(
+                    tonic::Code::FailedPrecondition,
+                    "BUNDLE_MISSING",
+                    "the worktree bundle is no longer available".into(),
+                ));
+            }
+            if active_worktree_runs(&mut *tx, user).await? + self.0.uploads.held(&user)
+                >= WORKTREE_RUNS
+            {
+                return Err(worktree_runs_limit());
+            }
+        }
+        let id = crate::db::runs::create_run(
+            &mut tx,
+            &crate::db::runs::NewRun {
+                repo_id,
+                sha: &old.3,
+                reference: old.4.as_deref(),
+                trigger: &old.5,
+                event_id: None,
+                triggered_by: Some(user),
+                correlation_id: &correlation,
+                now: crate::db::runs::now(),
+                worktree: None,
+            },
+        )
+        .await
+        .map_err(internal)?;
+        sqlx::query("UPDATE run SET rerun_of = ?, checks = ?, base_sha = ? WHERE public_id = ?")
+            .bind(&old.1)
+            .bind(&old.13)
+            .bind(&old.14)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+        sqlx::query("UPDATE job SET requirements = (SELECT requirements FROM job WHERE run_id = ? ORDER BY id LIMIT 1)
+                     WHERE run_id = (SELECT id FROM run WHERE public_id = ?)")
+            .bind(old.0).bind(&id).execute(&mut *tx).await.map_err(internal)?;
+        let row = sqlx::query_as(&format!("{SELECT} WHERE run.public_id = ?"))
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(internal)?;
+        let run = self.message(&mut tx, row).await?;
+        let mut bundle = Upload(None);
+        if old.5 == "worktree" {
+            let target = bundles.join(format!("{id}.bundle"));
+            bundle.0 = Some(target.clone());
+            let io = |err| Status::internal(format!("bundle: {err}"));
+            std::fs::copy(source, &target).map_err(io)?;
+            std::fs::File::open(&target)
+                .and_then(|file| file.sync_all())
+                .map_err(io)?;
+            kajiba_core::state::sync_dir(&bundles).map_err(io)?;
+        }
+        declared.bus.commit(tx).await.map_err(internal)?;
+        bundle.0 = None;
+        declared.wake.notify_one();
+        tracing::info!(event = "run-state", run = id, state = "queued");
+        Ok(Response::new(RerunRunResponse { run: Some(run) }))
+    }
+
     async fn get_run(
         &self,
         request: Request<GetRunRequest>,
@@ -1027,6 +1205,37 @@ impl RunService for Runs {
             next_page_token,
         }))
     }
+}
+
+async fn action_event(
+    tx: &mut SqliteConnection,
+    kind: &str,
+    user: i64,
+    repo: i64,
+    correlation: &str,
+    payload: serde_json::Value,
+    now: i64,
+) -> Result<(), Status> {
+    let public_id = crate::db::users::new_public_id(tx, now as u128)
+        .await
+        .map_err(internal)?;
+    crate::db::events::append_event(
+        tx,
+        &crate::db::events::NewEvent {
+            public_id,
+            kind: kind.into(),
+            version: 1,
+            occurred_at: now,
+            principal_kind: "user".into(),
+            principal_id: Some(user),
+            repo_id: Some(repo),
+            correlation_id: correlation.into(),
+            payload: payload.to_string(),
+        },
+    )
+    .await
+    .map_err(internal)?;
+    Ok(())
 }
 
 #[cfg(test)]

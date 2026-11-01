@@ -105,6 +105,7 @@ pub struct Runners {
 
 impl Runners {
     pub fn new(health: Health, registry: Arc<Registry>) -> Self {
+        let _ = health.ci_registry.set(registry.clone());
         Self {
             health,
             registry,
@@ -571,20 +572,12 @@ impl Runners {
             Ok::<_, sqlx::Error>((changes, matched))
         }
         .await;
-        drop(writer);
-        // A finished worktree run's bundle goes at once, its run at retention (0122).
-        if let Some(database) = self.health.database.get() {
-            let bundles = self.health.state_dir.join("ci/bundles");
-            let dropped = match database.acquire().await {
-                Ok(mut connection) => {
-                    crate::db::retention::drop_finished_bundles(&mut connection, &bundles).await
-                }
-                Err(err) => Err(err.to_string()),
-            };
-            if let Err(err) = dropped {
-                tracing::warn!(event = "bundle-cleanup-failed", err);
-            }
+        // Serialize bundle cleanup with re-run copies (0163).
+        let bundles = self.health.state_dir.join("ci/bundles");
+        if let Err(err) = crate::db::retention::drop_finished_bundles(&mut writer, &bundles).await {
+            tracing::warn!(event = "bundle-cleanup-failed", err);
         }
+        drop(writer);
         let assigned = match result {
             Ok((changes, (assigned, pending))) => {
                 if !changes.is_empty() || !assigned.is_empty() {
@@ -856,6 +849,7 @@ impl RunnerService for Runners {
             Ok(Err(status)) => return Err(status),
             _ => return Err(invalid_field("hello", "the first message must be a hello")),
         };
+        let mut cancellations = self.health.ci_cancellations.subscribe();
         let (outbound, receiver) = mpsc::channel(16);
         let (id, generation, mut replaced) = self
             .admit(peer.as_ref(), &hello, &request_id, outbound.clone())
@@ -890,6 +884,16 @@ impl RunnerService for Runners {
                                 }
                                 Ok(Some(_)) => {}
                                 Ok(None) | Err(_) => break,
+                            },
+                            cancellation = cancellations.recv() => match cancellation {
+                                Ok((runner, attempt)) if runner == id => {
+                                    open = answer(&outbound, Ok(vec![cancel(&attempt)])).await;
+                                }
+                                Ok(_) => {}
+                                Err(_) => {
+                                    let _ = outbound.try_send(Err(Status::unavailable("reconcile cancelled attempts")));
+                                    break;
+                                }
                             },
                             () = outbound.closed() => break,
                         }

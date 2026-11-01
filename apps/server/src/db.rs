@@ -212,7 +212,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(history.len(), MIGRATOR.iter().count());
-        assert_eq!(history.len(), 16);
+        assert_eq!(history.len(), 17);
         for ((row, migration), version) in history.iter().zip(MIGRATOR.iter()).zip(1..) {
             assert_eq!(row.0, version);
             assert!(row.2);
@@ -359,7 +359,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             versions,
-            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
         );
         readers.close().await;
         writer.close().await.unwrap();
@@ -394,7 +394,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 versions,
-                [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+                [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
             );
             return;
         }
@@ -425,7 +425,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             versions,
-            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
         );
         writer.close().await.unwrap();
     }

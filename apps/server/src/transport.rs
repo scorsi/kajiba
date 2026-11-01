@@ -55,6 +55,9 @@ pub struct Health {
     runners: Arc<OnceLock<runners::Declared>>,
     /// Bumped after each commit that stores log bytes or ends attempts: wakes run watchers.
     ci_progress: Arc<watch::Sender<()>>,
+    ci_registry: Arc<OnceLock<Arc<Registry>>>,
+    /// Committed cancellations; lagging runner streams reconnect to reconcile.
+    ci_cancellations: tokio::sync::broadcast::Sender<(i64, String)>,
     /// Set once the server stops: listeners close and long-lived streams end (0140).
     stop: Arc<watch::Sender<bool>>,
     state_dir: PathBuf,
@@ -88,6 +91,8 @@ impl Health {
             clone_base: Arc::default(),
             runners: Arc::default(),
             ci_progress: Arc::new(watch::Sender::new(())),
+            ci_registry: Arc::default(),
+            ci_cancellations: tokio::sync::broadcast::channel(256).0,
             stop: Arc::new(watch::Sender::new(false)),
             git_state_dir,
             state_dir,

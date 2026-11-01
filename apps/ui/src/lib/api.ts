@@ -833,6 +833,7 @@ export interface Run {
   ref: string;
   commitId: string;
   baseCommitId: string;
+  rerunOf: string;
   checks: string[];
   state: RunState;
   createTime?: Timestamp;
@@ -896,6 +897,7 @@ function toRun(m: RunMessage, repo: RepoRef): Run {
     ref: m.ref,
     commitId: m.sha,
     baseCommitId: m.baseSha,
+    rerunOf: m.rerunOf,
     checks: m.checks,
     state: m.state as number as RunState,
     createTime: m.createdAt,
@@ -952,6 +954,36 @@ export async function getRun(req: { id: string }): Promise<Run> {
     repo: { case: "publicId", value: run.repoPublicId },
   });
   return toRun(run, repo ? `${repo.owner}/${repo.name}` : run.repoPublicId);
+}
+
+/** Browser sessions hold ci:trigger; repository roles still gate run actions. */
+export function canManageRuns(
+  repo: Repo | undefined,
+  viewer: Viewer | undefined,
+): boolean {
+  return (
+    !!repo &&
+    !!viewer &&
+    !repo.archived &&
+    repo.ciMode > CiMode.OFF &&
+    (viewer.admin ||
+      viewer.user === repo.owner ||
+      repo.permissions.some(
+        (p) => p.user === viewer.user && p.role >= Role.WRITE,
+      ))
+  );
+}
+
+export async function cancelRun(id: string): Promise<Run> {
+  const { run } = await runs.cancelRun({ run: id });
+  if (!run) throw new ApiError(Code.Unknown, "empty CancelRun answer");
+  return toRun(run, run.repoPublicId);
+}
+
+export async function rerunRun(id: string): Promise<string> {
+  const { run } = await runs.rerunRun({ run: id });
+  if (!run) throw new ApiError(Code.Unknown, "empty RerunRun answer");
+  return run.publicId;
 }
 
 export interface RunLogLine {

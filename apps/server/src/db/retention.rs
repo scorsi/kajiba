@@ -18,11 +18,12 @@ fn remove(path: &Path) -> Result<(), String> {
 /// End an unfinished run in `state` (`cancelled` or `failed`) with `reason`: its running
 /// attempts and unfinished job follow where the state machines allow it (a job that never
 /// ran is cancelled), and `run-finished` is journaled by `system`.
-async fn stop(
+pub(crate) async fn stop(
     tx: &mut SqliteConnection,
     (run_id, run, repo_id): (i64, &str, i64),
     state: RunState,
     reason: Option<&str>,
+    correlation_id: &str,
     now: i64,
 ) -> Result<(), sqlx::Error> {
     let to = |from: &str| -> Option<&'static str> {
@@ -69,7 +70,7 @@ async fn stop(
         "run-finished",
         None,
         repo_id,
-        run,
+        correlation_id,
         serde_json::json!({ "run": run, "state": state.as_str(), "check": null, "reason": reason }),
         now,
     )
@@ -114,6 +115,7 @@ pub async fn purge_worktree_runs(
             (*id, run, *repo_id),
             RunState::Cancelled,
             None,
+            run,
             now,
         )
         .await
@@ -201,6 +203,7 @@ pub async fn fail_missing_bundles(
             (*id, run, *repo_id),
             RunState::Failed,
             Some("bundle-missing"),
+            run,
             now,
         )
         .await?;

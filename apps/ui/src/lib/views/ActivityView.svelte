@@ -6,6 +6,7 @@
 	every repository as a small card. Same folding strips as the repository view.
 -->
 <script lang="ts">
+	import RunActions from '#lib/components/RunActions.svelte';
 	import ActivityChart from '#lib/components/ActivityChart.svelte';
 	import { activityRange, activityStart } from '#lib/data/activity.ts';
 	import RunRef from '#lib/components/RunRef.svelte';
@@ -14,7 +15,7 @@
 	import { goto } from '$app/navigation';
 	import type { Snippet } from 'svelte';
 	import BandStrip from '#lib/components/BandStrip.svelte';
-	import { MirrorState, RunState, type Commit } from '#lib/api.ts';
+	import { MirrorState, RunState, canManageRuns, type Commit } from '#lib/api.ts';
 	import Icon from '#lib/components/Icon.svelte';
 	import { commitSubject, relativeTime, shortId, toDate } from '#lib/format.ts';
 	import RunBadge, { RUN_LABEL } from '#lib/components/RunBadge.svelte';
@@ -166,6 +167,8 @@
 							<span class="min-w-0 truncate font-mono text-xs text-fg-muted">{r.repo} #{r.short}</span>{#if r.trigger === 'worktree'}<RunRef run={r} />{/if}
 							<span class="ml-auto"><DurationBar seconds={r.durationSeconds} max={durationMax} /></span>
 						</a>
+						<RunActions run={r} allowed={canManageRuns(forge.repos.find(p => p.key === r.repo)?.repo, forge.viewer)} rerun={false}
+							onchange={() => forge = { ...forge, runs: forge.runs.map(x => x.id === r.id ? { ...x, state: RunState.CANCELLED } : x) }} />
 					{:else}
 						<p class="text-[0.8125rem] text-fg-subtle">Nothing queued or running.</p>
 					{/each}

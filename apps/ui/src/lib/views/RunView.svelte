@@ -7,6 +7,7 @@
 	URL: ?step, ?check (StepColumns), ?steps=0 folds Steps, ?changed=0|1.
 -->
 <script lang="ts">
+	import RunActions from '#lib/components/RunActions.svelte';
 	import RunRef from '#lib/components/RunRef.svelte';
 	import { page } from '$app/state';
 	import { RunState } from '#lib/api.ts';
@@ -26,7 +27,7 @@
 		'runners-busy': 'Waiting: every matching runner is busy.'
 	};
 
-	let { data }: { data: RunPage } = $props();
+	let { data, onchange }: { data: RunPage; onchange: () => void } = $props();
 	const run = $derived(data.run);
 
 	const q = $derived(page.url.searchParams);
@@ -90,6 +91,8 @@
 			>
 		</div>
 		<RunMeta {data} class="mt-2" />
+		{#if run.rerunOf}<p class="mt-2 text-xs text-fg-muted">Re-run of <a class="font-mono text-accent hover:underline" href={runHref(run.rerunOf)}>#{run.rerunOf.slice(-8).toLowerCase()}</a></p>{/if}
+		<div class="mt-3"><RunActions {run} allowed={data.canManage} {onchange} /></div>
 		{#if run.pendingReason && run.state === RunState.QUEUED}
 			<p class="mt-3 text-[0.8125rem] text-fg-muted" data-pending={run.pendingReason}>
 				{PENDING[run.pendingReason] ?? run.pendingReason}

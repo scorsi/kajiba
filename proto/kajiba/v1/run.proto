@@ -15,6 +15,14 @@ service RunService {
   rpc TriggerRun(TriggerRunRequest) returns (TriggerRunResponse) {
     option (kajiba.v1.scope) = SCOPE_CI_TRIGGER;
   }
+  // Cancel an unfinished run; terminal runs are unchanged (ADR 0163).
+  rpc CancelRun(CancelRunRequest) returns (CancelRunResponse) {
+    option (kajiba.v1.scope) = SCOPE_CI_TRIGGER;
+  }
+  // Create a new linked run with the same source and requirements (ADR 0163).
+  rpc RerunRun(RerunRunRequest) returns (RerunRunResponse) {
+    option (kajiba.v1.scope) = SCOPE_CI_TRIGGER;
+  }
   // By public id; RUN_NOT_FOUND when absent or its repository is unreadable.
   rpc GetRun(GetRunRequest) returns (GetRunResponse) {
     option (kajiba.v1.scope) = SCOPE_REPO_READ;
@@ -58,6 +66,19 @@ message TriggerRunRequest {
 }
 
 message TriggerRunResponse {
+  Run run = 1;
+}
+
+message CancelRunRequest {
+  string run = 1;
+}
+message CancelRunResponse {
+  Run run = 1;
+}
+message RerunRunRequest {
+  string run = 1;
+}
+message RerunRunResponse {
   Run run = 1;
 }
 
@@ -123,6 +144,8 @@ message Run {
   repeated string checks = 13;
   // Client-reported HEAD before capture; display metadata only (ADR 0151).
   string base_sha = 14;
+  // Original run public id; empty for a first run (ADR 0163).
+  string rerun_of = 15;
 }
 
 enum JobState {

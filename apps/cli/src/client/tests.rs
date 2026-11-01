@@ -2,13 +2,14 @@
 #![allow(clippy::result_large_err)]
 use super::*;
 use kajiba_proto::v1::{
-    CreateWorktreeRunRequest, CreateWorktreeRunResponse, GetBlobRequest, GetBlobResponse,
-    GetCommitDiffRequest, GetCommitDiffResponse, GetRepoRequest, GetRepoResponse, GetRunRequest,
-    GetRunResponse, GetTreeRequest, GetTreeResponse, GetViewerRequest, GetViewerResponse,
-    GetWorktreeBaseRequest, GetWorktreeBaseResponse, ListCommitsRequest, ListCommitsResponse,
-    ListReposRequest, ListReposResponse, ListRunsRequest, ListRunsResponse, LogBytes, LogSection,
-    LogoutRequest, LogoutResponse, Repo, Run, TriggerRunRequest, TriggerRunResponse,
-    WatchKeepalive, WatchRunRequest, WatchRunResponse, WorktreeRunSpec,
+    CancelRunRequest, CancelRunResponse, CreateWorktreeRunRequest, CreateWorktreeRunResponse,
+    GetBlobRequest, GetBlobResponse, GetCommitDiffRequest, GetCommitDiffResponse, GetRepoRequest,
+    GetRepoResponse, GetRunRequest, GetRunResponse, GetTreeRequest, GetTreeResponse,
+    GetViewerRequest, GetViewerResponse, GetWorktreeBaseRequest, GetWorktreeBaseResponse,
+    ListCommitsRequest, ListCommitsResponse, ListReposRequest, ListReposResponse, ListRunsRequest,
+    ListRunsResponse, LogBytes, LogSection, LogoutRequest, LogoutResponse, Repo, RerunRunRequest,
+    RerunRunResponse, Run, TriggerRunRequest, TriggerRunResponse, WatchKeepalive, WatchRunRequest,
+    WatchRunResponse, WorktreeRunSpec,
     auth_service_server::{AuthService, AuthServiceServer},
     create_worktree_run_request::Part,
     get_repo_request,
@@ -254,6 +255,28 @@ impl AuthService for Fake {
 
 #[tonic::async_trait]
 impl RunService for Fake {
+    async fn cancel_run(
+        &self,
+        request: tonic::Request<CancelRunRequest>,
+    ) -> Result<Response<CancelRunResponse>, Status> {
+        self.answer("CancelRun", request, |state, request| {
+            assert_eq!(request.run, state.run.as_ref().unwrap().public_id);
+            Ok(CancelRunResponse {
+                run: state.run.clone(),
+            })
+        })
+    }
+    async fn rerun_run(
+        &self,
+        request: tonic::Request<RerunRunRequest>,
+    ) -> Result<Response<RerunRunResponse>, Status> {
+        self.answer("RerunRun", request, |state, request| {
+            assert_eq!(request.run, state.run.as_ref().unwrap().rerun_of);
+            Ok(RerunRunResponse {
+                run: state.run.clone(),
+            })
+        })
+    }
     async fn trigger_run(
         &self,
         request: tonic::Request<TriggerRunRequest>,

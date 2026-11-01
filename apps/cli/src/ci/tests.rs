@@ -513,3 +513,63 @@ fn list_marks_worktree_user_in_ref_column() {
     };
     assert!(row(&run).unwrap().contains("  worktree:alice  "));
 }
+
+#[tokio::test]
+async fn cancel_prints_the_run_and_rerun_detaches_or_follows() {
+    let (fake, url) = fake(run_in(RunState::Succeeded)).await;
+    let (code, out, _) = output(&url, Command::Cancel { run: ID.into() }, false).await;
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert_eq!(out, format!("{ID}\n"));
+    fake.0.lock().unwrap().run.as_mut().unwrap().rerun_of = "original".into();
+    let (code, out, _) = output(
+        &url,
+        Command::Rerun {
+            run: "original".into(),
+            detach: true,
+        },
+        true,
+    )
+    .await;
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert!(out.contains("\"rerunOf\": \"original\""), "{out}");
+    assert!(fake.0.lock().unwrap().watches.is_empty());
+    let (code, out, _) = output(
+        &url,
+        Command::Rerun {
+            run: "original".into(),
+            detach: false,
+        },
+        false,
+    )
+    .await;
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert_eq!(out.as_bytes(), LOG);
+    assert_eq!(fake.0.lock().unwrap().watches, [(0, true)]);
+    let calls = &fake.0.lock().unwrap().calls;
+    assert!(calls.iter().any(|(name, _)| *name == "CancelRun"));
+    assert_eq!(
+        calls.iter().filter(|(name, _)| *name == "RerunRun").count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn cancel_and_rerun_print_server_refusals() {
+    for command in [
+        Command::Cancel { run: ID.into() },
+        Command::Rerun {
+            run: ID.into(),
+            detach: true,
+        },
+    ] {
+        let (fake, url) = fake(run_in(RunState::Succeeded)).await;
+        fake.0.lock().unwrap().refusal = Some(refusal(
+            Code::PermissionDenied,
+            "ROLE_MISSING",
+            "write required",
+        ));
+        let (code, _, err) = output(&url, command, false).await;
+        assert_eq!(code, ExitCode::FAILURE);
+        assert!(err.contains("ROLE_MISSING"), "{err}");
+    }
+}

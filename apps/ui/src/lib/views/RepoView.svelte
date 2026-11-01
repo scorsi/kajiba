@@ -14,6 +14,7 @@
 	history, files, kind (History filter).
 -->
 <script lang="ts">
+	import RunActions from '#lib/components/RunActions.svelte';
 	import ActivityChart from '#lib/components/ActivityChart.svelte';
 	import { activityRange } from '#lib/data/activity.ts';
 	import RunRef from '#lib/components/RunRef.svelte';
@@ -34,6 +35,7 @@
 		getCommitDiff,
 		getTree,
 		getViewer,
+		canManageRuns,
 		listCommits,
 		listMirrorStatus,
 		listRefs,
@@ -98,8 +100,9 @@
 	const revision = $derived(at || head);
 	const historyPath = $derived(at ? (q.get('scope') ?? path) : path);
 	// Mirror state is for administrators (ADR 0139); the declared mirrors show for everyone.
+	const viewer = resource(() => getViewer());
 	const mirrors = resource(async () =>
-		(await getViewer()).admin
+		viewer.data?.admin
 			? (await listMirrorStatus()).mirrors.filter((x) => x.repo === repoKey)
 			: []
 	);
@@ -372,23 +375,28 @@
 {/snippet}
 
 {#snippet currentRun(r: Run, compact: boolean)}
-	<a
-		href="/-/runs/{r.id}"
-		class="block min-w-0 rounded-md border border-border bg-bg px-3 py-2 hover:border-border-strong"
-	>
-		<div class="flex flex-wrap items-center gap-2 text-[0.8125rem]">
-			<RunBadge state={r.state} label />
-			<span title={r.id} class="min-w-0 truncate font-mono text-xs text-fg-muted">#{r.short}</span>
-			<span class="ml-auto"><DurationBar seconds={r.durationSeconds} max={durationMax} /></span>
-		</div>
-		<p
-			title="{refShortName(r.ref)} · {r.commitId} · {r.runner}"
-			class="mt-1 truncate text-xs text-fg-muted"
+	<div class="min-w-0">
+		<a
+			href="/-/runs/{r.id}"
+			class="block min-w-0 rounded-md border border-border bg-bg px-3 py-2 hover:border-border-strong"
 		>
-			{refShortName(r.ref)} · <span class="font-mono">{shortId(r.commitId)}</span> · {r.runner}
-		</p>
-		<div class="mt-2">{@render stepsBar(r, !compact)}</div>
-	</a>
+			<div class="flex flex-wrap items-center gap-2 text-[0.8125rem]">
+				<RunBadge state={r.state} label />
+				<span title={r.id} class="min-w-0 truncate font-mono text-xs text-fg-muted">#{r.short}</span>
+				<span class="ml-auto"><DurationBar seconds={r.durationSeconds} max={durationMax} /></span>
+			</div>
+			<p
+				title="{refShortName(r.ref)} · {r.commitId} · {r.runner}"
+				class="mt-1 truncate text-xs text-fg-muted"
+			>
+				{refShortName(r.ref)} · <span class="font-mono">{shortId(r.commitId)}</span> · {r.runner}
+			</p>
+			<div class="mt-2">{@render stepsBar(r, !compact)}</div>
+		</a>
+		{#key r.id}
+			<RunActions run={r} allowed={canManageRuns(repo, viewer.data)} rerun={false} onchange={runs.retry} />
+		{/key}
+	</div>
 {/snippet}
 
 <div class="flex min-h-0 flex-1 flex-col lg:flex-row">
@@ -540,7 +548,7 @@
 						{#if current}{@render currentRun(current, false)}{/if}
 						<div class="min-w-0">
 							<ul class="relative flex gap-2 overflow-x-auto pb-1">
-								{#each branchRuns.slice(1, 9) as r (r.id)}
+								{#each branchRuns.filter((r) => r.id !== current?.id).slice(0, 8) as r (r.id)}
 									<li class="shrink-0">
 										<a
 											href="/-/runs/{r.id}"
@@ -559,6 +567,7 @@
 												<span class="font-mono">{shortId(r.commitId)}</span></span
 											>
 										</a>
+										<RunActions run={r} allowed={canManageRuns(repo, viewer.data)} rerun={false} onchange={runs.retry} />
 									</li>
 								{/each}
 							</ul>
@@ -572,6 +581,7 @@
 									<a href="/-/runs/{r.id}" class="flex flex-wrap items-center gap-2 text-xs hover:underline">
 										<RunBadge state={r.state} size={11} />#{r.short} <RunRef run={r} />
 									</a>
+									<RunActions run={r} allowed={canManageRuns(repo, viewer.data)} rerun={false} onchange={runs.retry} />
 								</li>
 							{/each}
 						</ul>

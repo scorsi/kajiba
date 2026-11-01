@@ -81,6 +81,8 @@ fn known(path: &str) -> Option<&'static str> {
         "/kajiba.v1.RepoService/GetBlob" => "/kajiba.v1.RepoService/GetBlob",
         "/kajiba.v1.RepoService/ListCommits" => "/kajiba.v1.RepoService/ListCommits",
         "/kajiba.v1.RepoService/GetCommitDiff" => "/kajiba.v1.RepoService/GetCommitDiff",
+        "/kajiba.v1.RunService/CancelRun" => "/kajiba.v1.RunService/CancelRun",
+        "/kajiba.v1.RunService/RerunRun" => "/kajiba.v1.RunService/RerunRun",
         "/kajiba.v1.RunService/TriggerRun" => "/kajiba.v1.RunService/TriggerRun",
         "/kajiba.v1.RunService/GetRun" => "/kajiba.v1.RunService/GetRun",
         "/kajiba.v1.RunService/ListRuns" => "/kajiba.v1.RunService/ListRuns",

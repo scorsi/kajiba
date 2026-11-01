@@ -16,6 +16,7 @@ import {
   type Repo,
   type Run,
   type Runner,
+  type Viewer,
 } from "#lib/api.ts";
 import { refShortName, toDate } from "#lib/format.ts";
 import { allRepos, recentRuns } from "#lib/loaders.ts";
@@ -31,6 +32,7 @@ export interface RepoActivity {
 }
 
 export interface Forge {
+  viewer: Viewer;
   repos: RepoActivity[];
   runs: Run[];
   runners: Runner[];
@@ -39,7 +41,8 @@ export interface Forge {
 
 export async function loadForge(): Promise<Forge> {
   // Runners and mirrors are for administrators (ADR 0139).
-  const { admin } = await getViewer();
+  const viewer = await getViewer();
+  const { admin } = viewer;
   const [repos, runs, runners, mirrors] = await Promise.all([
     allRepos(),
     recentRuns(50),
@@ -72,7 +75,7 @@ export async function loadForge(): Promise<Forge> {
       };
     }),
   );
-  return { repos: per, runs, runners, mirrors };
+  return { viewer, repos: per, runs, runners, mirrors };
 }
 
 /** Local calendar day key. */

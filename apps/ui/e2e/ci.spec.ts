@@ -232,3 +232,131 @@ test.describe.serial("CI runs", () => {
     }
   });
 });
+
+test("cancel confirms inline, stops the run, and re-run opens a new linked run", async ({
+  page,
+  browser,
+}) => {
+  // signedIn creates the context's sole internal authenticator (support.ts).
+  await signedIn(page);
+  const hold = env("KAJIBA_E2E_HOLD_FLAG");
+  writeFileSync(hold, "");
+  try {
+    const id = trigger(env("KAJIBA_E2E_MAIN_SHA"));
+    await page.goto(`/-/runs/${id}`);
+    // Cancellation needs an assigned attempt, independently of log delivery.
+    const status = pulse(page)
+      .getByRole("heading", { name: /^Run #/ })
+      .locator("..");
+    await expect(status.getByText("running", { exact: true })).toBeVisible();
+    const actions = page.getByLabel("Run actions");
+    await actions.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(actions.getByText("Cancel this run?")).toBeVisible();
+    await actions.getByRole("button", { name: "Keep running" }).click();
+    await expect(
+      actions.getByRole("button", { name: "Confirm cancel" }),
+    ).toHaveCount(0);
+    await actions.getByRole("button", { name: "Cancel", exact: true }).click();
+    await actions.getByRole("button", { name: "Confirm cancel" }).click();
+    await expect(status.getByText("cancelled", { exact: true })).toBeVisible();
+    await expect(
+      actions.getByRole("button", { name: "Cancel", exact: true }),
+    ).toHaveCount(0);
+    await actions.getByRole("button", { name: "Re-run", exact: true }).click();
+    await expect(page).not.toHaveURL(new RegExp(`/-/runs/${id}$`));
+    await expect(page).toHaveURL(/\/-\/runs\/[0-9A-HJKMNP-TV-Z]{26}$/);
+    const newId = page.url().split("/").at(-1)!;
+    expect(newId).not.toBe(id);
+    await expect(pulse(page)).toContainText("Re-run of");
+    await expect(
+      pulse(page).getByRole("link", {
+        name: `#${id.slice(-8).toLowerCase()}`,
+        exact: true,
+      }),
+    ).toBeVisible();
+    rmSync(hold, { force: true });
+    await expect(status.getByText("passed", { exact: true })).toBeVisible({
+      timeout: 30_000,
+    });
+
+    // A second user needs a fresh context, never a second internal authenticator.
+    const reader = await browser.newContext({
+      baseURL: new URL(page.url()).origin,
+    });
+    try {
+      const view = await reader.newPage();
+      await authenticator(view);
+      await enroll(view, enrollLink("reader"), "reader");
+      await view.getByRole("link", { name: "Continue to kajiba" }).click();
+      await view.goto(`/-/runs/${newId}`);
+      await expect(view.getByRole("heading", { name: /^Run #/ })).toBeVisible();
+      await expect(view.getByLabel("Run actions")).toHaveCount(0);
+    } finally {
+      await reader.close();
+    }
+  } finally {
+    rmSync(hold, { force: true });
+  }
+});
+
+test("Pipelines cancels inline and a reader has no cancel action", async ({
+  page,
+  browser,
+}) => {
+  await signedIn(page);
+  const hold = env("KAJIBA_E2E_HOLD_FLAG");
+  writeFileSync(hold, "");
+  try {
+    const older = trigger(env("KAJIBA_E2E_MAIN_SHA"));
+    const id = trigger(env("KAJIBA_E2E_MAIN_SHA"));
+    await page.goto("/alice/demo");
+    const pipelines = page.getByRole("region", { name: "Pipelines" });
+    // With both slots occupied, cancelling the newest promotes the older running card.
+    await expect(async () => {
+      await page.reload();
+      for (const run of [older, id])
+        await expect(
+          pipelines.locator(`a[href="/-/runs/${run}"]`),
+        ).toContainText("running");
+    }).toPass({ timeout: 15_000 });
+    const reader = await browser.newContext({
+      baseURL: new URL(page.url()).origin,
+    });
+    try {
+      const view = await reader.newPage();
+      await authenticator(view);
+      await enroll(view, enrollLink("reader"), "reader");
+      await view.getByRole("link", { name: "Continue to kajiba" }).click();
+      await view.goto(`/-/runs/${id}`);
+      await expect(view.getByRole("heading", { name: /^Run #/ })).toBeVisible();
+      await expect(
+        view.getByRole("button", { name: "Cancel", exact: true }),
+      ).toHaveCount(0);
+      await view.goto("/alice/demo");
+      await expect(
+        view.getByRole("region", { name: "Pipelines" }),
+      ).toBeVisible();
+      await expect(
+        view.getByRole("button", { name: "Cancel", exact: true }),
+      ).toHaveCount(0);
+    } finally {
+      await reader.close();
+    }
+    const card = pipelines.locator(`a[href="/-/runs/${id}"]`).locator("..");
+    await card.getByRole("button", { name: "Cancel", exact: true }).click();
+    await pipelines.getByRole("button", { name: "Confirm cancel" }).click();
+    await expect(pipelines.locator(`a[href="/-/runs/${id}"]`)).toContainText(
+      "cancelled",
+    );
+    const promoted = pipelines
+      .locator(`a[href="/-/runs/${older}"]`)
+      .locator("..");
+    await promoted.getByRole("button", { name: "Cancel", exact: true }).click();
+    await promoted.getByRole("button", { name: "Confirm cancel" }).click();
+    await expect(pipelines.locator(`a[href="/-/runs/${older}"]`)).toContainText(
+      "cancelled",
+    );
+  } finally {
+    rmSync(hold, { force: true });
+  }
+});

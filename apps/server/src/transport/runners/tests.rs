@@ -1907,3 +1907,76 @@ async fn a_reload_cuts_only_the_streams_whose_declaration_went_or_changed_identi
         .unwrap_err();
     assert_eq!(ended.code(), tonic::Code::Unavailable);
 }
+
+#[tokio::test]
+async fn cancelling_a_silent_running_job_pushes_cancel_and_ignores_late_results() {
+    use kajiba_proto::v1::{CancelRunRequest, Scope, run_service_server::RunService};
+    let forge = Forge::start().await;
+    let run = forge.run().await;
+    let (sender, mut stream) = forge
+        .connect(Some(BUILD_1), hello("build-1"))
+        .await
+        .unwrap();
+    let connect_response::Message::Assignment(assignment) = next(&mut stream).await else {
+        panic!("expected assignment");
+    };
+    sender
+        .send(ConnectRequest {
+            message: Some(Message::Accept(kajiba_proto::runner::v1::Accept {
+                attempt_id: assignment.attempt_id.clone(),
+            })),
+        })
+        .await
+        .unwrap();
+    forge
+        .until("SELECT count(*) FROM run WHERE state = 'running'", 1)
+        .await;
+    let request = || {
+        let mut request = Request::new(CancelRunRequest { run: run.clone() });
+        request
+            .extensions_mut()
+            .insert(super::super::auth::Principal {
+                user_id: 1,
+                scopes: vec![Scope::CiTrigger],
+                session: None,
+            });
+        request
+    };
+    let runs = super::super::runs::Runs(forge.state.health.clone());
+    let cancelled = runs.cancel_run(request()).await.unwrap().into_inner();
+    assert_eq!(
+        next(&mut stream).await,
+        connect_response::Message::CancelAttempt(CancelAttempt {
+            attempt_id: assignment.attempt_id.clone(),
+        })
+    );
+    sender
+        .send(ConnectRequest {
+            message: Some(Message::Result(kajiba_proto::runner::v1::Result {
+                attempt_id: assignment.attempt_id.clone(),
+                state: ResultState::Succeeded.into(),
+                exit_code: Some(0),
+                ..Default::default()
+            })),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        next(&mut stream).await,
+        connect_response::Message::ResultAck(ResultAck {
+            attempt_id: assignment.attempt_id,
+        })
+    );
+    assert_eq!(
+        runs.cancel_run(request()).await.unwrap().into_inner(),
+        cancelled
+    );
+    forge
+        .until("SELECT count(*) FROM event WHERE kind = 'run-finished'", 1)
+        .await;
+    assert_eq!(
+        forge.sql::<(String,)>("SELECT state FROM run").await,
+        [("cancelled".into(),)]
+    );
+    assert!(forge.metric("kajiba_runs_total{result=\"cancelled\"} 1"));
+}
