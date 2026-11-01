@@ -13,6 +13,7 @@
 -->
 <script lang="ts">
 	import RunRef from '#lib/components/RunRef.svelte';
+	import DurationBar from '#lib/components/DurationBar.svelte';
 	import { page } from '$app/state';
 	import {
 		MirrorState,
@@ -50,6 +51,7 @@
 		const s = [...xs].sort((a, b) => a - b);
 		return s[Math.floor(s.length / 2)];
 	};
+	const durationMax = $derived(Math.max(1, ...forge.runs.map((r) => r.durationSeconds)));
 	const runsById = $derived(new Map(forge.runs.map((r) => [r.id, r])));
 	const queued = $derived(forge.runs.filter((r) => r.state === RunState.QUEUED));
 	const online = $derived(forge.runners.filter((r) => r.state !== RunnerState.OFFLINE));
@@ -294,6 +296,7 @@
 											></a
 										>
 										{#if run}
+											<span class="mt-1.5 block"><DurationBar seconds={run.durationSeconds} max={durationMax} /></span>
 											<span
 												class="mt-1.5 flex gap-0.5"
 												role="img"

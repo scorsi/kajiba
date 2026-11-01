@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
 	import RunRef from '#lib/components/RunRef.svelte';
+	import DurationBar from '#lib/components/DurationBar.svelte';
 	import { page } from '$app/state';
 	import type { Snippet } from 'svelte';
 	import BandStrip from '#lib/components/BandStrip.svelte';
@@ -15,7 +16,7 @@
 	import { commitSubject, relativeTime, shortId, toDate } from '#lib/format.ts';
 	import RunBadge, { RUN_LABEL } from '#lib/components/RunBadge.svelte';
 	import { buildEvents, countEvents } from '#lib/data/events.ts';
-	import { commitDay, dur, lastDays, repoHref, type Forge } from '#lib/data/forge.ts';
+	import { commitDay, lastDays, repoHref, type Forge } from '#lib/data/forge.ts';
 	import HistoryFeed from '#lib/components/HistoryFeed.svelte';
 	import NeedsAttention from '#lib/components/NeedsAttention.svelte';
 
@@ -73,6 +74,7 @@
 	const runs7 = $derived(forge.runs.filter((r) => Number(r.createTime!.seconds) > weekAgo));
 	const passed7 = $derived(runs7.filter((r) => r.state === RunState.SUCCEEDED).length);
 	const running = $derived(forge.runs.filter((r) => r.state === RunState.RUNNING));
+	const durationMax = $derived(Math.max(1, ...running.map((r) => r.durationSeconds)));
 	const failures = $derived(runs7.filter((r) => r.state === RunState.FAILED));
 	const activeRepos = $derived(new Set(inWindow.map((x) => x.r.key)).size);
 	const authors = $derived(new Set(inWindow.map((x) => x.c.authorName)).size);
@@ -245,20 +247,11 @@
 					{#each running as r (r.id)}
 						<a
 							href="/-/runs/{r.id}"
-							class="flex items-center gap-2 rounded-md border border-border bg-bg px-3 py-2 text-[0.8125rem] hover:border-border-strong"
+							class="flex flex-wrap items-center gap-2 rounded-md border border-border bg-bg px-3 py-2 text-[0.8125rem] hover:border-border-strong"
 						>
 							<RunBadge state={r.state} label />
-							<span class="font-mono text-xs text-fg-muted">{r.repo} #{r.short}</span>{#if r.trigger === 'worktree'}<RunRef run={r} />{/if}
-							<span class="ml-auto flex w-32 gap-0.5" aria-hidden="true"
-								>{#each r.steps as s, si (si)}<span
-										class="h-1 flex-1 rounded-full {s.state === RunState.SUCCEEDED
-											? 'bg-ok'
-											: s.state === RunState.RUNNING
-												? 'bg-accent'
-												: 'bg-border'}"
-									></span>{/each}</span
-							>
-							<span class="tabular text-xs text-fg-subtle">{dur(r.durationSeconds)}</span>
+							<span class="min-w-0 truncate font-mono text-xs text-fg-muted">{r.repo} #{r.short}</span>{#if r.trigger === 'worktree'}<RunRef run={r} />{/if}
+							<span class="ml-auto"><DurationBar seconds={r.durationSeconds} max={durationMax} /></span>
 						</a>
 					{:else}
 						<p class="text-[0.8125rem] text-fg-subtle">Nothing running.</p>

@@ -15,6 +15,7 @@
 -->
 <script lang="ts">
 	import RunRef from '#lib/components/RunRef.svelte';
+	import DurationBar from '#lib/components/DurationBar.svelte';
 	import { uniqueCommits } from '#lib/data/forge.ts';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
@@ -106,6 +107,7 @@
 	);
 	const worktreeRuns = $derived((runs.data ?? []).filter((r) => r.trigger === 'worktree'));
 	const runByCommit = $derived(new Map(branchRuns.map((r) => [r.commitId, r])));
+	const durationMax = $derived(Math.max(1, ...(runs.data ?? []).map((r) => r.durationSeconds)));
 	const current = $derived(branchRuns.find((r) => r.state === RunState.RUNNING) ?? branchRuns[0]);
 
 	let logMore = $state(false);
@@ -406,7 +408,7 @@
 		<div class="flex flex-wrap items-center gap-2 text-[0.8125rem]">
 			<RunBadge state={r.state} label />
 			<span title={r.id} class="min-w-0 truncate font-mono text-xs text-fg-muted">#{r.short}</span>
-			<span class="tabular ml-auto text-xs text-fg-subtle">{dur(r.durationSeconds)}</span>
+			<span class="ml-auto"><DurationBar seconds={r.durationSeconds} max={durationMax} /></span>
 		</div>
 		<p
 			title="{refShortName(r.ref)} · {r.commitId} · {r.runner}"

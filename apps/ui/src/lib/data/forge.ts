@@ -102,9 +102,11 @@ export const uniqueCommits = (commits: Commit[]): Commit[] => {
 export const commitDay = (c: Commit) => dayKey(toDate(c.commitTime)!);
 
 export const dur = (s: number) =>
-  s >= 60
-    ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`
-    : `${s}s`;
+  s >= 3600
+    ? `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`
+    : s >= 60
+      ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`
+      : `${s}s`;
 
 /** Link into the repository view: `/<owner>/<name>?<view state>`. */
 export function repoHref(key: string, extra: Record<string, string> = {}) {
