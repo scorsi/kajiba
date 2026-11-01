@@ -332,3 +332,33 @@ async fn installation_refuses_overlapping_destinations_and_lock_symlinks() {
     assert_eq!(contents(&dump), before);
     f.close().await;
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn installation_pins_staging_before_a_service_replaces_its_path() {
+    let mut f = Fixture::new().await;
+    let dump = f.dump().await.unwrap();
+    let (server, git, owner) = destinations(&f);
+    let outside = f.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    let before = contents(&outside);
+    let mut replaced = false;
+    let _result = crate::restore::install(&dump, &server, &git, owner, owner, &mut |point| {
+        if point == "copy" && !replaced {
+            let stage = fs::read_dir(&server)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| p.file_name().unwrap().as_bytes().starts_with(b".restore-"))
+                .unwrap();
+            fs::rename(&stage, f.root.join("displaced-stage")).unwrap();
+            symlink(&outside, &stage).unwrap();
+            replaced = true;
+        }
+        Ok(())
+    })
+    .await;
+    assert!(replaced);
+    // Refusal or successful installation must never touch the replacement target.
+    assert_eq!(contents(&outside), before);
+    f.close().await;
+}

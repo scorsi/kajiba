@@ -4,8 +4,11 @@ use kajiba_core::{config::ServerConfig, state::real_dir};
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use std::{
     collections::BTreeMap,
-    fs,
-    os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, chown},
+    fs::{self, File, OpenOptions},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
     process::Command,
 };
@@ -134,9 +137,28 @@ fn empty(path: &Path, lock: &str, stage: Option<&Path>) -> Result<()> {
 
 fn lock(path: &Path, owner: Identity) -> Result<StateLock> {
     let lock = StateLock::acquire(path)?;
-    chown(path, Some(owner.0), Some(owner.1)).map_err(|e| e.to_string())?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+    lock.set_owner(owner.0, owner.1)
+        .map_err(|e| e.to_string())?;
     Ok(lock)
+}
+
+// Keep all privileged operations anchored even if a service renames its entries.
+struct Directory {
+    file: File,
+    path: PathBuf,
+}
+impl Directory {
+    fn open(path: &Path) -> std::io::Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(path)?;
+        #[cfg(target_os = "linux")]
+        let path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+        #[cfg(not(target_os = "linux"))]
+        let path = path.to_path_buf(); // Only unprivileged tests run restore outside Linux.
+        Ok(Self { file, path })
+    }
 }
 
 pub(super) async fn install(
@@ -150,6 +172,8 @@ pub(super) async fn install(
     for path in [root, server, git] {
         real_dir(path).map_err(|e| e.to_string())?;
     }
+    let server_dir = Directory::open(server).map_err(|e| e.to_string())?;
+    let git_dir = Directory::open(git).map_err(|e| e.to_string())?;
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let server = server.canonicalize().map_err(|e| e.to_string())?;
     let git = git.canonicalize().map_err(|e| e.to_string())?;
@@ -161,7 +185,9 @@ pub(super) async fn install(
     {
         return Err("restore input and destinations must not overlap".into());
     }
-    // Check before opening either lock: a symlink must never redirect a root open/chown.
+    let server = server_dir.path.join(".");
+    let git = git_dir.path.join(".");
+    // The final lock component is opened without following symlinks.
     empty(&server, "kajiba.lock", None)?;
     empty(&git, "kajiba-git.lock", None)?;
     let _server_lock = lock(&server.join("kajiba.lock"), server_owner)?;
@@ -184,12 +210,20 @@ pub(super) async fn install(
                 .create(&stage)
                 .map_err(|e| e.to_string())?;
             created.0.push(stage.clone());
+            let pinned = Directory::open(&stage).map_err(|e| e.to_string())?;
+            let metadata = pinned.file.metadata().map_err(|e| e.to_string())?;
+            if metadata.uid() != kajiba_core::local::effective_uid()
+                || metadata.permissions().mode() & 0o7777 != 0o700
+            {
+                return Err("unsafe restore staging directory".into());
+            }
+            let stage_path = pinned.path.join(".");
             checkpoint("copy")?;
             let mut copied = BTreeMap::new();
-            dump::copy_tree(&root.join(side), &stage, Path::new(side), &mut copied)
+            dump::copy_tree(&root.join(side), &stage_path, Path::new(side), &mut copied)
                 .map_err(|e| e.to_string())?;
             let mut actual = BTreeMap::new();
-            dump::inventory(&stage.join(side), Path::new(side), &mut actual, false)
+            dump::inventory(&stage_path.join(side), Path::new(side), &mut actual, false)
                 .map_err(|e| e.to_string())?;
             let expected: BTreeMap<_, _> = manifest
                 .entries
@@ -203,15 +237,16 @@ pub(super) async fn install(
             {
                 return Err("restored staging inventory/content mismatch".into());
             }
-            stages.push((side, destination, stage, owner));
+            stages.push((side, destination, stage, owner, pinned));
         }
         validate(&root).await?;
-        clear_logs(&stages[0].2.join("server/db/kajiba.sqlite")).await?;
-        for (side, _, stage, owner) in &stages {
+        clear_staged_logs(&stages[0].4.path.join("server/db/kajiba.sqlite")).await?;
+        for (side, _, _, owner, pinned) in &stages {
+            let stage = pinned.path.join(".");
             permissions(&stage.join(side), *owner).map_err(|e| e.to_string())?;
-            dump::sync_tree(stage).map_err(|e| e.to_string())?;
+            dump::sync_tree(&stage).map_err(|e| e.to_string())?;
         }
-        for (side, destination, stage, _) in &stages {
+        for (side, destination, stage, _, _) in &stages {
             empty(
                 destination,
                 if *side == "server" {
@@ -223,7 +258,8 @@ pub(super) async fn install(
             )?;
         }
         // shortcut: cross-filesystem switching needs manual crash recovery; add a journal for automatic recovery.
-        for (side, destination, stage, _) in &stages {
+        for (side, destination, _, _, pinned) in &stages {
+            let stage = pinned.path.join(".");
             for child in fs::read_dir(stage.join(side)).map_err(|e| e.to_string())? {
                 let child = child.map_err(|e| e.to_string())?;
                 let target = destination.join(child.file_name());
@@ -232,7 +268,7 @@ pub(super) async fn install(
             }
             checkpoint("switch")?;
         }
-        for (_, destination, stage, _) in &stages {
+        for (_, destination, stage, _, _) in &stages {
             fs::remove_dir_all(stage).map_err(|e| e.to_string())?;
             crate::state::sync_dir(destination).map_err(|e| e.to_string())?;
         }
@@ -250,21 +286,62 @@ pub(super) async fn install(
 }
 
 fn permissions(path: &Path, owner: Identity) -> std::io::Result<()> {
-    let kind = fs::symlink_metadata(path)?.file_type();
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    let kind = metadata.file_type();
     if !kind.is_file() && !kind.is_dir() {
         return Err(std::io::Error::other("unsafe restore staging entry"));
     }
-    chown(path, Some(owner.0), Some(owner.1))?;
-    fs::set_permissions(
-        path,
-        fs::Permissions::from_mode(if kind.is_dir() { 0o750 } else { 0o640 }),
-    )?;
+    if kind.is_file() && metadata.nlink() != 1 {
+        return Err(std::io::Error::other("hard-linked restore staging entry"));
+    }
+    if unsafe { libc::fchown(file.as_raw_fd(), owner.0, owner.1) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    file.set_permissions(fs::Permissions::from_mode(if kind.is_dir() {
+        0o750
+    } else {
+        0o640
+    }))?;
     if kind.is_dir() {
         for child in fs::read_dir(path)? {
             permissions(&child?.path(), owner)?;
         }
     }
     Ok(())
+}
+
+async fn clear_staged_logs(path: &Path) -> Result<()> {
+    // SQLite resolves descriptor paths: keep its scratch pathname outside service-owned parents.
+    let temporary = std::env::temp_dir()
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    for parent in temporary.ancestors() {
+        let metadata = fs::metadata(parent).map_err(|e| e.to_string())?;
+        if ![0, kajiba_core::local::effective_uid()].contains(&metadata.uid())
+            || metadata.permissions().mode() & 0o022 != 0
+                && metadata.permissions().mode() & 0o1000 == 0
+        {
+            return Err("restore requires a protected temporary directory".into());
+        }
+    }
+    let scratch = temporary.join(format!(
+        "kajiba-restore-db-{}",
+        kajiba_core::new_id().map_err(|e| e.to_string())?
+    ));
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&scratch)
+        .map_err(|e| e.to_string())?;
+    let mut created = Created(vec![scratch.clone()]);
+    let database = scratch.join("db.sqlite");
+    fs::copy(path, &database).map_err(|e| e.to_string())?;
+    clear_logs(&database).await?;
+    fs::copy(&database, path).map_err(|e| e.to_string())?;
+    created.rollback()
 }
 
 async fn clear_logs(path: &Path) -> Result<()> {
