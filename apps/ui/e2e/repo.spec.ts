@@ -66,7 +66,7 @@ test("alice/demo: open a nested file from the Files band, its size and raw bytes
   await expect(page.getByText("Start here.")).toBeVisible();
 
   // The raw link answers the same bytes.
-  const raw = page.getByRole("link", { name: "Raw" });
+  const raw = page.getByRole("link", { name: "Raw", exact: true });
   await expect(raw).toHaveAttribute(
     "href",
     "/raw/alice/demo/main/docs/guide/intro.md",

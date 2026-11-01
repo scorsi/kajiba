@@ -213,6 +213,13 @@
             kajibaRunnerPackage = config.packages.kajiba-runner;
             kajibaCliPackage = config.packages.kajiba-cli;
           };
+          nixos-ops-dump = import ./tests/ops-dump.nix {
+            inherit pkgs testLib;
+            kajibaServerPackage = config.packages.kajiba-server;
+            kajibaGitPackage = config.packages.kajiba-git;
+            kajibaRunnerPackage = config.packages.kajiba-runner;
+            kajibaCliPackage = config.packages.kajiba-cli;
+          };
           nixos-ci-recovery = import ./tests/ci-recovery.nix {
             inherit pkgs testLib;
             kajibaServerPackage = config.packages.kajiba-server;

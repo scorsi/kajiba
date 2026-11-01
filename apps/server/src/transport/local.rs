@@ -5,8 +5,8 @@ pub(super) use kajiba_core::local::Local;
 pub use kajiba_core::local::Serving;
 use kajiba_core::local::channel;
 use kajiba_proto::admin::v1::{
-    EnrollRequest, EnrollResponse, ImportRequest, ImportResponse, ListReposRequest,
-    ListReposResponse, Repo, RetentionRequest, RetentionResponse,
+    DumpRequest, DumpResponse, EnrollRequest, EnrollResponse, ImportRequest, ImportResponse,
+    ListReposRequest, ListReposResponse, Repo, RetentionRequest, RetentionResponse,
     admin_service_client::AdminServiceClient,
     admin_service_server::{AdminService, AdminServiceServer},
 };
@@ -31,6 +31,9 @@ pub struct Admin {
     pub gate: Arc<crate::db::pushes::Gate>,
     pub bus: Arc<crate::db::events::EventBus>,
     pub state_dir: PathBuf,
+    pub server_state_dir: PathBuf,
+    pub dump_dir: PathBuf,
+    pub registry: Arc<Registry>,
     pub git_socket: PathBuf,
     /// The retention pass run on demand (ADR 0115, 0097).
     pub retention: crate::db::retention::Pass,
@@ -44,6 +47,11 @@ pub(super) fn refused(code: tonic::Code, reason: &str, message: String) -> Statu
 
 #[tonic::async_trait]
 impl AdminService for Admin {
+    async fn dump(&self, _: Request<DumpRequest>) -> Result<Response<DumpResponse>, Status> {
+        self.create_dump(&mut super::git_side::Repositories::new(&self.git_socket))
+            .await
+    }
+
     async fn enroll(
         &self,
         request: Request<EnrollRequest>,
@@ -208,6 +216,71 @@ impl AdminService for Admin {
             worktree_runs,
         }))
     }
+}
+
+impl Admin {
+    async fn create_dump(
+        &self,
+        git: &mut super::git_side::Repositories,
+    ) -> Result<Response<DumpResponse>, Status> {
+        let started = std::time::Instant::now();
+        let closed = self.maintenance.close()?;
+        let result = async {
+            let quiescent = closed.drain(self, git).await?;
+            let admin = self.clone();
+            let runtime = tokio::runtime::Handle::current();
+            let span = tracing::Span::current();
+            // The worker owns maintenance even if the requesting connection disappears.
+            tokio::task::spawn_blocking(move || {
+                let _entered = span.enter();
+                runtime.block_on(async move {
+                    let dir = crate::dump::create(
+                        &mut *admin.writer.lock().await,
+                        &admin.server_state_dir,
+                        &admin.state_dir,
+                        &admin.dump_dir,
+                        &quiescent,
+                    )
+                    .await?;
+                    admin
+                        .registry
+                        .dump_succeeded(crate::db::runs::now().max(0) as u64 / 1000);
+                    tracing::info!(
+                        event = "dump-done",
+                        dir = %dir.display(),
+                        dur_us = started.elapsed().as_micros() as u64,
+                    );
+                    Ok::<_, String>(dir)
+                })
+            })
+            .await
+            .map_err(|err| err.to_string())?
+        }
+        .await;
+        match result {
+            Ok(dir) => Ok(Response::new(DumpResponse {
+                dir: dir.to_string_lossy().into_owned(),
+            })),
+            Err(err) => {
+                tracing::error!(event = "dump-failed", %err);
+                Err(refused(
+                    tonic::Code::Internal,
+                    "INTERNAL",
+                    "dump failed; see server log".into(),
+                ))
+            }
+        }
+    }
+}
+
+/// No request timeout: drain and verified copying take as long as they take.
+pub async fn dump(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(client(path, None)
+        .await?
+        .dump(DumpRequest {})
+        .await?
+        .into_inner()
+        .dir)
 }
 
 pub(super) fn bind(path: &Path, serving: Arc<Serving>) -> io::Result<Local> {

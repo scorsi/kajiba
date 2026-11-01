@@ -16,6 +16,8 @@ service AdminService {
   // Run the CI retention pass now: delete the logs of attempts finished more than
   // `ci.log_retention` ago; runs are kept (0010, 0115).
   rpc Retention(RetentionRequest) returns (RetentionResponse);
+  // Produce a verified dump in the configured directory under maintenance (0169).
+  rpc Dump(DumpRequest) returns (DumpResponse);
 }
 
 message EnrollRequest {
@@ -66,4 +68,11 @@ message RetentionResponse {
   uint64 logs = 1;
   // Number of worktree runs deleted with their bundle (0097).
   uint64 worktree_runs = 2;
+}
+
+message DumpRequest {}
+
+message DumpResponse {
+  // Absolute path to the completed, verified directory.
+  string dir = 1;
 }

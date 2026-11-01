@@ -113,12 +113,17 @@ pub struct Registry {
     auth_refusals: [Counter; 3],
     runners_connected: AtomicU64,
     config_generation: AtomicU64,
+    dump_last_success: AtomicU64,
     jobs_pending: AtomicU64,
     logs_truncated: Counter,
     runs: [Counter; 3],
     runner_refusals: [Counter; 5],
 }
 impl Registry {
+    pub fn dump_succeeded(&self, timestamp_seconds: u64) {
+        self.dump_last_success.store(timestamp_seconds, Relaxed);
+    }
+
     /// Count one refusal of the auth interceptor; `reason` is one of `AUTH_REASONS`.
     pub fn auth_refused(&self, reason: &str) {
         if let Some(index) = AUTH_REASONS.iter().position(|known| *known == reason) {
@@ -237,6 +242,13 @@ impl Registry {
             out,
             "kajiba_runners_connected {}",
             self.runners_connected.load(Relaxed)
+        )
+        .unwrap();
+        out.push_str("# HELP kajiba_dump_last_success_timestamp_seconds Last verified dump completion time, or zero before success.\n# TYPE kajiba_dump_last_success_timestamp_seconds gauge\n");
+        writeln!(
+            out,
+            "kajiba_dump_last_success_timestamp_seconds {}",
+            self.dump_last_success.load(Relaxed)
         )
         .unwrap();
         out.push_str("# HELP kajiba_config_generation Configuration generation: 1 at startup, plus one per applied reload.\n# TYPE kajiba_config_generation gauge\n");

@@ -203,6 +203,9 @@ kajiba_auth_refusals_total{reason="SCOPE_MISSING"} 2
 # HELP kajiba_runners_connected Runners with a live connection.
 # TYPE kajiba_runners_connected gauge
 kajiba_runners_connected 2
+# HELP kajiba_dump_last_success_timestamp_seconds Last verified dump completion time, or zero before success.
+# TYPE kajiba_dump_last_success_timestamp_seconds gauge
+kajiba_dump_last_success_timestamp_seconds 0
 # HELP kajiba_config_generation Configuration generation: 1 at startup, plus one per applied reload.
 # TYPE kajiba_config_generation gauge
 kajiba_config_generation 3

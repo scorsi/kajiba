@@ -105,7 +105,7 @@ fn labels_are_closed_and_version_is_escaped() {
             "kajiba_pushes_total{result=\"refused\"} 0",
         ]
     );
-    assert_eq!(samples, 211);
+    assert_eq!(samples, 212);
     assert!(samples <= 500);
 }
 
@@ -138,4 +138,16 @@ async fn absent_configuration_opens_no_listener() {
         kajiba_core::config::ServerConfig::parse("[http]\npublic_url='https://example.org'")
             .unwrap();
     assert!(bind(config.metrics.listen).await.unwrap().is_none());
+}
+
+#[test]
+fn dump_success_sets_completion_timestamp() {
+    let registry = Registry::default();
+    assert_eq!(registry.dump_last_success.load(Relaxed), 0);
+    registry.dump_succeeded(123);
+    assert!(
+        registry
+            .exposition("test", [0; 4], [0; 4])
+            .contains("kajiba_dump_last_success_timestamp_seconds 123\n")
+    );
 }

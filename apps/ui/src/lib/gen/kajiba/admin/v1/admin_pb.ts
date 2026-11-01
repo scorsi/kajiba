@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file kajiba/admin/v1/admin.proto.
  */
 export const file_kajiba_admin_v1_admin: GenFile = /*@__PURE__*/
-  fileDesc("ChtrYWppYmEvYWRtaW4vdjEvYWRtaW4ucHJvdG8SD2thamliYS5hZG1pbi52MSIdCg1FbnJvbGxSZXF1ZXN0EgwKBHVzZXIYASABKAkiHQoORW5yb2xsUmVzcG9uc2USCwoDdXJsGAEgASgJIjkKEExpc3RSZXBvc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiUgoRTGlzdFJlcG9zUmVzcG9uc2USJAoFcmVwb3MYASADKAsyFS5rYWppYmEuYWRtaW4udjEuUmVwbxIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiSAoEUmVwbxIRCglwdWJsaWNfaWQYASABKAkSDQoFb3duZXIYAiABKAkSDAoEbmFtZRgDIAEoCRIQCghhcmNoaXZlZBgEIAEoCCJCCg1JbXBvcnRSZXF1ZXN0EgwKBHJlcG8YASABKAkSDgoGc291cmNlGAIgASgJEhMKC2NyZWRlbnRpYWxzGAMgASgJIh4KDkltcG9ydFJlc3BvbnNlEgwKBHJlZnMYASABKA0iEgoQUmV0ZW50aW9uUmVxdWVzdCI4ChFSZXRlbnRpb25SZXNwb25zZRIMCgRsb2dzGAEgASgEEhUKDXdvcmt0cmVlX3J1bnMYAiABKAQyzAIKDEFkbWluU2VydmljZRJJCgZFbnJvbGwSHi5rYWppYmEuYWRtaW4udjEuRW5yb2xsUmVxdWVzdBofLmthamliYS5hZG1pbi52MS5FbnJvbGxSZXNwb25zZRJSCglMaXN0UmVwb3MSIS5rYWppYmEuYWRtaW4udjEuTGlzdFJlcG9zUmVxdWVzdBoiLmthamliYS5hZG1pbi52MS5MaXN0UmVwb3NSZXNwb25zZRJJCgZJbXBvcnQSHi5rYWppYmEuYWRtaW4udjEuSW1wb3J0UmVxdWVzdBofLmthamliYS5hZG1pbi52MS5JbXBvcnRSZXNwb25zZRJSCglSZXRlbnRpb24SIS5rYWppYmEuYWRtaW4udjEuUmV0ZW50aW9uUmVxdWVzdBoiLmthamliYS5hZG1pbi52MS5SZXRlbnRpb25SZXNwb25zZWIGcHJvdG8z");
+  fileDesc("ChtrYWppYmEvYWRtaW4vdjEvYWRtaW4ucHJvdG8SD2thamliYS5hZG1pbi52MSIdCg1FbnJvbGxSZXF1ZXN0EgwKBHVzZXIYASABKAkiHQoORW5yb2xsUmVzcG9uc2USCwoDdXJsGAEgASgJIjkKEExpc3RSZXBvc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiUgoRTGlzdFJlcG9zUmVzcG9uc2USJAoFcmVwb3MYASADKAsyFS5rYWppYmEuYWRtaW4udjEuUmVwbxIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiSAoEUmVwbxIRCglwdWJsaWNfaWQYASABKAkSDQoFb3duZXIYAiABKAkSDAoEbmFtZRgDIAEoCRIQCghhcmNoaXZlZBgEIAEoCCJCCg1JbXBvcnRSZXF1ZXN0EgwKBHJlcG8YASABKAkSDgoGc291cmNlGAIgASgJEhMKC2NyZWRlbnRpYWxzGAMgASgJIh4KDkltcG9ydFJlc3BvbnNlEgwKBHJlZnMYASABKA0iEgoQUmV0ZW50aW9uUmVxdWVzdCI4ChFSZXRlbnRpb25SZXNwb25zZRIMCgRsb2dzGAEgASgEEhUKDXdvcmt0cmVlX3J1bnMYAiABKAQiDQoLRHVtcFJlcXVlc3QiGwoMRHVtcFJlc3BvbnNlEgsKA2RpchgBIAEoCTKRAwoMQWRtaW5TZXJ2aWNlEkkKBkVucm9sbBIeLmthamliYS5hZG1pbi52MS5FbnJvbGxSZXF1ZXN0Gh8ua2FqaWJhLmFkbWluLnYxLkVucm9sbFJlc3BvbnNlElIKCUxpc3RSZXBvcxIhLmthamliYS5hZG1pbi52MS5MaXN0UmVwb3NSZXF1ZXN0GiIua2FqaWJhLmFkbWluLnYxLkxpc3RSZXBvc1Jlc3BvbnNlEkkKBkltcG9ydBIeLmthamliYS5hZG1pbi52MS5JbXBvcnRSZXF1ZXN0Gh8ua2FqaWJhLmFkbWluLnYxLkltcG9ydFJlc3BvbnNlElIKCVJldGVudGlvbhIhLmthamliYS5hZG1pbi52MS5SZXRlbnRpb25SZXF1ZXN0GiIua2FqaWJhLmFkbWluLnYxLlJldGVudGlvblJlc3BvbnNlEkMKBER1bXASHC5rYWppYmEuYWRtaW4udjEuRHVtcFJlcXVlc3QaHS5rYWppYmEuYWRtaW4udjEuRHVtcFJlc3BvbnNlYgZwcm90bzM");
 
 /**
  * @generated from message kajiba.admin.v1.EnrollRequest
@@ -216,6 +216,38 @@ export const RetentionResponseSchema: GenMessage<RetentionResponse> = /*@__PURE_
   messageDesc(file_kajiba_admin_v1_admin, 8);
 
 /**
+ * @generated from message kajiba.admin.v1.DumpRequest
+ */
+export type DumpRequest = Message<"kajiba.admin.v1.DumpRequest"> & {
+};
+
+/**
+ * Describes the message kajiba.admin.v1.DumpRequest.
+ * Use `create(DumpRequestSchema)` to create a new message.
+ */
+export const DumpRequestSchema: GenMessage<DumpRequest> = /*@__PURE__*/
+  messageDesc(file_kajiba_admin_v1_admin, 9);
+
+/**
+ * @generated from message kajiba.admin.v1.DumpResponse
+ */
+export type DumpResponse = Message<"kajiba.admin.v1.DumpResponse"> & {
+  /**
+   * Absolute path to the completed, verified directory.
+   *
+   * @generated from field: string dir = 1;
+   */
+  dir: string;
+};
+
+/**
+ * Describes the message kajiba.admin.v1.DumpResponse.
+ * Use `create(DumpResponseSchema)` to create a new message.
+ */
+export const DumpResponseSchema: GenMessage<DumpResponse> = /*@__PURE__*/
+  messageDesc(file_kajiba_admin_v1_admin, 10);
+
+/**
  * Host-local administration, authorized by Unix peer credentials (0014).
  *
  * @generated from service kajiba.admin.v1.AdminService
@@ -264,6 +296,16 @@ export const AdminService: GenService<{
     methodKind: "unary";
     input: typeof RetentionRequestSchema;
     output: typeof RetentionResponseSchema;
+  },
+  /**
+   * Produce a verified dump in the configured directory under maintenance (0169).
+   *
+   * @generated from rpc kajiba.admin.v1.AdminService.Dump
+   */
+  dump: {
+    methodKind: "unary";
+    input: typeof DumpRequestSchema;
+    output: typeof DumpResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_kajiba_admin_v1_admin, 0);

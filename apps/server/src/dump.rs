@@ -1,5 +1,4 @@
 //! Verified durable payload; the online command composes this with maintenance (0167).
-#![allow(dead_code)] // Wired to the admin command by J8 task 4.
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

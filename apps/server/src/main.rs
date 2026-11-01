@@ -80,6 +80,8 @@ enum AdminCommand {
     /// Delete CI logs older than `ci.log_retention` and worktree runs older than
     /// `ci.worktree_retention` now, as the daily pass does.
     Retention,
+    /// Create a verified dump through the running server.
+    Dump,
     /// Administer repositories (not implemented yet).
     Repo {
         #[command(subcommand)]
@@ -243,6 +245,7 @@ async fn main() -> ExitCode {
                 log_retention: config.ci.log_retention,
                 worktree_retention: config.ci.worktree_retention,
             };
+            let registry = std::sync::Arc::new(metrics::Registry::default());
             let admin = transport::local::Admin {
                 maintenance: health.maintenance.clone(),
                 git_socket: config.git.socket.clone(),
@@ -253,6 +256,9 @@ async fn main() -> ExitCode {
                 bus: bus.clone(),
                 state_dir: config.git.state_dir.clone(),
                 retention: retention.clone(),
+                server_state_dir: config.state_dir.clone(),
+                dump_dir: config.dump.dir.clone(),
+                registry: registry.clone(),
             };
             health.set_runners(transport::runners::Declared {
                 runners: tokio::sync::watch::Sender::new(config.runners.clone().into()),
@@ -260,7 +266,6 @@ async fn main() -> ExitCode {
                 wake,
             });
             health.started(readers.clone(), writer.clone());
-            let registry = std::sync::Arc::new(metrics::Registry::default());
             // Registered before `ready`: a SIGHUP from then on reloads, never terminates.
             let hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
             {
@@ -316,6 +321,9 @@ async fn main() -> ExitCode {
             } => {
                 return admin_import(&socket, repo, source, source_file, credentials_file).await;
             }
+            AdminCommand::Dump => {
+                return admin_dump(&socket).await;
+            }
             AdminCommand::Retention => {
                 return admin_retention(&socket).await;
             }
@@ -325,6 +333,19 @@ async fn main() -> ExitCode {
                 return admin_repo_list(&socket).await;
             }
         },
+    }
+}
+
+async fn admin_dump(path: &std::path::Path) -> ExitCode {
+    match transport::local::dump(path).await {
+        Ok(dir) => {
+            println!("{dir}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            log::error("dump-failed", &err.to_string());
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -497,6 +518,7 @@ mod tests {
     #[test]
     fn parses_admin_commands() {
         for (args, command) in [
+            (vec!["dump"], AdminCommand::Dump),
             (
                 vec!["enroll", "alice"],
                 AdminCommand::Enroll {

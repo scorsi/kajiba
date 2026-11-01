@@ -24,6 +24,8 @@ fn usage_errors_exit_two() {
         vec!["config", "check", "server.toml", "extra"],
         vec!["admin"],
         vec!["admin", "unknown"],
+        vec!["admin", "dump", "extra"],
+        vec!["dump"],
         vec!["admin", "enroll"],
         vec!["admin", "import"],
         vec!["admin", "import", "alice/demo"],
@@ -354,4 +356,18 @@ async fn serve_reconciles_declared_users_keys_and_tokens_before_serving() {
         reconciled,
         "serve did not reconcile the declared user, key and token"
     );
+}
+
+#[test]
+fn dump_requires_a_running_admin_socket_and_prints_no_directory_on_failure() {
+    let output = run(&[
+        "admin",
+        "--socket",
+        "/nonexistent/kajiba-admin.sock",
+        "dump",
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    let event: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(event["event"], "dump-failed");
 }

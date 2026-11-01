@@ -41,6 +41,9 @@ pub(in crate::transport) async fn admin(dir: &Path, users: &str) -> Admin {
         gate: Arc::default(),
         bus: Arc::default(),
         state_dir: dir.into(),
+        server_state_dir: dir.into(),
+        dump_dir: dir.join("dumps"),
+        registry: Arc::default(),
         retention: crate::db::retention::Pass {
             logs: dir.join("logs"),
             bundles: dir.join("bundles"),
@@ -611,4 +614,131 @@ async fn maintenance_refuses_local_mutations_without_side_effects_and_keeps_read
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn dump_drains_refuses_concurrency_and_publishes_only_success() {
+    use crate::transport::git_side::fake::Fake;
+    let dir = SocketDir::new();
+    let server_state = dir.0.join("server");
+    let git_state = dir.0.join("git");
+    fs::create_dir_all(server_state.join("tmp")).unwrap();
+    let mut admin = admin(&server_state, "[users.alice]").await;
+    admin.state_dir = git_state.clone();
+    admin.dump_dir = dir.0.join("dumps");
+    fs::create_dir(&admin.dump_dir).unwrap();
+    let mut git = Fake::start(&git_state).await;
+    admin
+        .gate
+        .rebuild(
+            &mut *admin.writer.lock().await,
+            "00000000000000000000000001",
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    let completed = {
+        let permit = admin.maintenance.admit().unwrap();
+        let first = admin.create_dump(&mut git.client);
+        tokio::pin!(first);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut first)
+                .await
+                .is_err()
+        );
+        let status = admin.dump(Request::new(DumpRequest {})).await.unwrap_err();
+        assert_eq!(status.code(), Code::Unavailable);
+        assert_eq!(
+            status.get_error_details().error_info().unwrap().reason,
+            "MAINTENANCE"
+        );
+        // A read still acquires the writer while the admitted mutation drains.
+        assert_eq!(
+            admin
+                .list_repos(Request::new(ListReposRequest::default()))
+                .await
+                .unwrap()
+                .into_inner()
+                .repos
+                .len(),
+            0
+        );
+        drop(permit);
+        PathBuf::from(first.await.unwrap().into_inner().dir)
+    };
+    crate::dump::verify(&completed).await.unwrap();
+    assert!(admin.maintenance.admit().is_ok());
+    let success = admin.registry.exposition("test", [0; 4], [0; 4]);
+    let sample = |text: String| {
+        text.lines()
+            .find(|line| line.starts_with("kajiba_dump_last_success_timestamp_seconds "))
+            .unwrap()
+            .to_owned()
+    };
+    assert_ne!(
+        sample(success.clone()),
+        "kajiba_dump_last_success_timestamp_seconds 0"
+    );
+
+    // A special file in durable state fails during copying, after staging is created.
+    fs::create_dir_all(git_state.join("tmp/orphans")).unwrap();
+    std::os::unix::fs::symlink("missing", git_state.join("tmp/orphans/unsafe")).unwrap();
+    assert_eq!(
+        admin.create_dump(&mut git.client).await.unwrap_err().code(),
+        Code::Internal
+    );
+    assert!(admin.maintenance.admit().is_ok());
+    assert_eq!(
+        sample(admin.registry.exposition("test", [0; 4], [0; 4])),
+        sample(success)
+    );
+    assert_eq!(fs::read_dir(&admin.dump_dir).unwrap().count(), 1);
+    fs::remove_file(git_state.join("tmp/orphans/unsafe")).unwrap();
+    assert!(admin.create_dump(&mut git.client).await.is_ok());
+}
+
+#[tokio::test]
+async fn dump_unavailable_daemon_releases_maintenance_without_success() {
+    let dir = SocketDir::new();
+    let admin = admin(&dir.0, "").await;
+    assert_eq!(
+        admin
+            .dump(Request::new(DumpRequest {}))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Internal
+    );
+    assert!(admin.maintenance.admit().is_ok());
+    assert!(
+        admin
+            .registry
+            .exposition("test", [0; 4], [0; 4])
+            .contains("kajiba_dump_last_success_timestamp_seconds 0\n")
+    );
+}
+
+#[tokio::test]
+async fn dump_socket_refuses_unauthorized_peer_before_maintenance() {
+    let dir = SocketDir::new();
+    let local = Local::bind(
+        &dir.socket(),
+        Arc::default(),
+        0o600,
+        vec![kajiba_core::local::effective_uid().wrapping_add(1)],
+    )
+    .unwrap();
+    let admin = admin(&dir.0, "").await;
+    let server = tokio::spawn(serve(
+        local,
+        admin.clone(),
+        Arc::default(),
+        std::future::pending(),
+    ));
+    assert!(dump(&dir.socket()).await.is_err());
+    assert!(admin.maintenance.admit().is_ok());
+    assert!(!admin.dump_dir.exists());
+    server.abort();
+    let _ = server.await;
 }

@@ -108,12 +108,16 @@ impl Admission {
         }
     }
 
-    // The dump command will own this guard throughout drain and copying.
-    #[allow(dead_code)]
     pub(crate) fn close(&self) -> Result<Closed, Status> {
         self.closed
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .map_err(|_| Status::unavailable("maintenance already in progress"))?;
+            .map_err(|_| {
+                super::local::refused(
+                    tonic::Code::Unavailable,
+                    "MAINTENANCE",
+                    "maintenance already in progress; retry later".into(),
+                )
+            })?;
         Ok(Closed {
             admission: self.clone(),
             started: crate::db::runs::now(),
@@ -127,7 +131,6 @@ pub(crate) struct Closed {
 }
 
 /// Owns closed admission and both write classes until copying ends or is canceled.
-#[allow(dead_code)]
 pub(crate) struct Quiescent {
     _active: OwnedRwLockWriteGuard<()>,
     _completion: OwnedRwLockWriteGuard<()>,
@@ -135,7 +138,6 @@ pub(crate) struct Quiescent {
 }
 
 impl Closed {
-    #[allow(dead_code)]
     pub(crate) async fn drain(
         self,
         admin: &super::local::Admin,
