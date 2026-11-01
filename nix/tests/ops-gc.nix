@@ -44,8 +44,6 @@ import ./ci-common.nix (args // { kajibaGitPackage = heldGit; }) {
     systemd.services.kajiba-git.serviceConfig.ReadWritePaths = [ "/var/lib/kajiba-fixtures" ];
   };
   script = ''
-    import time
-
     gc = "runuser -u kajiba-git -- kajiba-git gc"
     remote = "kajiba-git@127.0.0.1:alice/demo.git"
 
