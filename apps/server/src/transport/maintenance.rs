@@ -146,22 +146,23 @@ impl Closed {
         let active = self.admission.active.clone().write_owned().await;
         loop {
             let completion = self.admission.completion.clone().write_owned().await;
+            // Check even while local sessions remain: a dead daemon cannot report their exits.
+            let mut client = git.client().await.map_err(|e| e.to_string())?.clone();
+            let mut request = tonic::Request::new(kajiba_proto::git::v1::ListSessionsRequest {});
+            request.set_timeout(std::time::Duration::from_secs(5));
+            let snapshot = client
+                .list_sessions(request)
+                .await
+                .map_err(|e| e.to_string())?
+                .into_inner();
+            if admin.gate.generation().as_ref() != Some(&snapshot.generation) {
+                return Err("git session snapshot changed during maintenance".into());
+            }
             if admin.gate.quiescent() {
-                // Fail closed if the authoritative daemon cannot confirm the drained generation.
-                let mut client = git.client().await.map_err(|e| e.to_string())?.clone();
-                let mut request =
-                    tonic::Request::new(kajiba_proto::git::v1::ListSessionsRequest {});
-                request.set_timeout(std::time::Duration::from_secs(5));
-                let snapshot = client
-                    .list_sessions(request)
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .into_inner();
-                if admin.gate.generation().as_ref() != Some(&snapshot.generation)
-                    || snapshot
-                        .sessions
-                        .iter()
-                        .any(|s| s.kind != kajiba_proto::git::v1::SessionKind::UploadPack as i32)
+                if snapshot
+                    .sessions
+                    .iter()
+                    .any(|s| s.kind != kajiba_proto::git::v1::SessionKind::UploadPack as i32)
                 {
                     return Err("git session snapshot changed during maintenance".into());
                 }
@@ -299,6 +300,54 @@ mod drain_tests {
             .await
             .unwrap();
         assert!(admin.maintenance.completion.try_write().is_ok());
+    }
+
+    #[tokio::test]
+    async fn stale_writing_session_does_not_hide_unavailable_or_changed_daemon() {
+        use kajiba_proto::git::v1::{Session, SessionKind};
+
+        for unavailable in [true, false] {
+            let state = State::new();
+            let admin = local::tests::admin(&state.health.state_dir, "").await;
+            let generation = if unavailable {
+                "00000000000000000000000001"
+            } else {
+                "00000000000000000000000002"
+            };
+            admin
+                .gate
+                .rebuild(&mut *admin.writer.lock().await, generation, vec![])
+                .await
+                .unwrap();
+            admin.gate.opened(
+                1,
+                Session {
+                    session_id: kajiba_core::new_id().unwrap(),
+                    generation: generation.into(),
+                    kind: SessionKind::ReceivePack as i32,
+                    ..Default::default()
+                },
+            );
+            let mut git = if unavailable {
+                crate::transport::git_side::Repositories::new(&admin.git_socket)
+            } else {
+                Fake::start(&admin.state_dir).await.client
+            };
+            assert!(!admin.gate.quiescent());
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                admin.maintenance.close().unwrap().drain(&admin, &mut git),
+            )
+            .await
+            .expect("stale sessions must not prevent daemon failure from aborting maintenance");
+            assert!(result.is_err());
+            assert!(admin.maintenance.admit().is_ok());
+            assert!(admin.maintenance.completion.try_write().is_ok());
+            let _resumed =
+                tokio::time::timeout(Duration::from_secs(1), admin.maintenance.background())
+                    .await
+                    .unwrap();
+        }
     }
 
     #[tokio::test]
