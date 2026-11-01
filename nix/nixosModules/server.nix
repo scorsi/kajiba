@@ -782,8 +782,9 @@ in
     systemd.services.kajiba-server = {
       description = "kajiba forge server";
       # Socket-triggered starts share this budget; hitting it also fails the sockets.
-      startLimitIntervalSec = 300;
-      startLimitBurst = 5;
+      # mkDefault: tests that observe single crashes turn the limit off.
+      unitConfig.StartLimitIntervalSec = lib.mkDefault 300;
+      unitConfig.StartLimitBurst = lib.mkDefault 5;
       wantedBy = [ "multi-user.target" ];
       wants = [
         "kajiba-git.service"
@@ -859,8 +860,9 @@ in
     systemd.services.kajiba-git = {
       description = "kajiba repository writer";
       # Socket-triggered starts share this budget; hitting it also fails the sockets.
-      startLimitIntervalSec = 300;
-      startLimitBurst = 5;
+      # mkDefault: tests that observe single crashes turn the limit off.
+      unitConfig.StartLimitIntervalSec = lib.mkDefault 300;
+      unitConfig.StartLimitBurst = lib.mkDefault 5;
       wantedBy = [ "multi-user.target" ];
       requires = [
         "kajiba-git.socket"
