@@ -6,7 +6,9 @@ impl Git {
         let ids = tokio::task::spawn_blocking(move || repositories.gc_inventory())
             .await
             .map_err(|_| Status::internal("gc inventory worker failed"))??;
-        let mut server = server_client(&self.server_socket, &self.generation).await?;
+        let mut server = server_client(&self.server_socket, &self.generation)
+            .await
+            .map_err(busy_server)?;
         for id in ids {
             let session = Session {
                 session_id: kajiba_core::new_id().map_err(|e| Status::internal(e.to_string()))?,
@@ -76,5 +78,31 @@ impl Git {
             }
         }
         Ok(0)
+    }
+}
+
+/// A dump freezes Hello (0166), so a timed-out handshake is a maintenance refusal to retry (0172).
+fn busy_server(err: Status) -> Status {
+    if err.code() == tonic::Code::Cancelled {
+        return kajiba_core::local::rpc_error(
+            tonic::Code::Unavailable,
+            "MAINTENANCE",
+            "server busy, maintenance may be in progress; retry later",
+        );
+    }
+    err
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_timed_out_handshake_reports_maintenance_to_retry() {
+        let err = busy_server(Status::cancelled("Timeout expired"));
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert!(err.message().contains("maintenance"));
+        let other = busy_server(Status::unavailable("server unavailable"));
+        assert_eq!(other.message(), "server unavailable");
     }
 }
