@@ -419,6 +419,53 @@ in
           group = "kajiba-git";
         };
       });
+    # Weekly gc uses the daemon's admitted command; the client cannot write repositories.
+    assert lib.all
+      (
+        evaluated:
+        let
+          inherit (evaluated.config) systemd services;
+          timer = systemd.timers.kajiba-gc;
+          service = systemd.services.kajiba-gc;
+          unit = service.serviceConfig;
+        in
+        timer.wantedBy == [ "timers.target" ]
+        && timer.timerConfig.OnCalendar == "weekly"
+        && timer.timerConfig.Persistent
+        && timer.timerConfig.Unit == "kajiba-gc.service"
+        &&
+          service.requires == [
+            "kajiba-git.service"
+            "kajiba-server.service"
+          ]
+        &&
+          service.after == [
+            "kajiba-git.service"
+            "kajiba-server.service"
+          ]
+        && unit.ExecStart == "${lib.getExe services.kajiba-git.package} gc"
+        && unit.Type == "oneshot"
+        && unit.StandardOutput == "null"
+        && unit.StandardError == "journal"
+        && unit.User == "kajiba-git"
+        && unit.Group == "kajiba-git"
+        && !(unit.DynamicUser or false)
+        && unit.UMask == "0027"
+        && unit.ProtectSystem == "strict"
+        && unit.ProtectHome
+        && unit.PrivateTmp
+        && unit.NoNewPrivileges
+        && unit.CapabilityBoundingSet == ""
+        && unit.RestrictAddressFamilies == [ "AF_UNIX" ]
+        && unit.ReadOnlyPaths == [ "/run/kajiba-git" ]
+        && unit.InaccessiblePaths == [ "-${services.kajiba-server.stateDir}" ]
+        && (unit.ReadWritePaths or [ ]) == [ ]
+        && unit.TimeoutStartSec == "infinity"
+      )
+      [
+        (evaluate false { })
+        (evaluateWith false [ ])
+      ];
     # Daily dump runs through the peer-checked admin command, never direct state writes.
     assert lib.all
       (

@@ -779,6 +779,39 @@ in
         SocketMode = "0600";
       };
     };
+    systemd.timers.kajiba-gc = {
+      description = "Weekly kajiba repository gc";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = "weekly";
+        Persistent = true;
+        Unit = "kajiba-gc.service";
+      };
+    };
+    systemd.services.kajiba-gc = {
+      description = "Run admitted kajiba repository gc";
+      requires = [
+        "kajiba-git.service"
+        "kajiba-server.service"
+      ];
+      after = [
+        "kajiba-git.service"
+        "kajiba-server.service"
+      ];
+      serviceConfig = hardening // {
+        Type = "oneshot";
+        ExecStart = "${lib.getExe gitCfg.package} gc";
+        StandardOutput = "null";
+        StandardError = "journal";
+        User = "kajiba-git";
+        Group = "kajiba-git";
+        UMask = "0027";
+        TimeoutStartSec = "infinity";
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+        ReadOnlyPaths = [ "/run/kajiba-git" ];
+        InaccessiblePaths = [ "-${cfg.stateDir}" ];
+      };
+    };
     systemd.timers.kajiba-dump = {
       description = "Daily verified kajiba dump";
       wantedBy = [ "timers.target" ];
