@@ -731,6 +731,40 @@ in
             mode = "0750";
           };
         });
+    systemd.sockets.kajiba-server = {
+      wantedBy = [ "sockets.target" ];
+      listenStreams = [ listen ];
+      socketConfig.FileDescriptorName = "http";
+    };
+    systemd.sockets.kajiba-server-runner = lib.mkIf (cfg.runnerListener != null) {
+      wantedBy = [ "sockets.target" ];
+      listenStreams = [ cfg.runnerListener.listen ];
+      socketConfig = {
+        Service = "kajiba-server.service";
+        FileDescriptorName = "runner";
+      };
+    };
+    systemd.sockets.kajiba-git = {
+      wantedBy = [ "sockets.target" ];
+      listenStreams = [ "/run/kajiba-git/local.sock" ];
+      socketConfig = {
+        FileDescriptorName = "local";
+        SocketUser = "kajiba-git";
+        SocketGroup = "kajiba-git";
+        SocketMode = "0660";
+      };
+    };
+    systemd.sockets.kajiba-git-ssh = {
+      wantedBy = [ "sockets.target" ];
+      listenStreams = [ "/run/kajiba-git/ssh.sock" ];
+      socketConfig = {
+        Service = "kajiba-git.service";
+        FileDescriptorName = "ssh";
+        SocketUser = "kajiba-git";
+        SocketGroup = "kajiba-git";
+        SocketMode = "0600";
+      };
+    };
     systemd.services.kajiba-server = {
       description = "kajiba forge server";
       wantedBy = [ "multi-user.target" ];
@@ -743,11 +777,19 @@ in
         "network.target"
         "kajiba-git.service"
         "kajiba-sshd.service"
-      ];
+        "kajiba-server.socket"
+      ]
+      ++ lib.optional (cfg.runnerListener != null) "kajiba-server-runner.socket";
       restartTriggers = [
         cfg.package
         (builtins.toJSON restartSettings)
       ];
+      requires = [
+        "kajiba-server.socket"
+      ]
+      ++ lib.optional (cfg.runnerListener != null) "kajiba-server-runner.socket";
+      reloadIfChanged = false;
+      restartIfChanged = true;
       reloadTriggers = [ configFile ];
       # Smart HTTP upload-pack and mirror pushes read repositories (0052).
       path = [ pkgs.git ];
@@ -783,7 +825,14 @@ in
         );
       };
     };
-    systemd.tmpfiles.settings."10-kajiba-git" = lib.optionalAttrs (!inVarLib gitCfg.stateDir) {
+    systemd.tmpfiles.settings."10-kajiba-git" = {
+      "/run/kajiba-git".d = {
+        user = "kajiba-git";
+        group = "kajiba-git";
+        mode = "0750";
+      };
+    }
+    // lib.optionalAttrs (!inVarLib gitCfg.stateDir) {
       ${gitCfg.stateDir}.d = {
         user = "kajiba-git";
         group = "kajiba-git";
@@ -793,7 +842,17 @@ in
     systemd.services.kajiba-git = {
       description = "kajiba repository writer";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
+      requires = [
+        "kajiba-git.socket"
+        "kajiba-git-ssh.socket"
+      ];
+      after = [
+        "network.target"
+        "kajiba-git.socket"
+        "kajiba-git-ssh.socket"
+      ];
+      restartIfChanged = true;
+      reloadIfChanged = false;
       restartTriggers = [
         gitConfigFile
         gitCfg.package
@@ -805,7 +864,8 @@ in
       serviceConfig = hardening // {
         ExecStart = "${lib.getExe gitCfg.package} serve --config ${gitConfigFile}";
         Type = "notify";
-        KillMode = "control-group";
+        KillMode = "mixed";
+        TimeoutStopSec = "35s";
         Restart = "on-failure";
         User = "kajiba-git";
         Group = "kajiba-git";
@@ -814,6 +874,7 @@ in
         );
         StateDirectoryMode = "0750";
         RuntimeDirectory = "kajiba-git";
+        RuntimeDirectoryPreserve = "yes";
         RuntimeDirectoryMode = "0750";
         ReadWritePaths = [ gitCfg.stateDir ];
         # The server's directory may not exist yet on the first boot (git starts first).

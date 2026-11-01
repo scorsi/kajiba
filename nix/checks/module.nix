@@ -562,7 +562,38 @@ in
         && !(unit ? PrivateUsers)
         && !(server.serviceConfig ? PrivateUsers)
         && unit.Type == "notify"
-        && unit.KillMode == "control-group"
+        && unit.KillMode == "mixed"
+        && unit.TimeoutStopSec == "35s"
+        && unit.RuntimeDirectoryPreserve == "yes"
+        && git.restartIfChanged
+        && !git.reloadIfChanged
+        && server.restartIfChanged
+        && !server.reloadIfChanged
+        && lib.elem "kajiba-git.socket" git.requires
+        && lib.elem "kajiba-git-ssh.socket" git.after
+        && lib.elem "kajiba-server.socket" server.requires
+        && lib.elem "kajiba-server.socket" server.after
+        &&
+          systemd.sockets.kajiba-server.listenStreams == [
+            (
+              if services.kajiba-server.http.listen == null then
+                "127.0.0.1:8080"
+              else
+                services.kajiba-server.http.listen
+            )
+          ]
+        && (
+          services.kajiba-server.runnerListener == null
+          || (
+            systemd.sockets.kajiba-server-runner.listenStreams
+            == [ services.kajiba-server.runnerListener.listen ]
+            && lib.elem "kajiba-server-runner.socket" server.requires
+            && systemd.sockets.kajiba-server-runner.socketConfig.FileDescriptorName == "runner"
+          )
+        )
+        && systemd.sockets.kajiba-server.socketConfig.FileDescriptorName == "http"
+        && systemd.sockets.kajiba-git.socketConfig.SocketMode == "0660"
+        && systemd.sockets.kajiba-git-ssh.socketConfig.SocketMode == "0600"
         && unit.Restart == "on-failure"
         &&
           unit.SystemCallFilter == [

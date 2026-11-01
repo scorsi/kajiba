@@ -121,10 +121,19 @@ pub async fn serve(
     mut listener: impl tonic::codegen::tokio_stream::Stream<Item = io::Result<UnixStream>> + Unpin,
     git: Arc<crate::service::Git>,
     hooks: &Path,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()> {
     use tonic::codegen::tokio_stream::StreamExt;
     let permits = Arc::new(tokio::sync::Semaphore::new(SESSIONS));
-    while let Some(stream) = listener.next().await {
+    let mut sessions = tokio::task::JoinSet::new();
+    tokio::pin!(shutdown);
+    loop {
+        let stream = tokio::select! {
+            biased;
+            () = &mut shutdown => break,
+            Some(_) = sessions.join_next(), if !sessions.is_empty() => continue,
+            stream = listener.next() => match stream { Some(stream) => stream, None => break },
+        };
         let mut stream = stream?;
         let Ok(permit) = permits.clone().try_acquire_owned() else {
             // Never queue or spawn work for excess connections, even incomplete hand-offs.
@@ -138,7 +147,7 @@ pub async fn serve(
         let git = git.clone();
         let hooks = hooks.to_owned();
         // The supervisor owns the child, independently of the helper's connection.
-        tokio::spawn(async move {
+        sessions.spawn(async move {
             let _permit = permit;
             let result = async {
                 let (fds, user, command) =
@@ -163,6 +172,8 @@ pub async fn serve(
             .await;
         });
     }
+    drop(listener);
+    while sessions.join_next().await.is_some() {}
     Ok(())
 }
 
@@ -359,6 +370,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stopping_accepts_no_more_handoffs_and_waits_for_the_active_one() {
+        use tonic::codegen::tokio_stream;
+        let (mut peer, stream) = UnixStream::pair().unwrap();
+        let git = Arc::new(crate::service::Git {
+            generation: kajiba_core::new_id().unwrap(),
+            server_socket: "/absent.sock".into(),
+            repositories: Arc::new(crate::repositories::Repositories::new("/absent".into())),
+        });
+        let mut daemon = tokio::spawn(async move {
+            serve(
+                tokio_stream::iter([Ok(stream)]),
+                git,
+                Path::new("/absent"),
+                std::future::pending(),
+            )
+            .await
+        });
+        // Input exhaustion stops accepting; the accepted handoff still owns its response.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut daemon)
+                .await
+                .is_err()
+        );
+        peer.write_u8(0).await.unwrap();
+        assert_eq!(peer.read_u8().await.unwrap(), 1);
+        assert!(
+            handoff::read_text(&mut peer, u16::MAX.into())
+                .await
+                .unwrap()
+                .contains("descriptor")
+        );
+        tokio::time::timeout(Duration::from_secs(1), daemon)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn session_cap_refuses_excess_handoffs_and_releases_slots() {
         use tonic::codegen::tokio_stream::wrappers::UnboundedReceiverStream;
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -372,6 +422,7 @@ mod tests {
                 UnboundedReceiverStream::new(receiver),
                 git,
                 Path::new("/absent"),
+                std::future::pending(),
             )
             .await
         });

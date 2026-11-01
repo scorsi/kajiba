@@ -633,6 +633,11 @@ pub async fn serve(
     admin: local::Admin,
     registry: Arc<Registry>,
 ) -> std::io::Result<()> {
+    let mut names = vec!["http"];
+    if server.runner_listener.is_some() {
+        names.push("runner");
+    }
+    let mut inherited = kajiba_core::activation::Listeners::inherit(&names)?;
     let (config, metrics_config, git_config, run_dir) =
         (&server.http, &server.metrics, &server.git, &server.run_dir);
     let local = local::bind(
@@ -659,7 +664,7 @@ pub async fn serve(
                 bundle_file: listener.bundle_file.clone(),
             })
             .map_err(|err| std::io::Error::other(format!("runner_listener: {err}")))?;
-            let bound = tokio::net::TcpListener::bind(listener.listen).await?;
+            let bound = inherited.tcp("runner", listener.listen).await?;
             Some((bound, source, runner_app))
         }
         None => None,
@@ -671,7 +676,7 @@ pub async fn serve(
         &config.public_url,
     )
     .map_err(std::io::Error::other)?;
-    let listener = tokio::net::TcpListener::bind(config.listen).await?;
+    let listener = inherited.tcp("http", config.listen).await?;
     let metrics = metrics::bind(metrics_config.listen)
         .await?
         .map(|listener| (listener, metrics::router(registry.clone(), readers, bus)));

@@ -585,3 +585,45 @@ async fn repository_rpc_routes_correlate_errors_and_logs() {
     }
     println!("ERROR_IDS={}", serde_json::to_string(&ids).unwrap());
 }
+
+#[test]
+fn draining_refuses_new_sessions_and_preserves_running_ones() {
+    use kajiba_proto::git::v1::Session;
+    let repositories = crate::repositories::Repositories::new("/absent".into());
+    let session = Session {
+        session_id: "running".into(),
+        ..Default::default()
+    };
+    repositories
+        .register(session.clone(), String::new())
+        .unwrap();
+    repositories.stop_accepting();
+    assert_eq!(repositories.sessions(), std::slice::from_ref(&session));
+    assert_eq!(
+        repositories
+            .register(
+                Session {
+                    session_id: "new".into(),
+                    kind: kajiba_proto::git::v1::SessionKind::Import as i32,
+                    ..Default::default()
+                },
+                String::new()
+            )
+            .unwrap_err()
+            .code(),
+        tonic::Code::Unavailable
+    );
+    repositories.finished(&session.session_id, 0);
+    assert!(repositories.sessions().is_empty());
+    // Handoffs accepted before the stop may finish their admission during drain.
+    repositories
+        .register(
+            Session {
+                session_id: "accepted-ssh".into(),
+                kind: kajiba_proto::git::v1::SessionKind::ReceivePack as i32,
+                ..Default::default()
+            },
+            String::new(),
+        )
+        .unwrap();
+}

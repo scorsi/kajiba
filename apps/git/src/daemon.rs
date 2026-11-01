@@ -48,11 +48,14 @@ async fn run(
     let state_dir = &config.state_dir;
     let server_socket = &config.server_socket;
     let _lock = crate::state::prepare(state_dir)?;
-    let local = Local::bind(socket, Default::default(), 0o660, peers)
+    let mut inherited = kajiba_core::activation::Listeners::inherit(&["local", "ssh"])
+        .map_err(|err| err.to_string())?;
+    let local = bind(&mut inherited, "local", socket, 0o660, peers)
         .map_err(|err| format!("{}: {err}", socket.display()))?;
-    let ssh = Local::bind(
+    let ssh = bind(
+        &mut inherited,
+        "ssh",
         &socket.with_file_name("ssh.sock"),
-        Default::default(),
         0o600,
         vec![ssh_uid],
     )
@@ -74,20 +77,19 @@ async fn run(
         server_socket: server_socket.clone(),
     });
     let routes = routes(git.clone());
-    let (stop, mut stopped) = tokio::sync::watch::channel(false);
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let (local_stop, mut local_stopped) = tokio::sync::watch::channel(false);
     let mut metrics_stopped = stopped.clone();
     let mut ssh_stopped = stopped.clone();
     let app = crate::metrics::router(repositories.clone());
+    let ssh_sessions = crate::ssh::serve(ssh, git, &config.hooks_path, async move {
+        let _ = ssh_stopped.changed().await;
+    });
+    tokio::pin!(ssh_sessions);
     let servers = async move {
         tokio::try_join!(
-            async {
-                tokio::select! {
-                    result = crate::ssh::serve(ssh, git, &config.hooks_path) => result,
-                    _ = ssh_stopped.changed() => Ok(()),
-                }
-            },
             local.serve(routes, async move {
-                let _ = stopped.changed().await;
+                let _ = local_stopped.changed().await;
             }),
             async move {
                 if let Some(listener) = metrics {
@@ -102,14 +104,58 @@ async fn run(
         )?;
         Ok::<_, io::Error>(())
     };
-    tokio::pin!(servers);
+    let monitor = crate::service::connect_server(server_socket, &generation, &repositories);
+    tokio::pin!(servers, monitor);
     tokio::select! {
-        result = &mut servers => result.map_err(|err| err.to_string()),
-        () = shutdown => {
-            stop.send_replace(true);
-            servers.await.map_err(|err| err.to_string())
-        },
-        () = crate::service::connect_server(server_socket, &generation, &repositories) => unreachable!("connection loop runs until shutdown"),
+        result = &mut servers => return result.map_err(|err| err.to_string()),
+        result = &mut ssh_sessions => return result.map_err(|err| err.to_string()),
+        () = shutdown => {},
+        () = &mut monitor => unreachable!("connection loop runs until shutdown"),
+    }
+    repositories.stop_accepting();
+    stop.send_replace(true);
+    // Hook RPCs and exit reporting must remain available until all children finish.
+    let drain = async {
+        ssh_sessions.await?;
+        while !repositories.sessions().is_empty() || !repositories.exits().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        Ok::<_, io::Error>(())
+    };
+    // Use a separate stop channel: the local RPC listener still serves hooks during drain.
+    tokio::pin!(drain);
+    match tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::select! {
+            result = &mut servers => result,
+            result = &mut drain => {
+                result?;
+                local_stop.send_replace(true);
+                servers.await
+            },
+            () = &mut monitor => unreachable!("connection loop runs until shutdown"),
+        }
+    })
+    .await
+    {
+        Ok(result) => result.map_err(|err| err.to_string()),
+        Err(_) => {
+            tracing::warn!(event = "drain-timeout");
+            // Blocking import workers cannot be cancelled by dropping the Tokio runtime.
+            std::process::exit(0);
+        }
+    }
+}
+
+fn bind(
+    inherited: &mut kajiba_core::activation::Listeners,
+    name: &str,
+    path: &Path,
+    mode: u32,
+    peers: Vec<u32>,
+) -> io::Result<Local> {
+    match inherited.unix(name, path)? {
+        Some(listener) => Local::inherited(listener, path, Default::default(), peers),
+        None => Local::bind(path, Default::default(), mode, peers),
     }
 }
 

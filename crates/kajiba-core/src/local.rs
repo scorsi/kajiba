@@ -41,6 +41,7 @@ impl Serving {
 
 pub struct Local {
     listener: UnixListener,
+    inherited: bool,
     path: PathBuf,
     identity: (u64, u64),
     allowed_uids: Vec<u32>,
@@ -80,19 +81,42 @@ impl Local {
             Err(err) => return Err(err),
         }
         let listener = UnixListener::bind(path)?;
+        Self::from_listener(listener, path, serving, allowed_uids, false, Some(mode))
+    }
+
+    pub fn inherited(
+        listener: UnixListener,
+        path: &Path,
+        serving: Arc<Serving>,
+        allowed_uids: Vec<u32>,
+    ) -> io::Result<Self> {
+        Self::from_listener(listener, path, serving, allowed_uids, true, None)
+    }
+
+    fn from_listener(
+        listener: UnixListener,
+        path: &Path,
+        serving: Arc<Serving>,
+        allowed_uids: Vec<u32>,
+        inherited: bool,
+        mode: Option<u32>,
+    ) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(path)?;
         let _ = serving
             .socket
             .set((path.into(), (metadata.dev(), metadata.ino())));
         let local = Self {
             listener,
+            inherited,
             path: path.into(),
             identity: (metadata.dev(), metadata.ino()),
             allowed_uids,
             serving,
             backoff: None,
         };
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+        if let Some(mode) = mode {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+        }
         Ok(local)
     }
 
@@ -147,8 +171,9 @@ impl Stream for Local {
 impl Drop for Local {
     fn drop(&mut self) {
         self.serving.on.store(false, Ordering::Release);
-        if fs::symlink_metadata(&self.path)
-            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == self.identity)
+        if !self.inherited
+            && fs::symlink_metadata(&self.path)
+                .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == self.identity)
         {
             let _ = fs::remove_file(&self.path);
         }
@@ -326,6 +351,20 @@ mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
     use tonic::codegen::tokio_stream::StreamExt;
+
+    #[tokio::test]
+    async fn inherited_socket_survives_listener_drop_with_peer_checks_intact() {
+        let path =
+            std::env::temp_dir().join(format!("kj-inherited-{}.sock", crate::new_id().unwrap()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let serving = Arc::default();
+        let local = Local::inherited(listener, &path, serving, vec![effective_uid()]).unwrap();
+        assert!(local.allows_uid(effective_uid()));
+        assert!(!local.allows_uid(effective_uid().wrapping_add(1)));
+        drop(local);
+        assert!(path.exists());
+        fs::remove_file(path).unwrap();
+    }
 
     #[tokio::test]
     async fn git_peer_policy_admits_each_service_and_refuses_foreign_uid() {

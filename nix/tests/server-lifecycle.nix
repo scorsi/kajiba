@@ -13,7 +13,17 @@
 let
   inherit (pkgs) lib;
   stateDir = "/var/lib/kajiba-server";
-  keyBlob = "AAAAC3NzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea";
+  keyBlob = lib.elemAt (lib.splitString " " (builtins.readFile ./fixtures/ssh-admin-key.pub)) 1;
+  # Hold an admitted receive-pack before exec, so the restart overlaps a real session.
+  drainingGit = pkgs.writeShellScriptBin "git" ''
+    for arg in "$@"; do
+      if [ "$arg" = receive-pack ] && [ -e /var/lib/kajiba-git/hold-push ]; then
+        touch /var/lib/kajiba-git/push-started
+        while [ -e /var/lib/kajiba-git/hold-push ]; do sleep 0.05; done
+      fi
+    done
+    exec ${pkgs.git}/bin/git "$@"
+  '';
   # Every migration shipped with the binary: a fresh stateDir applies all of them.
   migrations = map (file: lib.toInt (lib.head (lib.splitString "_" file))) (
     lib.attrNames (builtins.readDir ../../apps/server/migrations)
@@ -25,6 +35,7 @@ pkgs.testers.runNixOSTest {
   nodes.machine = {
     imports = [ ../nixosModules/server.nix ];
     services.kajiba-git.package = kajibaGitPackage;
+    systemd.services.kajiba-git.path = lib.mkBefore [ drainingGit ];
     services.kajiba-server = {
       enable = true;
       package = kajibaServerPackage;
@@ -33,12 +44,15 @@ pkgs.testers.runNixOSTest {
       http.publicUrl = "https://forge.example.org";
       users.alice = {
         isAdmin = true;
+        signingKeys = [ (builtins.readFile ./fixtures/ssh-admin-key.pub) ];
         sshKeys = [ "ssh-ed25519 ${keyBlob} alice@example.org" ];
       };
     };
     environment.systemPackages = [
       pkgs.curl
       pkgs.sqlite
+      pkgs.git
+      pkgs.openssh
     ];
     # Only a reloadable setting differs: switching to it reloads the server (0141).
     specialisation.repository.configuration.services.kajiba-server.repos.demo = {
@@ -64,7 +78,7 @@ pkgs.testers.runNixOSTest {
         return sql(
             "SELECT u.public_id, u.name, u.is_admin, u.source, u.disabled_at IS NULL,"
             " k.public_id, k.usage, k.key_type, instr(k.public_key, '${keyBlob}') > 0, k.source"
-            " FROM user u JOIN ssh_key k ON k.user_id = u.id"
+            " FROM user u JOIN ssh_key k ON k.user_id = u.id WHERE k.usage = 'auth'"
         ).split("|")
 
 
@@ -209,6 +223,50 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"systemctl restart {unit}")
         elapsed = float(machine.succeed("date +%s.%N")) - float(started)
         assert elapsed < 10, f"restart took {elapsed:.1f} s"
+        assert_ready()
+
+    with subtest("readyz never refuses a connection across server restarts"):
+        machine.succeed("rm -f /tmp/probe-stop /tmp/probe-codes; (while test ! -e /tmp/probe-stop; do curl -s --max-time 15 -o /dev/null http://127.0.0.1:8080/readyz; echo $? >> /tmp/probe-codes; sleep 0.01; done; touch /tmp/probe-finished) >/tmp/probe-output 2>&1 &")
+        machine.wait_until_succeeds("test $(grep -c '^0$' /tmp/probe-codes) -ge 3")
+        for _ in range(3):
+            machine.succeed(f"systemctl restart {unit}")
+        machine.succeed("touch /tmp/probe-stop")
+        machine.wait_until_succeeds("test -e /tmp/probe-finished")
+        codes = machine.succeed("cat /tmp/probe-codes").splitlines()
+        assert "7" not in codes, f"connection refused: {codes}"
+        assert codes.count("0") >= 3, f"no successful probes: {codes}"
+        assert_ready()
+
+    with subtest("git restart drains an in-flight signed push and retains its sockets"):
+        machine.succeed(
+            "install -m 600 ${./fixtures/ssh-admin-key} /root/push-key",
+            "ssh-keyscan -p 2222 127.0.0.1 > /root/known_hosts",
+            "git init -b main /root/push",
+            "git -C /root/push config user.name Alice",
+            "git -C /root/push config user.email alice@example.org",
+            "git -C /root/push config gpg.format ssh",
+            "git -C /root/push config user.signingkey /root/push-key",
+            "git -C /root/push commit --allow-empty -S -m initial",
+            "touch /var/lib/kajiba-git/hold-push",
+        )
+        ssh = "ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/known_hosts -i /root/push-key -p 2222"
+        push = f"env GIT_SSH_COMMAND={shlex.quote(ssh)} git -C /root/push push kajiba-git@127.0.0.1:alice/demo.git HEAD:refs/heads/main"
+        machine.succeed(f"({push} >/tmp/push-output 2>&1; echo $? >/tmp/push-status) &")
+        machine.wait_until_succeeds("test -e /var/lib/kajiba-git/push-started")
+        invocation = machine.succeed("systemctl show -P InvocationID kajiba-git.service").strip()
+        sockets = machine.succeed("stat -c '%i' /run/kajiba-git/local.sock /run/kajiba-git/ssh.sock")
+        machine.succeed("systemctl restart --no-block kajiba-git.service")
+        machine.wait_until_succeeds(f"journalctl _SYSTEMD_INVOCATION_ID={invocation} -o cat | grep -F stopping")
+        machine.succeed("test ! -e /tmp/push-status", "rm /var/lib/kajiba-git/hold-push")
+        machine.wait_until_succeeds("test -e /tmp/push-status")
+        assert machine.succeed("cat /tmp/push-status").strip() == "0", machine.succeed("cat /tmp/push-output")
+        machine.wait_for_unit("kajiba-git.service")
+        assert machine.succeed("systemctl show -P InvocationID kajiba-git.service").strip() != invocation
+        assert machine.succeed("stat -c '%i' /run/kajiba-git/local.sock /run/kajiba-git/ssh.sock") == sockets
+        expected = machine.succeed("git -C /root/push rev-parse HEAD").strip()
+        directory = sql("SELECT public_id FROM repo WHERE name = 'demo'")
+        actual = machine.succeed(f"runuser -u kajiba-git -- git --git-dir=/var/lib/kajiba-git/repos/{directory}.git rev-parse refs/heads/main").strip()
+        assert actual == expected
         assert_ready()
 
     with subtest("every service log line validates against the nisshi schema"):

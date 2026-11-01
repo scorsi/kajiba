@@ -25,6 +25,7 @@ pub struct Repositories {
 
 #[derive(Default)]
 struct Sessions {
+    draining: bool,
     running: std::collections::BTreeMap<String, (Session, String)>,
     exited: std::collections::BTreeMap<String, (Session, i32)>,
     completed: [[u64; 2]; 4],
@@ -259,9 +260,17 @@ impl Repositories {
             .collect()
     }
 
+    pub fn stop_accepting(&self) {
+        self.sessions.lock().unwrap().draining = true;
+    }
+
     /// `allowed_signers` is the OpenSession response, valid only for this session (0053).
     pub fn register(&self, session: Session, allowed_signers: String) -> Result<(), Status> {
         let mut sessions = self.sessions.lock().unwrap();
+        // Already accepted SSH handoffs may still be awaiting server admission.
+        if sessions.draining && session.kind == kajiba_proto::git::v1::SessionKind::Import as i32 {
+            return Err(Status::unavailable("the git daemon is stopping"));
+        }
         if sessions.running.contains_key(&session.session_id)
             || sessions.exited.contains_key(&session.session_id)
         {
