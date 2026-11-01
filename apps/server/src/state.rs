@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_removes_temporary_data_and_preserves_registered_repository() {
+    async fn interrupted_cleanup_retries_and_preserves_registered_and_archived_repositories() {
         let temp = TempDir::new();
         let _lock = prepare(&temp.0).unwrap();
         let (mut writer, readers) = crate::db::open(&temp.0.join("db/kajiba.sqlite"))
@@ -230,6 +230,12 @@ mod tests {
         let registered = temp.0.join(format!("repos/{id}.git"));
         fs::create_dir(&registered).unwrap();
         fs::write(registered.join("HEAD"), "registered").unwrap();
+        let archived_id = "00000000000000000000000003";
+        sqlx::query("INSERT INTO repo (public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, archived_at, config_key) VALUES (?1, 1, 'archive', 'public', 'off', 'main', '', 0, 1, 'archive')")
+            .bind(archived_id).execute(&mut writer).await.unwrap();
+        let archived = temp.0.join(format!("repos/{archived_id}.git"));
+        fs::create_dir(&archived).unwrap();
+        fs::write(archived.join("HEAD"), "archived").unwrap();
         // A valid public id without a row is quarantined.
         let orphan = temp.0.join("repos/00000000000000000000000002.git");
         fs::create_dir(&orphan).unwrap();
@@ -239,10 +245,27 @@ mod tests {
         fs::write(temp.0.join("tmp/nested/dir/file"), "temporary").unwrap();
         fs::write(temp.0.join("repos/file"), "leave non-directories").unwrap();
 
+        // The scratch cleanup finishes, but a lost daemon prevents the orphan move.
+        assert!(
+            cleanup(
+                &temp.0,
+                &temp.0,
+                &mut crate::transport::git_side::Repositories::new(&temp.0.join("absent.sock")),
+                &mut writer,
+            )
+            .await
+            .is_err()
+        );
+        assert!(!temp.0.join("tmp/file").exists());
+        assert!(orphan.join("HEAD").is_file());
         cleanup(&temp.0, &temp.0, &mut daemon.client, &mut writer)
             .await
             .unwrap();
 
+        assert_eq!(
+            fs::read_to_string(archived.join("HEAD")).unwrap(),
+            "archived"
+        );
         assert!(!temp.0.join("tmp/file").exists());
         assert!(!temp.0.join("tmp/nested").exists());
         assert!(!orphan.exists());

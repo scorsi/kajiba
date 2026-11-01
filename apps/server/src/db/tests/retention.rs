@@ -319,3 +319,130 @@ async fn scheduled_retention_waits_for_maintenance_before_deleting() {
     queued.await.unwrap();
     assert_eq!(indexed(&mut *writer.lock().await).await, [3]);
 }
+
+#[tokio::test]
+async fn interrupted_log_cleanup_retries_missing_files_without_losing_history() {
+    let dir = TempDir::new();
+    let logs = dir.0.join("logs");
+    let (mut writer, _) = open(&dir.database()).await.unwrap();
+    populate(&mut writer, &logs).await;
+    sqlx::query("INSERT INTO step (attempt_id, idx, name, state, exit_code) VALUES (1, 0, 'check', 'failed', 1);
+        UPDATE run SET failure_reason = 'check-failed' WHERE id = 1;
+        CREATE TEMP TRIGGER interrupt_cleanup BEFORE DELETE ON log_chunk
+        BEGIN SELECT RAISE(ABORT, 'interrupted cleanup'); END")
+        .execute(&mut writer).await.unwrap();
+    assert!(
+        purge_logs(&mut writer, &logs, Duration::ZERO, 10 * DAY)
+            .await
+            .unwrap_err()
+            .contains("interrupted cleanup")
+    );
+    assert_eq!(indexed(&mut writer).await, [1, 2, 3]);
+    assert!(!logs.join("00000000000000000000000001.log").exists());
+    sqlx::query("DROP TRIGGER interrupt_cleanup")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    assert_eq!(
+        purge_logs(&mut writer, &logs, Duration::ZERO, 10 * DAY)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        purge_logs(&mut writer, &logs, Duration::ZERO, 10 * DAY)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(indexed(&mut writer).await, [3]);
+    let history: (i64, i64, i64, i64, String) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM run), (SELECT count(*) FROM job),
+         (SELECT count(*) FROM job_attempt), (SELECT count(*) FROM step),
+         (SELECT failure_reason FROM run WHERE id = 1)",
+    )
+    .fetch_one(&mut writer)
+    .await
+    .unwrap();
+    assert_eq!(history, (1, 1, 3, 1, "check-failed".into()));
+    let lengths: Vec<i64> =
+        sqlx::query_scalar("SELECT purged_log_length FROM job_attempt ORDER BY id")
+            .fetch_all(&mut writer)
+            .await
+            .unwrap();
+    assert_eq!(lengths, [6, 6, 0]);
+}
+
+#[tokio::test]
+async fn interrupted_worktree_expiry_retries_after_files_are_gone() {
+    let dir = TempDir::new();
+    let (logs, bundles) = (dir.0.join("logs"), dir.0.join("bundles"));
+    let (mut writer, _) = open(&dir.database()).await.unwrap();
+    worktree_runs(&mut writer, &logs, &bundles).await;
+    sqlx::query("INSERT INTO step (attempt_id, idx, name, state) VALUES (1, 0, 'manual', 'failed'), (4, 0, 'worktree', 'running');
+        CREATE TEMP TRIGGER interrupt_cleanup BEFORE DELETE ON run WHEN OLD.id = 2
+        BEGIN SELECT RAISE(ABORT, 'interrupted cleanup'); END")
+        .execute(&mut writer).await.unwrap();
+    assert!(
+        purge_worktree_runs(&mut writer, &logs, &bundles, Duration::ZERO, 10 * DAY)
+            .await
+            .unwrap_err()
+            .contains("interrupted cleanup")
+    );
+    assert_eq!(run_ids(&mut writer).await, [1, 2, 3, 4]);
+    assert!(!logs.join("00000000000000000000000004.log").exists());
+    assert!(!bundles.join("00000000000000000000000002.bundle").exists());
+    sqlx::query("DROP TRIGGER interrupt_cleanup")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    assert_eq!(
+        purge_worktree_runs(&mut writer, &logs, &bundles, Duration::ZERO, 10 * DAY)
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        purge_worktree_runs(&mut writer, &logs, &bundles, Duration::ZERO, 10 * DAY)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(run_ids(&mut writer).await, [1]);
+    assert_eq!(indexed(&mut writer).await, [1, 2, 3]);
+    let history: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM job), (SELECT count(*) FROM job_attempt),
+         (SELECT count(*) FROM step), (SELECT count(*) FROM event WHERE kind = 'run-finished')",
+    )
+    .fetch_one(&mut writer)
+    .await
+    .unwrap();
+    assert_eq!(history, (1, 3, 1, 2));
+    assert_eq!(fs::read_dir(&bundles).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn terminal_bundle_cleanup_retries_without_deleting_run_or_logs() {
+    let dir = TempDir::new();
+    let (logs, bundles) = (dir.0.join("logs"), dir.0.join("bundles"));
+    let (mut writer, _) = open(&dir.database()).await.unwrap();
+    worktree_runs(&mut writer, &logs, &bundles).await;
+    let bundle = bundles.join("00000000000000000000000004.bundle");
+    fs::remove_file(&bundle).unwrap();
+    fs::create_dir(&bundle).unwrap();
+    assert!(drop_finished_bundles(&mut writer, &bundles).await.is_err());
+    assert_eq!(run_ids(&mut writer).await, [1, 2, 3, 4]);
+    fs::remove_dir(&bundle).unwrap();
+    fs::write(&bundle, "retry").unwrap();
+    assert_eq!(
+        drop_finished_bundles(&mut writer, &bundles).await.unwrap(),
+        1
+    );
+    assert_eq!(
+        drop_finished_bundles(&mut writer, &bundles).await.unwrap(),
+        0
+    );
+    assert_eq!(run_ids(&mut writer).await, [1, 2, 3, 4]);
+    assert_eq!(indexed(&mut writer).await, [1, 2, 3, 4]);
+    assert!(logs.join("00000000000000000000000004.log").is_file());
+}

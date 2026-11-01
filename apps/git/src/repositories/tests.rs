@@ -220,6 +220,22 @@ fn quarantine_reports_sync_failures_and_refuses_symlinked_paths() {
             .unwrap_err();
         assert!(err.message().contains("sync failed"));
         assert!(temp.0.join(format!("tmp/orphans/{ID}.git/HEAD")).is_file());
+        // Rename completed before fsync failed: restart must retain the reservation.
+        drop(_lock);
+        let _lock = prepare(&temp.0).unwrap();
+        let repos = Repositories::new(temp.0.clone());
+        assert_eq!(
+            repos.create(ID, "main").unwrap_err().code(),
+            Code::AlreadyExists
+        );
+        assert_eq!(
+            repos
+                .quarantine(format!("{ID}.git").as_bytes())
+                .unwrap_err()
+                .code(),
+            Code::NotFound
+        );
+        assert_eq!(fs::read_dir(temp.0.join("tmp/orphans")).unwrap().count(), 1);
     }
     for name in ["repos", "tmp", "tmp/orphans"] {
         let temp = TempDir::new();
@@ -248,6 +264,35 @@ fn quarantine_reports_sync_failures_and_refuses_symlinked_paths() {
     );
     assert!(repos.set_head(ID, "main").is_err());
     assert!(repos.quarantine(format!("{ID}.git").as_bytes()).is_err());
+}
+
+#[test]
+fn malformed_and_object_bearing_orphans_stay_until_operator_repair() {
+    for (name, contents) in [
+        ("HEAD", "not a ref\n"),
+        ("HEAD", "ref: refs/heads/bad..name\n"),
+        ("HEAD", ""),
+        ("objects/info/alternates", "/outside/objects\n"),
+        ("objects/pack/history.pack", "stored history"),
+        ("objects/ab/object", "unreferenced history"),
+    ] {
+        let temp = TempDir::new();
+        let _lock = prepare(&temp.0).unwrap();
+        let repos = Repositories::new(temp.0.clone());
+        repos.create(ID, "main").unwrap();
+        let path = temp.0.join(format!("repos/{ID}.git"));
+        let evidence = path.join(name);
+        fs::create_dir_all(evidence.parent().unwrap()).unwrap();
+        fs::write(&evidence, contents).unwrap();
+        for _ in 0..2 {
+            assert!(
+                repos.quarantine(format!("{ID}.git").as_bytes()).is_err(),
+                "{name}"
+            );
+            assert_eq!(fs::read_to_string(&evidence).unwrap(), contents);
+            assert_eq!(fs::read_dir(temp.0.join("tmp/orphans")).unwrap().count(), 0);
+        }
+    }
 }
 
 #[test]

@@ -1153,6 +1153,8 @@ impl GitStore for Gix<'_> {
 
     fn refs(&self, repo: &Path) -> Result<Vec<Ref>> {
         let repo = self.open(repo)?;
+        // Ref iteration skips HEAD; emptiness must not hide a malformed repository (0067).
+        repo.head()?;
         let mut refs = Vec::new();
         for reference in repo.references()?.all()? {
             let mut reference = reference?;

@@ -94,6 +94,22 @@ fn fixture(name: &str) -> Fixture {
 }
 
 #[test]
+fn empty_ref_listing_refuses_malformed_head() {
+    let dir = scratch("malformed-head");
+    let bare = dir.join("repo.git");
+    Gix.init_bare(&bare, "main").unwrap();
+    assert!(Gix.refs(&bare).unwrap().is_empty());
+    for head in ["not a ref\n", "ref: refs/heads/bad..name\n", ""] {
+        fs::write(bare.join("HEAD"), head).unwrap();
+        assert!(Gix.refs(&bare).is_err(), "{head:?}");
+        assert_eq!(fs::read_to_string(bare.join("HEAD")).unwrap(), head);
+    }
+    fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    assert!(Gix.refs(&bare).unwrap().is_empty());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn init_bare_puts_head_on_the_default_branch() {
     let dir = scratch("init");
     let bare = dir.join("repo.git");
