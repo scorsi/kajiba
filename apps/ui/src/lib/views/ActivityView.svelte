@@ -6,9 +6,12 @@
 	every repository as a small card. Same folding strips as the repository view.
 -->
 <script lang="ts">
+	import ActivityChart from '#lib/components/ActivityChart.svelte';
+	import { activityRange, activityStart } from '#lib/data/activity.ts';
 	import RunRef from '#lib/components/RunRef.svelte';
 	import DurationBar from '#lib/components/DurationBar.svelte';
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import type { Snippet } from 'svelte';
 	import BandStrip from '#lib/components/BandStrip.svelte';
 	import { MirrorState, RunState, type Commit } from '#lib/api.ts';
@@ -16,7 +19,7 @@
 	import { commitSubject, relativeTime, shortId, toDate } from '#lib/format.ts';
 	import RunBadge, { RUN_LABEL } from '#lib/components/RunBadge.svelte';
 	import { buildEvents, countEvents } from '#lib/data/events.ts';
-	import { commitDay, lastDays, repoHref, type Forge } from '#lib/data/forge.ts';
+	import { commitDay, dayKey, lastDays, repoHref, type Forge } from '#lib/data/forge.ts';
 	import HistoryFeed from '#lib/components/HistoryFeed.svelte';
 	import NeedsAttention from '#lib/components/NeedsAttention.svelte';
 
@@ -24,7 +27,7 @@
 
 	const q = $derived(page.url.searchParams);
 	const pulseOpen = $derived(q.get('pulse') !== '0');
-	const days = $derived(q.get('days') === '30' ? 30 : 90);
+	const days = $derived(activityRange(q.get('days')));
 	const pipelinesOpen = $derived(q.get('pipelines') !== '0');
 	const historyOpen = $derived(q.get('history') === '1');
 	function hrefFor(next: Record<string, string | null>) {
@@ -33,8 +36,7 @@
 		return `?${u}`;
 	}
 
-	const win = $derived(lastDays(days));
-	const since = $derived(win[0].k);
+	const since = $derived(dayKey(activityStart(days)));
 	const all = $derived(
 		forge.repos
 			.flatMap((r) => r.commits.map((c) => ({ c, r })))
@@ -45,32 +47,9 @@
 		new Map(forge.runs.filter((r) => r.trigger !== 'worktree').map((r) => [r.commitId, r]))
 	);
 
-	const ribbon = $derived.by(() => {
-		const n = new Map<string, number>();
-		const rel = new Map<string, string[]>();
-		const ci = new Map<string, RunState[]>();
-		for (const { c, r } of inWindow) {
-			const k = commitDay(c);
-			n.set(k, (n.get(k) ?? 0) + 1);
-			const t = r.tags.get(c.id);
-			if (t) rel.set(k, [...(rel.get(k) ?? []), ...t.map((x) => `${r.repo.name} ${x}`)]);
-			const run = runByCommit.get(c.id);
-			if (run) ci.set(k, [...(ci.get(k) ?? []), run.state]);
-		}
-		return win.map((d) => {
-			const s = ci.get(d.k) ?? [];
-			const worst = [
-				RunState.RUNNING,
-				RunState.FAILED,
-				RunState.CANCELLED,
-				RunState.SUCCEEDED
-			].find((x) => s.includes(x));
-			return { ...d, n: n.get(d.k) ?? 0, releases: rel.get(d.k) ?? [], ci: worst };
-		});
-	});
-	const max = $derived(Math.max(1, ...ribbon.map((d) => d.n)));
+	const sources = $derived(forge.repos.map(r => ({ ...r, repo: r.key, ref: r.repo.defaultBranch })));
 
-	const weekAgo = Date.now() / 1000 - 7 * 86400;
+	const weekAgo = new Date(lastDays(7)[0].dt).setHours(0, 0, 0, 0) / 1000;
 	const runs7 = $derived(forge.runs.filter((r) => Number(r.createTime!.seconds) > weekAgo));
 	const passed7 = $derived(runs7.filter((r) => r.state === RunState.SUCCEEDED).length);
 	const running = $derived(forge.runs.filter((r) => r.state === RunState.RUNNING));
@@ -95,11 +74,6 @@
 		const v = w.map((d) => n.get(d.k) ?? 0);
 		return { v, max: Math.max(1, ...v) };
 	};
-	const fullDay = new Intl.DateTimeFormat('en', {
-		weekday: 'short',
-		month: 'short',
-		day: 'numeric'
-	});
 	// History: the forge's events over the Pulse period
 	const events = $derived(
 		buildEvents(
@@ -107,7 +81,7 @@
 			{
 				mirrors: forge.mirrors,
 				runners: forge.runners,
-				since: new Date(win[0].dt).setHours(0, 0, 0, 0) / 1000
+				since: activityStart(days).getTime() / 1000
 			}
 		)
 	);
@@ -140,18 +114,7 @@
 					>across {forge.repos.length} repositories</span
 				>
 			</h1>
-			<nav class="flex rounded-sm border border-border p-0.5 text-xs" aria-label="Period">
-				{#each [30, 90] as d (d)}
-					<a
-						href={hrefFor({ days: d === 90 ? null : '30' })}
-						data-sveltekit-noscroll
-						aria-current={d === days ? 'true' : undefined}
-						class="rounded-[3px] px-2.5 py-1 {d === days
-							? 'bg-accent-soft text-accent'
-							: 'text-fg-muted hover:text-fg'}">{d} days</a
-					>
-				{/each}
-			</nav>
+
 		</div>
 		<p class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-fg-subtle">
 			<span><span class="tabular text-fg-muted">{inWindow.length}</span> commits</span>
@@ -170,63 +133,11 @@
 			>
 		</p>
 		<NeedsAttention {forge} />
-		<figure class="mt-4">
-			<figcaption class="mb-1.5 flex justify-between text-xs text-fg-subtle">
-				<span>Commits per day, all repositories</span><span>◆ release</span>
-			</figcaption>
-			<div class="flex h-14 items-end gap-[2px]">
-				{#each ribbon as d (d.k)}
-					<div
-						class="relative flex h-full flex-1 items-end"
-						title="{fullDay.format(d.dt)} · {d.n} commits{d.releases.length
-							? ` · ${d.releases.join(', ')}`
-							: ''}{d.ci !== undefined ? ` · CI ${RUN_LABEL[d.ci]}` : ''}"
-					>
-						{#if d.releases.length}<span
-								class="absolute -top-1.5 left-1/2 size-1.5 -translate-x-1/2 rotate-45 bg-warn"
-								aria-hidden="true"
-							></span>{/if}
-						<span
-							class="block w-full rounded-t-[2px] {d.n ? 'bg-accent/75' : 'bg-border/70'}"
-							style:height="{d.n ? Math.max(12, (d.n / max) * 100) : 5}%"
-						></span>
-					</div>
-				{/each}
-			</div>
-			<div class="mt-1 flex gap-[2px]" role="img" aria-label="CI outcome per day">
-				{#each ribbon as d (d.k)}
-					<span
-						class="h-1 flex-1 rounded-full {d.ci === RunState.FAILED
-							? 'bg-danger'
-							: d.ci === RunState.RUNNING
-								? 'bg-accent'
-								: d.ci === RunState.SUCCEEDED
-									? 'bg-ok/60'
-									: 'bg-transparent'}"
-					></span>
-				{/each}
-			</div>
-		</figure>
-		<ul class="mt-3 space-y-0.5 text-[0.8125rem]">
-			{#each inWindow.slice(0, 4) as { c, r } (`${r.key}/${c.id}`)}
-				{@const run = runByCommit.get(c.id)}
-				<li>
-					<a
-						href={repoHref(r.key, { at: c.id })}
-						class="flex items-center gap-3 rounded-sm px-1 py-0.5 hover:bg-surface-2"
-					>
-						<span class="w-3"
-							>{#if run}<RunBadge state={run.state} size={11} />{/if}</span
-						>
-						<span class="w-32 shrink-0 truncate font-mono text-xs text-fg-muted">{r.key}</span>
-						<span class="min-w-0 flex-1 truncate">{commitSubject(c.message)}</span>
-						<span class="hidden shrink-0 text-xs text-fg-subtle sm:inline"
-							>{c.authorName} · {relativeTime(toDate(c.commitTime))}</span
-						>
-					</a>
-				</li>
-			{/each}
-		</ul>
+		<ActivityChart {sources} range={days} selected={q.get('day') ?? ''} {hrefFor}
+			select={(b) => goto(hrefFor({ day: b.k }), { reset: false })}
+			commitHref={(repo, c) => repoHref(repo, { at: c.id })}
+			cap="Loaded sample: up to 400 default-branch commits and 50 recent runs per repository."
+		/>
 	</section>
 	{/if}
 

@@ -138,8 +138,8 @@ test("keyed each blocks use keys unique for real data", async () => {
     readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
   // the same commit in two repositories, steps sharing a name, one path changed twice
   assert.match(
-    src("lib/views/ActivityView.svelte"),
-    /as \{ c, r \} \(`\$\{r\.key\}\/\$\{c\.id\}`\)/,
+    src("lib/components/ActivityChart.svelte"),
+    /as \{ c, repo \} \(`\$\{repo\}\/\$\{c\.id\}`\)/,
   );
   assert.match(
     src("lib/views/RepoView.svelte"),
