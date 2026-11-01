@@ -201,8 +201,10 @@ async function readRunLog(id: string, repo: string, signal: AbortSignal) {
 /** A step's log cut into segments: consecutive lines of the same group. */
 export interface Segment {
   group?: string;
-  /** 1-based line numbers within the step. */
-  lines: { n: number; line: RunLogLine }[];
+  /** Shared line records, without per-line presentation wrappers. */
+  lines: RunLogLine[];
+  /** Number of preceding lines within the step. */
+  offset: number;
   failed: boolean;
   start: number;
   end: number;
@@ -214,13 +216,14 @@ export function segments(lines: RunLogLine[], offset = 0): Segment[] {
     const i = offset + k;
     const last = out.at(-1);
     if (last && last.group === line.group) {
-      last.lines.push({ n: i + 1, line });
+      last.lines.push(line);
       last.end = line.offsetSeconds;
       if (line.stream === "err") last.failed = true;
     } else
       out.push({
         group: line.group,
-        lines: [{ n: i + 1, line }],
+        lines: [line],
+        offset: i,
         failed: line.stream === "err",
         start: line.offsetSeconds,
         end: line.offsetSeconds,

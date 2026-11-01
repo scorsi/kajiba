@@ -76,7 +76,7 @@
 		lines: step === data.logs.length - 1 ? (data.logs[step]?.lines ?? []) : (stored.data ?? []),
 		complete: data.logs[step]?.complete ?? true
 	});
-	const segs = $derived(segments(log?.lines ?? []));
+	const segs = $derived(log.lines.some((line) => line.group) ? segments(log.lines) : []);
 	const firstG = $derived(segs.findIndex((x) => x.group));
 	const lastG = $derived(segs.findLastIndex((x) => x.group));
 	const pre = $derived(firstG < 0 ? [] : segs.slice(0, firstG).flatMap((x) => x.lines));
@@ -114,6 +114,7 @@
 
 	// Initial landing is separate from updates: terminal refreshes must not pull a reader back.
 	let pane = $state<HTMLElement>();
+	let logView = $state<LogView>();
 	let stick = true;
 	let unseen = $state(false);
 	let landed = '';
@@ -145,14 +146,10 @@
 			if (cancelled) return;
 			if (initial) {
 				unseen = false;
-				const linked = page.url.hash && document.getElementById(page.url.hash.slice(1));
-				const err = el.querySelector<HTMLElement>('[data-err]');
-				const target = linked && el.contains(linked) ? linked : complete ? err : null;
-				if (target)
-					el.scrollTop = Math.max(
-						0,
-						target.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - 48
-					);
+				const linked = new RegExp(`^#L${step + 1}-(\\d+)$`).exec(page.url.hash);
+				const error = log.lines.findIndex((line) => line.stream === 'err');
+				const target = linked ? Number(linked[1]) : complete && error >= 0 ? error + 1 : 0;
+				if (target) void logView?.scrollToLine(target);
 				else el.scrollTop = complete ? 0 : el.scrollHeight;
 				stick = atLogBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
 			} else if (added) {
@@ -294,8 +291,9 @@
 					</p>
 				{:else if checks.length}
 					{#if pre.length}
-						<div class="border-b border-border/60 py-1">
-							<LogView flat lines={pre.map((x) => x.line)} step={i} label="{st.name} log" />
+						<!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable log prelude) -->
+						<div tabindex="0" class="relative max-h-40 shrink-0 overflow-y-auto border-b border-border/60 py-1">
+							<LogView lines={pre} step={i} label="{st.name} log" />
 						</div>
 					{/if}
 					<div class="flex min-h-0 flex-1 flex-col sm:flex-row">
@@ -327,9 +325,9 @@
 						class="relative min-h-0 flex-1 overflow-y-auto py-1 [overflow-anchor:none]"
 									>
 										<LogView
-											flat
-											lines={c.seg.lines.map((x) => x.line)}
-											offset={c.seg.lines[0].n - 1}
+											bind:this={logView}
+											lines={c.seg.lines}
+											offset={c.seg.offset}
 											step={i}
 											complete={c.state !== RunState.RUNNING}
 											label="checks.{c.name} log"
@@ -348,9 +346,8 @@
 							class="relative max-h-40 shrink-0 overflow-y-auto border-t border-border py-1"
 						>
 							<LogView
-								flat
-								lines={post.map((x) => x.line)}
-								offset={post[0].n - 1}
+								lines={post}
+								offset={segs[lastG + 1].offset}
 								step={i}
 								label="{st.name} summary"
 							/>
@@ -366,7 +363,7 @@
 						class="relative min-h-0 flex-1 overflow-y-auto py-1 [overflow-anchor:none]"
 					>
 						<LogView
-							flat
+							bind:this={logView}
 							lines={log.lines}
 							step={i}
 							complete={log.complete}

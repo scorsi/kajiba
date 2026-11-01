@@ -47,7 +47,7 @@ const trailer = [
   ...new TextEncoder().encode("grpc-status: 0\r\n"),
 ];
 
-async function fixture(page: Page, live = false) {
+async function fixture(page: Page, live = false, lineCount = 180) {
   await authenticator(page);
   await enroll(page, enrollLink());
   await page.getByRole("link", { name: "Continue to kajiba" }).click();
@@ -58,7 +58,7 @@ async function fixture(page: Page, live = false) {
     );
   const first = "older attempt\n";
   const second = Array.from(
-    { length: 180 },
+    { length: lineCount },
     (_, i) => `newer line ${i + 1}\n`,
   ).join("");
   const offset = new TextEncoder().encode(first).length;
@@ -158,7 +158,7 @@ test("runs open the latest attempt, anchors win, and switches load only logs", a
   await expect(
     page.getByRole("region", { name: "attempt 2 log", exact: true }),
   ).toBeVisible();
-  await expect(page.getByRole("log")).toContainText("newer line 180");
+  await expect(page.locator("#L2-1")).toBeVisible();
   const original = metadata;
   await page.locator('a[href="?step=1"]').first().click();
   await expect(
@@ -166,7 +166,7 @@ test("runs open the latest attempt, anchors win, and switches load only logs", a
   ).toBeVisible();
   await expect(page.locator('a[aria-busy="true"]')).toContainText("attempt 1");
   await page.locator('a[href="?step=2"]').first().click();
-  await expect(page.getByRole("log")).toContainText("newer line 180");
+  await expect(page.locator("#L2-1")).toBeVisible();
   expect(metadata).toBe(original);
   expect(
     await page.evaluate(
@@ -221,7 +221,12 @@ test("new log lines preserve a scrolled-up reader and follow only at the bottom"
     section(2, 14, true),
   );
   await emit(end, "arrived while reading\n");
-  await expect(page.getByRole("log")).toContainText("arrived while reading");
+  await expect(
+    page.getByRole("button", { name: "Jump to latest" }),
+  ).toBeVisible();
+  await expect(page.getByRole("log")).not.toContainText(
+    "arrived while reading",
+  );
   expect(await pane.evaluate((el) => el.scrollTop)).toBe(top);
   await page.getByRole("button", { name: "Jump to latest" }).click();
   await expect
@@ -239,4 +244,26 @@ test("new log lines preserve a scrolled-up reader and follow only at the bottom"
       pane.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight),
     )
     .toBeLessThan(5);
+});
+
+test("large logs keep DOM rows bounded and deep anchors visible", async ({
+  page,
+}) => {
+  const { id } = await fixture(page, false, 50_000);
+  await page.goto(`/-/runs/${id}#L2-45000`);
+  const pane = page.locator("[data-log-pane]");
+  const rows = page.getByRole("log").locator('[id^="L"]');
+  await expect(page.locator("#L2-45000")).toBeInViewport();
+  await expect(page.locator("#L2-45000")).toContainText("newer line 45000");
+  expect(await rows.count()).toBeLessThan(150);
+  await pane.evaluate((el) => {
+    el.scrollTop = el.scrollHeight;
+  });
+  await expect(page.locator("#L2-50000")).toBeInViewport();
+  expect(await rows.count()).toBeLessThan(150);
+  await pane.evaluate((el) => {
+    el.scrollTop = 0;
+  });
+  await expect(page.locator("#L2-1")).toBeInViewport();
+  expect(await rows.count()).toBeLessThan(150);
 });
