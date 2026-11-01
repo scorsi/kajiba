@@ -116,7 +116,10 @@ const median = (xs: number[]) => {
   return s[Math.floor(s.length / 2)];
 };
 
-export async function loadRun(id: string): Promise<RunPage> {
+export async function loadRun(
+  id: string,
+  signal: AbortSignal,
+): Promise<RunPage> {
   const run = await getRun({ id });
   const worktree = run.trigger === "worktree";
   const [repos, history, commits, diff, log, viewer] = await Promise.all([
@@ -139,7 +142,7 @@ export async function loadRun(id: string): Promise<RunPage> {
       : getCommitDiff({ repo: run.repo, revision: run.commitId })
           .then((d) => d.changes)
           .catch(() => [] as Change[]),
-    readRunLog(run.id, run.repo),
+    readRunLog(run.id, run.repo, signal),
     getViewer(),
   ]);
   const created = (r: Run) => Number(r.createTime?.seconds ?? 0n);
@@ -189,9 +192,9 @@ export async function loadRun(id: string): Promise<RunPage> {
   );
 }
 
-async function readRunLog(id: string, repo: string) {
+async function readRunLog(id: string, repo: string, signal: AbortSignal) {
   const log = newRunLog();
-  await watchRun({ id, repo, log, follow: false });
+  await watchRun({ id, repo, log, follow: false, signal });
   return log;
 }
 

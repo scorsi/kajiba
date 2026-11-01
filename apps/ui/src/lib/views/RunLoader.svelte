@@ -11,7 +11,7 @@
 	import RunView from '#lib/views/RunView.svelte';
 
 	let { id }: { id: string } = $props();
-	const data = resource(() => loadRun(id));
+	const data = resource((signal) => loadRun(id, signal));
 
 	// An unfinished run is followed live (ADR 0142); the stream is closed when
 	// the page is left, and the page reloads once the run is terminal.

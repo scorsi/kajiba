@@ -6,6 +6,7 @@
  * Reactive values read synchronously by `fn` are tracked; when they change the
  * request is re-run. Stale responses are dropped. `data` keeps the previous
  * value while reloading, so views can show it dimmed instead of a blank page.
+ * `fn` receives a signal aborted on reload or component cleanup.
  * `refreshWhile` schedules another load after one second while its predicate holds.
  */
 export interface Resource<T> {
@@ -16,7 +17,7 @@ export interface Resource<T> {
 }
 
 export function resource<T>(
-  fn: () => Promise<T>,
+  fn: (signal: AbortSignal) => Promise<T>,
   refreshWhile?: (data: T) => boolean,
 ): Resource<T> {
   let data = $state<T | undefined>(undefined);
@@ -28,10 +29,11 @@ export function resource<T>(
   $effect(() => {
     void attempt;
     const current = ++seq;
+    const stop = new AbortController();
     let refresh: ReturnType<typeof setTimeout> | undefined;
     loading = true;
     error = undefined;
-    fn().then(
+    fn(stop.signal).then(
       (value) => {
         if (current !== seq) return;
         data = value;
@@ -46,6 +48,7 @@ export function resource<T>(
     );
     return () => {
       seq++;
+      stop.abort();
       clearTimeout(refresh);
     };
   });
