@@ -11,55 +11,13 @@
     }:
     let
       craneLib = inputs.crane.mkLib pkgs;
-      commonCargoArgs = {
-        pname = "kajiba-workspace";
-        version = lib.trim (builtins.readFile ../VERSION);
-        src = lib.fileset.toSource {
-          root = ../.;
-          fileset = lib.fileset.unions [
-            (craneLib.fileset.commonCargoSources ../crates)
-            ../crates/kajiba-core/tests/fixtures
-            (craneLib.fileset.commonCargoSources ../apps/server)
-            (craneLib.fileset.commonCargoSources ../apps/git)
-            ../apps/git/tests/fixtures
-            ../apps/server/migrations
-            ../apps/server/tests/fixtures
-            (craneLib.fileset.commonCargoSources ../apps/runner)
-            (craneLib.fileset.commonCargoSources ../apps/cli)
-            ../Cargo.toml
-            ../VERSION
-            ../Cargo.lock
-            ../proto
-          ];
-        };
-        strictDeps = true;
-        nativeBuildInputs = [
-          pkgs.protobuf
-          pkgs.pkg-config
-        ];
-        # webauthn-rs-core links OpenSSL (0076).
-        buildInputs = [ pkgs.openssl ];
-        PROTOC = "${pkgs.protobuf}/bin/protoc";
-        cargoExtraArgs = "--locked --workspace";
+      builds = import ./packages {
+        inherit pkgs lib craneLib;
       };
-      cargoArtifacts = craneLib.buildDepsOnly commonCargoArgs;
+      inherit (builds) commonCargoArgs cargoArtifacts;
     in
     {
-      packages = {
-        kajiba-server = pkgs.callPackage ./packages/kajiba-server.nix {
-          inherit craneLib commonCargoArgs cargoArtifacts;
-        };
-        kajiba-git = pkgs.callPackage ./packages/kajiba-git.nix {
-          inherit craneLib commonCargoArgs cargoArtifacts;
-        };
-        kajiba-runner = pkgs.callPackage ./packages/kajiba-runner.nix {
-          inherit craneLib commonCargoArgs cargoArtifacts;
-        };
-        kajiba-cli = pkgs.callPackage ./packages/kajiba-cli.nix {
-          inherit craneLib commonCargoArgs cargoArtifacts;
-        };
-        kajiba-ui = pkgs.callPackage ./packages/kajiba-ui.nix { };
-      };
+      packages = builds.packages;
 
       apps.e2e = {
         type = "app";
@@ -106,6 +64,12 @@
           kajiba-cli
           kajiba-ui
           ;
+
+        package-source-isolation = import ./checks/package-source-isolation.nix {
+          inherit pkgs lib craneLib;
+          inherit (builds) packages cargoArtifacts;
+          workspaceSrc = commonCargoArgs.src;
+        };
 
         cargo-test = craneLib.cargoTest (
           commonCargoArgs

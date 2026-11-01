@@ -4,6 +4,7 @@
 # `--filter` build rather than a self-contained apps/ui source tree.
 {
   lib,
+  root ? ../..,
   stdenvNoCC,
   nodejs,
   pnpm,
@@ -12,20 +13,20 @@
 }:
 stdenvNoCC.mkDerivation (finalAttrs: {
   pname = "kajiba-ui";
-  version = lib.trim (builtins.readFile ../../VERSION);
+  version = lib.trim (builtins.readFile (root + "/VERSION"));
 
   src = lib.fileset.toSource {
-    root = ../..;
+    inherit root;
     fileset = lib.fileset.unions [
-      ../../pnpm-workspace.yaml
-      ../../pnpm-lock.yaml
-      ../../apps/ui/package.json
-      ../../apps/ui/vite.config.ts
-      ../../apps/ui/dev-proxy.js
-      ../../apps/ui/tsconfig.json
-      ../../apps/ui/src
-      ../../apps/ui/tests
-      ../../apps/ui/static
+      (root + "/pnpm-workspace.yaml")
+      (root + "/pnpm-lock.yaml")
+      (root + "/apps/ui/package.json")
+      (root + "/apps/ui/vite.config.ts")
+      (root + "/apps/ui/dev-proxy.js")
+      (root + "/apps/ui/tsconfig.json")
+      (root + "/apps/ui/src")
+      (root + "/apps/ui/tests")
+      (root + "/apps/ui/static")
     ];
   };
 
