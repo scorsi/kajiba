@@ -26,8 +26,7 @@ export async function recentRuns(perRepo: number): Promise<api.Run[]> {
     repos.map((r) =>
       api
         .listRuns({ repo: `${r.owner}/${r.name}`, pageSize: perRepo })
-        .then((l) => l.runs)
-        .catch(() => [] as api.Run[]),
+        .then((l) => l.runs),
     ),
   );
   return per
