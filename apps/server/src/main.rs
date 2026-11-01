@@ -257,6 +257,7 @@ async fn main() -> ExitCode {
                 maintenance: health.maintenance.clone(),
                 git_socket: config.git.socket.clone(),
                 writer: writer.clone(),
+                readers: readers.clone(),
                 public_url: config.http.public_url.clone(),
                 enrollment_ttl: config.auth.enrollment_ttl,
                 gate: gate.clone(),

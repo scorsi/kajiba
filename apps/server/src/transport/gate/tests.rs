@@ -1796,6 +1796,36 @@ async fn maintenance_waits_for_session_exit_before_quiescence() {
 }
 
 #[tokio::test]
+async fn reads_open_and_authenticate_while_a_dump_holds_the_writer() {
+    let (_state, admin, gate, alice) = session_fixture().await;
+    let _dump = admin.writer.lock().await;
+    let read = async {
+        let err = gate
+            .get_auth_key(Request::new(GetAuthKeyRequest {
+                fingerprint: "missing".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::NotFound);
+        gate.open(&OpenSessionRequest {
+            generation: gate.admission.generation().unwrap(),
+            session_id: kajiba_core::new_id().unwrap(),
+            kind: kajiba_proto::git::v1::SessionKind::UploadPack as i32,
+            user_public_id: alice,
+            repository: Some(open_session_request::Repository::RepoAddress(
+                "alice/demo".into(),
+            )),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    };
+    tokio::time::timeout(Duration::from_secs(2), read)
+        .await
+        .expect("reads must not wait for the writer");
+}
+
+#[tokio::test]
 async fn maintenance_refuses_retained_pending_push_and_reopens() {
     let (_state, admin, _gate, _alice) = session_fixture().await;
     let mut daemon = crate::transport::git_side::fake::Fake::start(&admin.state_dir).await;

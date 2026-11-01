@@ -26,6 +26,7 @@ pub const SOCKET_PATH: &str = "/run/kajiba/local.sock";
 pub struct Admin {
     pub(crate) maintenance: super::maintenance::Admission,
     pub writer: crate::db::Writer,
+    pub readers: sqlx::SqlitePool,
     pub public_url: String,
     pub enrollment_ttl: Duration,
     pub gate: Arc<crate::db::pushes::Gate>,

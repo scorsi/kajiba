@@ -21,6 +21,7 @@ mod policy;
 pub struct Gate {
     maintenance: super::maintenance::Admission,
     pub writer: Writer,
+    pub readers: sqlx::SqlitePool,
     pub generation: Mutex<Option<String>>,
     // shortcut: retain closed IDs per generation; use an acknowledgment watermark if volume requires a bound.
     closed: Mutex<std::collections::HashSet<String>>,
@@ -73,7 +74,7 @@ impl GateService for Gate {
         &self,
         request: Request<GetAuthKeyRequest>,
     ) -> Result<Response<GetAuthKeyResponse>, Status> {
-        auth_key(&self.writer, request.into_inner().fingerprint)
+        auth_key(&self.readers, request.into_inner().fingerprint)
             .await
             .map(Response::new)
     }
@@ -317,6 +318,7 @@ impl Gate {
         Self {
             maintenance: admin.maintenance.clone(),
             writer: admin.writer.clone(),
+            readers: admin.readers.clone(),
             generation: Mutex::default(),
             closed: Mutex::default(),
             admission: admin.gate.clone(),
@@ -351,11 +353,25 @@ impl Gate {
                 "invalid session_id",
             ));
         }
+        // Reads must not wait for a dump holding the writer (0165).
+        let reading = kind == SessionKind::UploadPack;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-        let (mut writer, generation) = loop {
-            let writer = tokio::time::timeout_at(deadline, self.writer.lock())
-                .await
-                .map_err(|_| super::git_side::unavailable("session snapshot required"))?;
+        let (mut reader, mut writer) = (None, None);
+        let generation = loop {
+            if reading {
+                reader = Some(
+                    self.readers
+                        .acquire()
+                        .await
+                        .map_err(|err| Status::internal(err.to_string()))?,
+                );
+            } else {
+                writer = Some(
+                    tokio::time::timeout_at(deadline, self.writer.lock())
+                        .await
+                        .map_err(|_| super::git_side::unavailable("session snapshot required"))?,
+                );
+            }
             let generation = self
                 .generation
                 .lock()
@@ -366,17 +382,22 @@ impl Gate {
                 return Err(super::git_side::unavailable("session generation changed"));
             }
             if self.admission.generation().as_ref() == Some(&generation) {
-                break (writer, generation);
+                break generation;
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(super::git_side::unavailable("session snapshot required"));
             }
             // Snapshot rebuilding needs the writer lock too.
-            drop(writer);
+            (reader, writer) = (None, None);
             tokio::time::sleep_until(
                 deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(25)),
             )
             .await;
+        };
+        let conn: &mut sqlx::SqliteConnection = match (&mut reader, &mut writer) {
+            (Some(reader), _) => reader,
+            (_, Some(writer)) => writer,
+            _ => unreachable!("the loop holds one connection"),
         };
         if self.closed.lock().unwrap().contains(&request.session_id) {
             return Err(rpc_error(
@@ -404,7 +425,7 @@ impl Gate {
                      WHERE user.name = ?1 AND repo.name = ?2
                      UNION ALL SELECT repo.public_id FROM repo_redirect JOIN repo ON repo.id = repo_redirect.repo_id
                      WHERE repo_redirect.owner_name = ?1 AND repo_redirect.name = ?2 LIMIT 1")
-                    .bind(owner).bind(name).fetch_optional(&mut *writer).await
+                    .bind(owner).bind(name).fetch_optional(&mut *conn).await
                     .map_err(|err| Status::internal(err.to_string()))?
                     .ok_or_else(|| rpc_error(tonic::Code::NotFound, "REPO_NOT_FOUND", "repository not found"))?
             }
@@ -420,7 +441,7 @@ impl Gate {
             "SELECT id, default_branch, archived_at IS NOT NULL FROM repo WHERE public_id = ?",
         )
         .bind(&public_id)
-        .fetch_optional(&mut *writer)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|err| Status::internal(err.to_string()))?
         .ok_or_else(|| {
@@ -452,7 +473,7 @@ impl Gate {
                 "SELECT id, is_admin FROM user WHERE public_id = ? AND disabled_at IS NULL",
             )
             .bind(&request.user_public_id)
-            .fetch_optional(&mut *writer)
+            .fetch_optional(&mut *conn)
             .await
             .map_err(|err| Status::internal(err.to_string()))?
             .ok_or_else(|| {
@@ -462,7 +483,7 @@ impl Gate {
                     "active user required",
                 )
             })?;
-            let permission = crate::db::permissions::role(&mut *writer, user, repo)
+            let permission = crate::db::permissions::role(&mut *conn, user, repo)
                 .await
                 .map_err(|err| Status::internal(err.to_string()))?;
             let required = if kind == SessionKind::UploadPack {
@@ -478,7 +499,7 @@ impl Gate {
                 )
             })?;
             let keys: Vec<String> = sqlx::query_scalar("SELECT public_key FROM ssh_key WHERE user_id = ? AND usage = 'signing' ORDER BY id")
-                .bind(user).fetch_all(&mut *writer).await.map_err(|err| Status::internal(err.to_string()))?;
+                .bind(user).fetch_all(&mut *conn).await.map_err(|err| Status::internal(err.to_string()))?;
             for key in keys {
                 signers.push_str(&format!("{} {key}\n", request.user_public_id));
             }
@@ -518,7 +539,7 @@ impl Gate {
             .bind(repo)
             .bind(&request.correlation_id)
             .bind(&request.session_id)
-            .fetch_optional(&mut *writer)
+            .fetch_optional(&mut *conn)
             .await
             .map_err(|err| Status::internal(err.to_string()))?
             .ok_or_else(|| {
@@ -532,7 +553,7 @@ impl Gate {
             let pending: bool =
                 sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_push WHERE repo_id = ?)")
                     .bind(repo)
-                    .fetch_one(&mut *writer)
+                    .fetch_one(&mut *conn)
                     .await
                     .map_err(|err| Status::internal(err.to_string()))?;
             if pending || self.admission.running(repo) {
@@ -570,7 +591,7 @@ fn refusal_reason(status: &Status) -> &str {
 }
 
 pub(super) async fn auth_key(
-    writer: &Writer,
+    readers: &sqlx::SqlitePool,
     fingerprint: String,
 ) -> Result<GetAuthKeyResponse, Status> {
     let found: Option<(String, String)> = sqlx::query_as(
@@ -579,7 +600,7 @@ pub(super) async fn auth_key(
          WHERE ssh_key.fingerprint = ? AND ssh_key.usage = 'auth' AND user.disabled_at IS NULL",
     )
     .bind(fingerprint)
-    .fetch_optional(&mut *writer.lock().await)
+    .fetch_optional(readers)
     .await
     .map_err(|err| Status::internal(format!("auth key lookup: {err}")))?;
     let (user_public_id, public_key) = found

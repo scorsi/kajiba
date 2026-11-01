@@ -25,7 +25,7 @@ pub(in crate::transport) const PUBLIC_URL: &str = "https://forge.example.org/";
 
 /// An admin service over a fresh database in `dir` with the declared `users`.
 pub(in crate::transport) async fn admin(dir: &Path, users: &str) -> Admin {
-    let (mut writer, _) = crate::db::open(&dir.join("kajiba.sqlite")).await.unwrap();
+    let (mut writer, readers) = crate::db::open(&dir.join("kajiba.sqlite")).await.unwrap();
     let users = kajiba_core::config::ServerConfig::parse(&format!(
         "[http]\npublic_url='{PUBLIC_URL}'\n{users}"
     ))
@@ -36,6 +36,7 @@ pub(in crate::transport) async fn admin(dir: &Path, users: &str) -> Admin {
         maintenance: Default::default(),
         git_socket: dir.join("absent.sock"),
         writer: crate::db::Writer::new(writer.into()),
+        readers,
         public_url: PUBLIC_URL.into(),
         enrollment_ttl: Duration::from_secs(15 * 60),
         gate: Arc::default(),
