@@ -252,7 +252,12 @@ fn features(local: &Local, system: &str, checks: &[String]) -> Result<Vec<String
         "checks: builtins.concatLists (map (name: checks.${{name}}.requiredSystemFeatures or [ ]) ({names}))"
     );
     let output = Command::new(&local.nix)
-        .args(["eval", "--json"])
+        .args([
+            "--extra-experimental-features",
+            "nix-command flakes",
+            "eval",
+            "--json",
+        ])
         .arg(format!("git+file://{top}#checks.{system}"))
         .args(["--apply", &apply])
         .stdin(Stdio::null())

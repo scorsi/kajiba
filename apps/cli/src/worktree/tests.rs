@@ -20,13 +20,38 @@ fn nix() -> &'static Path {
         let path = std::env::temp_dir().join(format!("kj-cli-nix-{}", std::process::id()));
         std::fs::write(
             &path,
-            "#!/bin/sh\ntop=${3#git+file://}; top=${top%%#*}\nprintf '%s\\n' \"$@\" > \"$top.nix-args\"\necho '[\"kvm\",\"big-parallel\",\"kvm\"]'\n",
+            "#!/bin/sh\ntop=${5#git+file://}; top=${top%%#*}\nprintf '%s\\n' \"$@\" > \"$top.nix-args\"\necho '[\"kvm\",\"big-parallel\",\"kvm\"]'\n",
         )
         .unwrap();
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         path
     })
+}
+
+#[test]
+fn local_nix_enables_flakes_without_host_configuration() {
+    let clone = clone();
+    assert_eq!(
+        features(&clone.local(), "x86_64-linux", &[]).unwrap(),
+        ["big-parallel", "kvm"]
+    );
+    let args = std::fs::read_to_string(clone.dir.0.join("work.nix-args")).unwrap();
+    assert_eq!(
+        args.lines().collect::<Vec<_>>(),
+        [
+            "--extra-experimental-features",
+            "nix-command flakes",
+            "eval",
+            "--json",
+            &format!(
+                "git+file://{}#checks.x86_64-linux",
+                clone.work.canonicalize().unwrap().display()
+            ),
+            "--apply",
+            "checks: builtins.concatLists (map (name: checks.${name}.requiredSystemFeatures or [ ]) (builtins.attrNames checks))",
+        ]
+    );
 }
 
 fn run_git(dir: &Path, args: &[&str]) -> String {

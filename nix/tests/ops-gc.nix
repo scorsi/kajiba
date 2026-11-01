@@ -59,7 +59,7 @@ import ./ci-common.nix (args // { kajibaGitPackage = heldGit; }) {
     def push_command(sha):
         return f"env GIT_SSH_COMMAND={shlex.quote(ssh_command)} git -C /root/work push {remote} {sha}:refs/heads/main"
 
-    def refs():
+    def forge_refs():
         return forge.succeed(f"env GIT_SSH_COMMAND={shlex.quote(ssh_command)} git ls-remote --symref {remote}")
 
     with subtest("an admitted signed push excludes gc until its hook and child finish"):
@@ -74,9 +74,9 @@ import ./ci-common.nix (args // { kajibaGitPackage = heldGit; }) {
         forge.succeed("test ! -e /var/lib/kajiba-fixtures/gc-entered", "rm /var/lib/kajiba-git/hold-hook")
         done("push")
         forge.wait_until_succeeds("test $(sqlite3 /var/lib/kajiba-server/db/kajiba.sqlite 'SELECT count(*) FROM pending_push') = 0")
-        before = refs()
+        before = forge_refs()
         forge.succeed(gc)
-        assert refs() == before
+        assert forge_refs() == before
         forge.succeed(f"env GIT_SSH_COMMAND={shlex.quote(ssh_command)} git clone {remote} /root/after-gc")
         assert forge.succeed("git -C /root/after-gc rev-parse HEAD").strip() == sha
         assert forge.succeed("cat /root/after-gc/flake.nix") == forge.succeed("cat /root/work/flake.nix")
@@ -88,18 +88,18 @@ import ./ci-common.nix (args // { kajibaGitPackage = heldGit; }) {
         forge.wait_until_succeeds("test -e /var/lib/kajiba-fixtures/gc-entered")
         code, out = forge.execute(push_command(sha) + " 2>&1")
         assert code != 0 and "unfinished session" in out.lower(), out
-        assert refs() == before
+        assert forge_refs() == before
         forge.succeed("test ! -e /tmp/gc.status", "rm /var/lib/kajiba-fixtures/hold-gc")
         done("gc")
         assert finished(push(sha)) == "succeeded"
 
     with subtest("gc reports child failure and the next admitted operation succeeds"):
-        before = refs()
+        before = forge_refs()
         forge.succeed("touch /var/lib/kajiba-fixtures/fail-gc")
         code, out = forge.execute(gc + " 2>&1")
         assert code == 23, out
         forge.succeed("rm /var/lib/kajiba-fixtures/fail-gc", gc)
-        assert refs() == before
+        assert forge_refs() == before
         exits = [e for e in unit_lines(forge, "kajiba-git.service") if e.get("event") == "session-exited" and e.get("kind") == "maintenance"]
         assert any(e["status"] == 23 for e in exits), exits
         assert any(e["status"] == 0 for e in exits), exits
@@ -110,10 +110,10 @@ import ./ci-common.nix (args // { kajibaGitPackage = heldGit; }) {
         forge.wait_until_succeeds("test -e /var/lib/kajiba-fixtures/copy-entered")
         code, out = forge.execute(gc + " 2>&1")
         assert code != 0 and "maintenance" in out.lower(), out
-        assert refs() == before
+        assert forge_refs() == before
         forge.succeed("rm /var/lib/kajiba-fixtures/hold-copy")
         done("dump")
         forge.succeed(gc)
-        assert refs() == before
+        assert forge_refs() == before
   '';
 }

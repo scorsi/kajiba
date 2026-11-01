@@ -62,7 +62,7 @@ import ./ci-common.nix args {
         forge.succeed("test -d /var/lib/kajiba-dumps/.partial-interrupted", "test -d /var/lib/kajiba-dumps/unrelated")
         good = dumps()
         hashes = {path: forge.succeed(f"sha256sum {path}/manifest.json").split()[0] for path in good}
-        metric = forge.succeed(f"curl -fsS {metrics_url} | grep '^kajiba_dump_last_success_timestamp_seconds '").strip()
+        last_success_metric = forge.succeed(f"curl -fsS {metrics_url} | grep '^kajiba_dump_last_success_timestamp_seconds '").strip()
 
     with subtest("a failed scheduled dump preserves the last good backups and metric"):
         forge.succeed("mkdir -p /var/lib/kajiba-git/tmp/orphans",
@@ -72,7 +72,7 @@ import ./ci-common.nix args {
             assert dumps() == good
             for path in good:
                 assert forge.succeed(f"sha256sum {path}/manifest.json").split()[0] == hashes[path]
-            assert forge.succeed(f"curl -fsS {metrics_url} | grep '^kajiba_dump_last_success_timestamp_seconds '").strip() == metric
+            assert forge.succeed(f"curl -fsS {metrics_url} | grep '^kajiba_dump_last_success_timestamp_seconds '").strip() == last_success_metric
             assert forge.succeed("find /var/lib/kajiba-dumps -maxdepth 1 -name '.partial-*'").splitlines() == ["/var/lib/kajiba-dumps/.partial-interrupted"]
         finally:
             forge.succeed("rm /var/lib/kajiba-git/tmp/orphans/unsafe-dump")

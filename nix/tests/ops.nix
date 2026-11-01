@@ -29,7 +29,7 @@ import ./ci-common.nix args {
 
     declared = "authorization: Bearer " + forge.succeed("sed -n 2p /root/writer-token").strip()
 
-    def refs(path):
+    def forge_refs(path):
         return forge.succeed(f"git --git-dir={path} symbolic-ref HEAD; git --git-dir={path} show-ref --head | sort")
 
     def clone_content(path):
@@ -70,7 +70,7 @@ import ./ci-common.nix args {
         archived_dir = f"/var/lib/kajiba-git/repos/{archived_id}.git"
         sql(f"INSERT INTO repo (public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, archived_at, config_key) SELECT '{archived_id}', owner_id, 'archive', visibility, 'off', default_branch, 'archive', 0, 1, 'archive' FROM repo WHERE config_key = 'demo'")
         forge.succeed(f"cp -a {repo_dir} {archived_dir}")
-        expected_refs = {path: refs(path) for path in [repo_dir, archived_dir]}
+        expected_refs = {path: forge_refs(path) for path in [repo_dir, archived_dir]}
         expected_content = clone_content("/root/work")
         history = sql(history_query)
         assert sql("SELECT count(*) FROM step") != "0"
@@ -125,7 +125,7 @@ import ./ci-common.nix args {
         recovered_active = sql(history_query.replace("r.trigger != 'worktree'", f"r.public_id = '{active}'"))
         assert sql("PRAGMA foreign_key_check") == ""
         for path, expected in expected_refs.items():
-            assert refs(path) == expected
+            assert forge_refs(path) == expected
         assert sql(f"SELECT archived_at FROM repo WHERE public_id = '{archived_id}'") == "1"
 
     with subtest("HTTP and SSH clones recover identical HEAD, refs and file content"):

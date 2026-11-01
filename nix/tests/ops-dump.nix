@@ -39,6 +39,7 @@ import ./ci-common.nix (args // { kajibaGitPackage = heldGit; }) {
     systemd.services.kajiba-server.path = lib.mkBefore [ heldCommands ];
     services.kajiba-server.repos.imported = {
       owner = "alice";
+      description = "Held import fixture";
       ci = "off";
     };
     # Shared test latches only; no production privilege change.
