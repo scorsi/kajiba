@@ -169,8 +169,8 @@ No backup-tool-specific option or dependency is required.
 
 ## Offline restore and service recovery
 
-The following Linux/root procedure is exercised by `nixos-ops-restore`; the final
-`nixos-ops` disaster-recovery check is task 13. Recover deployment configuration,
+The following Linux/root procedure is exercised by `nixos-ops-restore` and the
+`nixos-ops` disaster-recovery check. Recover deployment configuration,
 service users and secrets first; use a supported server version (newer dump schemas
 are refused). Keep the input dump outside both destination trees and protect it
 from external deletion throughout restore. Stop timers, both daemons and **all
@@ -215,7 +215,7 @@ systemctl start kajiba-dump.timer kajiba-gc.timer
 Again omit an unconfigured runner socket. Normal startup applies migrations and
 reconciliation. Check repository refs/HEAD and HTTP/SSH clones, identities,
 authentication, historical run states and a fresh signed push/CI run against the
-recovery point. The final task 13 test owns the full disaster-recovery assertions.
+recovery point. `nixos-ops` covers the full disaster-recovery assertions.
 
 For ordinary changes, NixOS reloads server declarations (`users`, `runners`,
 `repos`, `mirror`) with SIGHUP; `systemctl reload kajiba-server.service` only
