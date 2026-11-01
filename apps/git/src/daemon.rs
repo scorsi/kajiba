@@ -61,6 +61,10 @@ async fn run(
     )
     .map_err(|err| format!("ssh.sock: {err}"))?;
     let generation = kajiba_core::new_id().map_err(|err| err.to_string())?;
+    // Session hooks must reach this generation even while activated sockets queue work.
+    let session_socket = socket.with_file_name("session.sock");
+    let session_local = Local::bind(&session_socket, Default::default(), 0o600, vec![ssh_uid])
+        .map_err(|err| format!("session.sock: {err}"))?;
     let metrics = metrics
         .await
         .map_err(|err| format!("metrics.listen: {err}"))?;
@@ -79,17 +83,28 @@ async fn run(
     let routes = routes(git.clone());
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let (local_stop, mut local_stopped) = tokio::sync::watch::channel(false);
+    let mut session_stopped = local_stopped.clone();
     let mut metrics_stopped = stopped.clone();
     let mut ssh_stopped = stopped.clone();
     let app = crate::metrics::router(repositories.clone());
-    let ssh_sessions = crate::ssh::serve(ssh, git, &config.hooks_path, async move {
-        let _ = ssh_stopped.changed().await;
-    });
+    let session_routes = Routes::new(
+        kajiba_proto::hook::v1::hook_service_server::HookServiceServer::from_arc(git.clone()),
+    )
+    .into_axum_router()
+    .layer(axum::middleware::from_fn(rpc_request))
+    .into();
+    let ssh_sessions =
+        crate::ssh::serve(ssh, git, &config.hooks_path, &session_socket, async move {
+            let _ = ssh_stopped.changed().await;
+        });
     tokio::pin!(ssh_sessions);
     let servers = async move {
         tokio::try_join!(
             local.serve(routes, async move {
                 let _ = local_stopped.changed().await;
+            }),
+            session_local.serve(session_routes, async move {
+                let _ = session_stopped.changed().await;
             }),
             async move {
                 if let Some(listener) = metrics {

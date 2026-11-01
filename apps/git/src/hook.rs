@@ -56,6 +56,8 @@ async fn call(
     let user_public_id = public_id(env, "KAJIBA_USER")?;
     let repo_public_id = public_id(env, "KAJIBA_REPO")?;
     let session_id = public_id(env, "KAJIBA_SESSION")?;
+    let session_socket = env(crate::local::SESSION_SOCKET_ENV);
+    let socket = session_socket.as_deref().map(Path::new).unwrap_or(socket);
     let mut buffer = Vec::new();
     input
         .take(MAX_INPUT + 1)

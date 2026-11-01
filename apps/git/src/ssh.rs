@@ -121,6 +121,7 @@ pub async fn serve(
     mut listener: impl tonic::codegen::tokio_stream::Stream<Item = io::Result<UnixStream>> + Unpin,
     git: Arc<crate::service::Git>,
     hooks: &Path,
+    session_socket: &Path,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()> {
     use tonic::codegen::tokio_stream::StreamExt;
@@ -146,6 +147,7 @@ pub async fn serve(
         };
         let git = git.clone();
         let hooks = hooks.to_owned();
+        let session_socket = session_socket.to_owned();
         // The supervisor owns the child, independently of the helper's connection.
         sessions.spawn(async move {
             let _permit = permit;
@@ -155,7 +157,7 @@ pub async fn serve(
                         .await
                         .map_err(|_| "SSH hand-off timed out".to_owned())?
                         .map_err(|e| e.to_string())?;
-                spawn(&git, &hooks, fds, user, command)
+                spawn(&git, &hooks, &session_socket, fds, user, command)
                     .await
                     .map_err(|e| e.message().to_owned())
             }
@@ -210,6 +212,7 @@ async fn receive(stream: &mut UnixStream) -> io::Result<([OwnedFd; 3], String, G
 async fn spawn(
     git: &crate::service::Git,
     hooks: &Path,
+    session_socket: &Path,
     fds: [OwnedFd; 3],
     user: String,
     command: GitCommand,
@@ -290,6 +293,7 @@ async fn spawn(
         let mut process =
             tokio::process::Command::from(Gix.transport(service, &path, &[], Some(hooks)));
         process
+            .env(crate::local::SESSION_SOCKET_ENV, session_socket)
             .env("KAJIBA_USER", &session.user_public_id)
             .env("KAJIBA_REPO", &session.repo_public_id)
             .env("KAJIBA_SESSION", &session.session_id);
@@ -383,6 +387,7 @@ mod tests {
                 tokio_stream::iter([Ok(stream)]),
                 git,
                 Path::new("/absent"),
+                Path::new("/absent.sock"),
                 std::future::pending(),
             )
             .await
@@ -422,6 +427,7 @@ mod tests {
                 UnboundedReceiverStream::new(receiver),
                 git,
                 Path::new("/absent"),
+                Path::new("/absent.sock"),
                 std::future::pending(),
             )
             .await
@@ -677,6 +683,7 @@ mod opening_tests {
         let result = spawn(
             &git,
             &dir.0,
+            &dir.0.join("session.sock"),
             fds,
             kajiba_core::new_id().unwrap(),
             GitCommand {

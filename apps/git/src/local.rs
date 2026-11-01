@@ -9,6 +9,8 @@ use std::{path::Path, time::Duration};
 pub const SOCKET_NAME: &str = "local.sock";
 /// Where `ssh-keys` and `hook`, run by sshd and git without a configuration, reach it.
 pub const SOCKET_PATH: &str = "/run/kajiba-git/local.sock";
+/// Set only on daemon-owned Git children; hooks stay with their session's generation.
+pub const SESSION_SOCKET_ENV: &str = "KAJIBA_SESSION_SOCKET";
 
 /// The user public id and canonical key of an active user's auth key; `None` when the
 /// fingerprint names no such key.

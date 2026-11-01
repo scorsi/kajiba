@@ -74,6 +74,36 @@ fn hook_env(var: &str) -> Option<String> {
 }
 
 #[tokio::test]
+async fn hooks_never_fall_back_to_the_activated_socket_when_their_generation_is_gone() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("local.sock");
+    // Leave this listener unaccepted, as while systemd waits for the next instance.
+    let _activated = tokio::net::UnixListener::bind(&socket).unwrap();
+    let missing = dir.0.join("gone.sock");
+    let env = |var: &str| {
+        if var == crate::local::SESSION_SOCKET_ENV {
+            Some(missing.to_str().unwrap().to_owned())
+        } else {
+            hook_env(var)
+        }
+    };
+    for kind in [
+        crate::hook::Kind::PreReceive,
+        crate::hook::Kind::PostReceive,
+    ] {
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                crate::hook::run(&socket, kind, HOOK_INPUT.as_bytes(), &env),
+            )
+            .await
+            .expect("hook waited for another generation"),
+            std::process::ExitCode::FAILURE
+        );
+    }
+}
+
+#[tokio::test]
 async fn hooks_make_one_call_per_invocation_and_send_nothing_when_malformed() {
     use crate::hook::{Kind, run};
     use std::process::ExitCode;

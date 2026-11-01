@@ -124,6 +124,9 @@ async fn receive_pack_checks_then_forwards_once_and_never_changes_refs_on_refusa
 
     let gate_socket = temp.0.join("gate.sock");
     let hook_socket = temp.0.join("hook.sock");
+    // Model an activated socket queued for the next instance, never accepted here.
+    let activated_socket = temp.0.join("activated.sock");
+    let _activated = tokio::net::UnixListener::bind(&activated_socket).unwrap();
     let bind =
         |path: &Path| Local::bind(path, Arc::default(), 0o660, vec![effective_uid()]).unwrap();
     let admissions = Arc::new(Mutex::new(Vec::new()));
@@ -150,7 +153,7 @@ async fn receive_pack_checks_then_forwards_once_and_never_changes_refs_on_refusa
         Routes::new(HookServiceServer::new(Git {
             generation,
             server_socket: gate_socket,
-            repositories,
+            repositories: repositories.clone(),
         })),
         std::future::pending(),
     ));
@@ -187,7 +190,8 @@ async fn receive_pack_checks_then_forwards_once_and_never_changes_refs_on_refusa
             .env("KAJIBA_USER", &id)
             .env("KAJIBA_REPO", &id)
             .env("KAJIBA_SESSION", &id)
-            .env("KAJIBA_TEST_HOOK_SOCKET", &hook_socket);
+            .env("KAJIBA_TEST_HOOK_SOCKET", &activated_socket)
+            .env(crate::local::SESSION_SOCKET_ENV, &hook_socket);
         async move {
             tokio::time::timeout(Duration::from_secs(30), command.output())
                 .await
@@ -280,6 +284,7 @@ async fn receive_pack_checks_then_forwards_once_and_never_changes_refs_on_refusa
         allowed: true,
         refusals: vec![],
     };
+    repositories.stop_accepting();
     let output = push(&[good, "refs/tags/v1".into()]).await;
     assert!(output.status.success(), "{output:?}");
     assert!(

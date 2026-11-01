@@ -39,6 +39,13 @@ async fn readiness_arrives_only_after_listening_and_shutdown_removes_socket() {
         assert_eq!(fs::metadata(&socket).unwrap().mode() & 0o777, 0o660);
         let ssh = socket.with_file_name("ssh.sock");
         assert_eq!(fs::metadata(&ssh).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(socket.with_file_name("session.sock"))
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o600
+        );
         drop(UnixStream::connect(&ssh).await.unwrap());
         let stream = UnixStream::connect(&socket).await.unwrap();
         drop(stream);
@@ -70,6 +77,7 @@ async fn readiness_arrives_only_after_listening_and_shutdown_removes_socket() {
     .unwrap();
     assert!(!socket.exists());
     assert!(!socket.with_file_name("ssh.sock").exists());
+    assert!(!socket.with_file_name("session.sock").exists());
     let _lock = crate::state::prepare(&state).unwrap();
 }
 

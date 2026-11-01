@@ -134,6 +134,7 @@ pkgs.testers.runNixOSTest {
             "/run/kajiba/local.sock": "kajiba-server:kajiba-server 600",
             "/run/kajiba/git.sock": "kajiba-server:kajiba-git 660",
             "/run/kajiba-git/local.sock": "kajiba-git:kajiba-git 660",
+            "/run/kajiba-git/session.sock": "kajiba-git:kajiba-git 600",
         }
         for path, expected in paths.items():
             assert machine.succeed(f"stat -c '%U:%G %a' {path}").strip() == expected, path
@@ -253,22 +254,31 @@ pkgs.testers.runNixOSTest {
         )
         ssh = "ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/known_hosts -i /root/push-key -p 2222"
         push = f"env GIT_SSH_COMMAND={shlex.quote(ssh)} git -C /root/push push kajiba-git@127.0.0.1:alice/demo.git HEAD:refs/heads/main"
-        machine.succeed(f"({push} >/tmp/push-output 2>&1; echo $? >/tmp/push-status) &")
+        machine.succeed(f"(status=0; {push} >/tmp/push-output 2>&1 || status=$?; echo $status >/tmp/push-status) </dev/null >/dev/null 2>&1 &")
         machine.wait_until_succeeds("test -e /var/lib/kajiba-git/push-started")
         invocation = machine.succeed("systemctl show -P InvocationID kajiba-git.service").strip()
         sockets = machine.succeed("stat -c '%i' /run/kajiba-git/local.sock /run/kajiba-git/ssh.sock")
         machine.succeed("systemctl restart --no-block kajiba-git.service")
         machine.wait_until_succeeds(f"journalctl _SYSTEMD_INVOCATION_ID={invocation} -o cat | grep -F stopping")
+        # A new signed push must queue until the old generation has finished draining.
+        queued_push = push.replace("HEAD:refs/heads/main", "HEAD:refs/heads/queued")
+        machine.succeed(f"(status=0; {queued_push} >/tmp/queued-push-output 2>&1 || status=$?; echo $status >/tmp/queued-push-status) </dev/null >/dev/null 2>&1 &")
+        machine.wait_until_succeeds("ss -xln | awk '$5 == \"/run/kajiba-git/ssh.sock\" && $3 > 0 { found=1 } END { exit !found }'", timeout=10)
+        machine.succeed("test ! -e /tmp/queued-push-status")
         machine.succeed("test ! -e /tmp/push-status", "rm /var/lib/kajiba-git/hold-push")
-        machine.wait_until_succeeds("test -e /tmp/push-status")
+        machine.wait_until_succeeds("test -e /tmp/push-status", timeout=45)
         assert machine.succeed("cat /tmp/push-status").strip() == "0", machine.succeed("cat /tmp/push-output")
+        machine.wait_until_succeeds("test -e /tmp/queued-push-status", timeout=45)
+        assert machine.succeed("cat /tmp/queued-push-status").strip() == "0", machine.succeed("cat /tmp/queued-push-output")
         machine.wait_for_unit("kajiba-git.service")
         assert machine.succeed("systemctl show -P InvocationID kajiba-git.service").strip() != invocation
         assert machine.succeed("stat -c '%i' /run/kajiba-git/local.sock /run/kajiba-git/ssh.sock") == sockets
+        assert "drain-timeout" not in machine.succeed(f"journalctl _SYSTEMD_INVOCATION_ID={invocation} -o cat")
         expected = machine.succeed("git -C /root/push rev-parse HEAD").strip()
         directory = sql("SELECT public_id FROM repo WHERE name = 'demo'")
         actual = machine.succeed(f"runuser -u kajiba-git -- git --git-dir=/var/lib/kajiba-git/repos/{directory}.git rev-parse refs/heads/main").strip()
         assert actual == expected
+        assert machine.succeed(f"runuser -u kajiba-git -- git --git-dir=/var/lib/kajiba-git/repos/{directory}.git rev-parse refs/heads/queued").strip() == expected
         assert_ready()
 
     with subtest("every service log line validates against the nisshi schema"):
