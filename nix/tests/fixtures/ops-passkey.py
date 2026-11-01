@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import ssl
 import struct
 import subprocess
 import sys
@@ -37,7 +38,10 @@ def post(path, body):
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "Origin": "https://forge"},
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
+    # The fixture CA has no keyUsage extension, which Python's strict X.509 verification rejects.
+    context = ssl.create_default_context()
+    context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    with urllib.request.urlopen(request, timeout=15, context=context) as response:
         data = response.read()
         return json.loads(data) if data else response.headers["Set-Cookie"].split(";", 1)[0]
 
