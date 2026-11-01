@@ -226,6 +226,8 @@ pkgs.testers.runNixOSTest {
         assert_ready()
 
     with subtest("readyz never refuses a connection across server restarts"):
+        # Earlier lifecycle starts also consume the production five-start budget.
+        machine.succeed(f"systemctl reset-failed {unit}")
         machine.succeed("rm -f /tmp/probe-stop /tmp/probe-codes; (while test ! -e /tmp/probe-stop; do curl -s --max-time 15 -o /dev/null http://127.0.0.1:8080/readyz; echo $? >> /tmp/probe-codes; sleep 0.01; done; touch /tmp/probe-finished) >/tmp/probe-output 2>&1 &")
         machine.wait_until_succeeds("test $(grep -c '^0$' /tmp/probe-codes) -ge 3")
         for _ in range(3):

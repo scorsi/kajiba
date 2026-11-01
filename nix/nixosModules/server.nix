@@ -254,15 +254,29 @@ let
       "[::1]:${lib.removePrefix "[::]:" listen}"
     else
       listen;
-  # systemd lets ExecStartPost run after the main process died, until TimeoutStartSec: stop
-  # probing once $MAINPID is gone so a failed startup fails the unit at once. Silent: any
-  # output would be a non-JSON line in the unit's journal (0022).
-  # Before it drops to User=, the forked main process is still root: kill -0 then fails with
-  # EPERM (ProtectProc=invisible), which is alive, not gone. Only ESRCH means it died.
+  # Monitor the main process even while curl waits on a socket-activation listener.
+  # EPERM before the main process drops root is alive; only ESRCH means it died.
+  # Keep probe output out of the structured service journal (0022).
   readyProbe = pkgs.writeShellScript "kajiba-server-ready" ''
-    while ! kill -0 "$MAINPID" 2>&1 | ${pkgs.gnugrep}/bin/grep -q "No such process"; do
-      ${lib.getExe pkgs.curl} --silent --fail --output /dev/null --max-time 5 "$1" && exit 0
-      ${pkgs.coreutils}/bin/sleep 1
+    main_alive() {
+      [ -n "$MAINPID" ] && ! LC_ALL=C kill -0 "$MAINPID" 2>&1 | ${pkgs.gnugrep}/bin/grep -q "No such process"
+    }
+    while main_alive; do
+      ${lib.getExe pkgs.curl} --silent --fail --output /dev/null --max-time 5 "$1" &
+      request=$!
+      while kill -0 "$request" 2>/dev/null; do
+        if ! main_alive; then
+          kill "$request" 2>/dev/null || true
+          wait "$request" 2>/dev/null || true
+          exit 1
+        fi
+        ${pkgs.coreutils}/bin/sleep 0.1
+      done
+      if wait "$request"; then
+        main_alive && exit 0
+        exit 1
+      fi
+      ${pkgs.coreutils}/bin/sleep 0.1
     done
     exit 1
   '';
@@ -768,8 +782,8 @@ in
     systemd.services.kajiba-server = {
       description = "kajiba forge server";
       # Socket-triggered starts share this budget; hitting it also fails the sockets.
-      startLimitIntervalSec = 60;
-      startLimitBurst = 10;
+      startLimitIntervalSec = 300;
+      startLimitBurst = 5;
       wantedBy = [ "multi-user.target" ];
       wants = [
         "kajiba-git.service"
@@ -845,8 +859,8 @@ in
     systemd.services.kajiba-git = {
       description = "kajiba repository writer";
       # Socket-triggered starts share this budget; hitting it also fails the sockets.
-      startLimitIntervalSec = 60;
-      startLimitBurst = 10;
+      startLimitIntervalSec = 300;
+      startLimitBurst = 5;
       wantedBy = [ "multi-user.target" ];
       requires = [
         "kajiba-git.socket"

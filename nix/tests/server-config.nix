@@ -125,9 +125,9 @@ pkgs.testers.runNixOSTest {
         )
         cursor = machine.succeed("journalctl -n 1 --show-cursor --no-pager").split("-- cursor: ")[-1].strip()
         # The readiness probe stops with the main process: each failed start must be prompt.
-        status, out = machine.execute(f"timeout 60 systemctl start {unit}")
+        status, out = machine.execute(f"timeout 5 systemctl start {unit}")
         assert status not in (0, 124), f"systemctl start: exit {status}, output {out!r}"
-        machine.wait_until_succeeds(f"test \"$(systemctl show -P Result {unit})\" = start-limit-hit", timeout=60)
+        machine.wait_until_succeeds(f"test \"$(systemctl show -P Result {unit})\" = start-limit-hit", timeout=90)
         state = machine.succeed(f"systemctl show -p ActiveState -p Result {unit}").split()
         assert state == ["ActiveState=failed", "Result=start-limit-hit"], f"after exhausting starts: {state}"
         # systemd propagates the service start limit to its triggering sockets, closing them.
@@ -139,7 +139,7 @@ pkgs.testers.runNixOSTest {
         invocations = {}
         for entry in map(json.loads, out.splitlines()):
             invocations.setdefault(entry["_SYSTEMD_INVOCATION_ID"], []).append(json.loads(entry["MESSAGE"]))
-        assert len(invocations) == 10, f"expected the module's ten start attempts: {invocations}"
+        assert len(invocations) == 5, f"expected the module's five start attempts: {invocations}"
         for invocation, lines in invocations.items():
             assert len(lines) == 1 and lines[0]["event"] == "config-invalid" and lines[0]["level"] == "error" and f"mirror.credentials.github.token_file ({token_file})" in lines[0]["err"], f"failed invocation {invocation}: expected one config-invalid naming the file, got {lines}"
         # Repairing configuration and explicitly restarting recovers the stopped listeners.
@@ -167,7 +167,7 @@ pkgs.testers.runNixOSTest {
         cursor = machine.succeed("journalctl -n 1 --show-cursor --no-pager").split("-- cursor: ")[-1].strip()
         status, out = machine.execute(f"timeout 60 systemctl start {git_unit}")
         assert status not in (0, 124), f"systemctl start: exit {status}, output {out!r}"
-        machine.wait_until_succeeds(f"test \"$(systemctl show -P Result {git_unit})\" = start-limit-hit", timeout=60)
+        machine.wait_until_succeeds(f"test \"$(systemctl show -P Result {git_unit})\" = start-limit-hit", timeout=90)
         assert machine.succeed(f"systemctl show -P ActiveState {git_unit}").strip() == "failed"
         for socket in ["kajiba-git.socket", "kajiba-git-ssh.socket"]:
             machine.wait_until_succeeds(f"test \"$(systemctl show -P Result {socket})\" = service-start-limit-hit")
@@ -177,7 +177,7 @@ pkgs.testers.runNixOSTest {
         invocations = {}
         for entry in map(json.loads, out.splitlines()):
             invocations.setdefault(entry["_SYSTEMD_INVOCATION_ID"], []).append(json.loads(entry["MESSAGE"]))
-        assert len(invocations) == 10, invocations
+        assert len(invocations) == 5, invocations
         for lines in invocations.values():
             assert len(lines) == 1 and lines[0]["event"] == "config-invalid" and "/run/missing-git.toml" in lines[0]["err"], lines
         validate_logs(machine, git_unit)
