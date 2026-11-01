@@ -81,10 +81,41 @@ test.describe.serial("CI runs", () => {
             .streams,
       );
     await page.reload();
-    writeFileSync(env("KAJIBA_E2E_START_RUNNER"), "");
+    // Both lists load while queued and must update without navigation or reload.
+    const hold = env("KAJIBA_E2E_HOLD_FLAG");
+    writeFileSync(hold, "");
+    const repositories = await page.context().newPage();
+    const shell = await page.context().newPage();
     const log = page.getByRole("log");
-    await expect(log).toContainText("building 'fmt'", { timeout: 30_000 });
-    await expect(pulse(page)).not.toContainText("passed");
+    try {
+      await repositories.goto("/");
+      await shell.goto("/?drawer=1");
+      const row = (view: Page) =>
+        view
+          .getByRole("region", { name: "Repositories", exact: true })
+          .locator('a[href="/alice/demo"]');
+      for (const view of [repositories, shell]) {
+        await expect(row(view).locator('[title="queued"]')).toBeVisible();
+        await expect(row(view).locator('[class*="animate-spin"]')).toHaveCount(
+          0,
+        );
+      }
+      writeFileSync(env("KAJIBA_E2E_START_RUNNER"), "");
+      for (const view of [repositories, shell]) {
+        const badge = row(view).locator('[title="running"]');
+        await expect(badge).toBeVisible({ timeout: 30_000 });
+        await expect(badge).toHaveClass(/text-accent/);
+        await expect(
+          badge.locator('circle[class*="animate-spin"]'),
+        ).toBeVisible();
+      }
+      await expect(log).toContainText("building 'fmt'", { timeout: 30_000 });
+      await expect(pulse(page)).not.toContainText("passed");
+    } finally {
+      await repositories.close();
+      await shell.close();
+      rmSync(hold, { force: true });
+    }
 
     // Leaving the page closes its stream; a new page still opens one and the run still ends.
     await expect.poll(async () => (await streams()).opened).toBeGreaterThan(0);

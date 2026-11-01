@@ -19,7 +19,7 @@
 	import { activityRange } from '#lib/data/activity.ts';
 	import RunRef from '#lib/components/RunRef.svelte';
 	import DurationBar from '#lib/components/DurationBar.svelte';
-	import { uniqueCommits } from '#lib/data/forge.ts';
+	import { hasActiveRuns, uniqueCommits } from '#lib/data/forge.ts';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { tick, type Snippet } from 'svelte';
@@ -106,7 +106,10 @@
 			? (await listMirrorStatus()).mirrors.filter((x) => x.repo === repoKey)
 			: []
 	);
-	const runs = resource(() => listRuns({ repo: repoKey, pageSize: 60 }).then((r) => r.runs));
+	const runs = resource(
+		() => listRuns({ repo: repoKey, pageSize: 60 }).then((r) => r.runs),
+		hasActiveRuns
+	);
 	const branchRuns = $derived(
 		(runs.data ?? []).filter((r) => r.trigger !== 'worktree' && (!r.ref || r.ref === head))
 	);

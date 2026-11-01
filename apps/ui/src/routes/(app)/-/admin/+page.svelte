@@ -3,7 +3,7 @@
 	import { ApiError, Code, getServerInfo, getViewer } from '#lib/api.ts';
 	import Skeleton from '#lib/components/Skeleton.svelte';
 	import StateView from '#lib/components/StateView.svelte';
-	import { loadForge } from '#lib/data/forge.ts';
+	import { hasActiveRuns, loadForge } from '#lib/data/forge.ts';
 	import { resource } from '#lib/resource.svelte.ts';
 	import AdminView from '#lib/views/AdminView.svelte';
 
@@ -12,7 +12,7 @@
 		if (!viewer.admin) throw new ApiError(Code.PermissionDenied, 'administrators only');
 		const [forge, server] = await Promise.all([loadForge(), getServerInfo()]);
 		return { forge, server };
-	});
+	}, (data) => hasActiveRuns(data.forge.runs));
 </script>
 
 <svelte:head><title>Administration · kajiba</title></svelte:head>

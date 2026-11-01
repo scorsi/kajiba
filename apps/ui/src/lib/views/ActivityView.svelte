@@ -127,7 +127,7 @@
 				><RunBadge state={RunState.SUCCEEDED} size={10} />CI {passed7}/{runs7.length} passed · 7 days</span
 			>
 			{#if running.length}<span class="flex items-center gap-1.5"
-					><RunBadge state={RunState.RUNNING} size={10} />{running.length} in progress</span
+					><RunBadge state={running.some(r => r.state === RunState.RUNNING) ? RunState.RUNNING : RunState.QUEUED} size={10} />{running.length} in progress</span
 				>{/if}
 			<span class="flex items-center gap-1.5 {mirrorsFailing.length ? 'text-danger' : ''}"
 				><Icon name="mirror" size={11} />mirrors {mirrorsOk} ok{mirrorsFailing.length

@@ -7,7 +7,7 @@
 	Where you are is derived from the route; `location` overrides it.
 -->
 <script lang="ts">
-	import { uniqueCommits } from '#lib/data/forge.ts';
+	import { hasActiveRuns, uniqueCommits } from '#lib/data/forge.ts';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import type { Snippet } from 'svelte';
@@ -102,7 +102,7 @@
 			const lastRun: Run | undefined = runs.find((x) => x.trigger !== 'worktree' && x.repo === `${r.owner}/${r.name}`);
 			return { repo: r, days, last: logs[i][0], lastRun };
 		});
-	});
+	}, (rows) => rows?.some((r) => r.lastRun && hasActiveRuns([r.lastRun])) ?? false);
 	const navLink =
 		'rounded-sm px-2 py-1 text-[0.8125rem] text-fg-muted hover:bg-surface-2 hover:text-fg aria-[current=page]:bg-accent-soft aria-[current=page]:text-accent aria-[current=page]:font-semibold';
 </script>

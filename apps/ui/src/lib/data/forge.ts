@@ -6,6 +6,7 @@
  */
 
 import {
+  RunState,
   getViewer,
   listCommits,
   listMirrorStatus,
@@ -116,3 +117,7 @@ export function repoHref(key: string, extra: Record<string, string> = {}) {
   const q = new URLSearchParams(extra).toString();
   return `/${key}${q ? `?${q}` : ""}`;
 }
+
+/** Snapshot lists must refresh until their queued/running runs settle. */
+export const hasActiveRuns = (runs: Run[]) =>
+  runs.some((r) => r.state === RunState.QUEUED || r.state === RunState.RUNNING);
