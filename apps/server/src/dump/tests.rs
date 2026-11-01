@@ -1,6 +1,8 @@
 use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
+mod restore;
+
 const LIVE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const ARCHIVED: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
 

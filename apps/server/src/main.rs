@@ -7,6 +7,7 @@ mod dump;
 mod import;
 mod metrics;
 mod reload;
+mod restore;
 mod state;
 mod transport;
 

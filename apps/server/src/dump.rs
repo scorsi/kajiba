@@ -276,8 +276,26 @@ pub(crate) async fn verify(root: &Path) -> Result<Manifest> {
     if manifest.format != 1 {
         return Err("unsupported dump format".into());
     }
-    for key in manifest.entries.keys() {
-        decode_path(key)?;
+    for (key, entry) in &manifest.entries {
+        let path = decode_path(key)?;
+        let directory = *entry == Entry::Directory;
+        let allowed = path == Path::new("server/db/kajiba.sqlite") && !directory
+            || [
+                "server",
+                "server/db",
+                "server/tmp",
+                "git",
+                "git/repos",
+                "git/tmp",
+            ]
+            .iter()
+            .any(|parent| path == Path::new(parent) && directory)
+            || ["server/tmp/orphans", "git/tmp/orphans", "git/repos"]
+                .iter()
+                .any(|root| path.starts_with(root) && (path != Path::new(root) || directory));
+        if !allowed {
+            return Err("unexpected dump payload path".into());
+        }
     }
     let mut actual = BTreeMap::new();
     inventory(root, Path::new(""), &mut actual, false).map_err(|e| e.to_string())?;
@@ -371,6 +389,7 @@ fn decode_path(key: &str) -> Result<PathBuf> {
         || path
             .components()
             .any(|c| !matches!(c, Component::Normal(_)))
+        || path.components().collect::<PathBuf>().as_os_str() != path.as_os_str()
         || encoded(&path) != key
     {
         return Err("unsafe dump path".into());
