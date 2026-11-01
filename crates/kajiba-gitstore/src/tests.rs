@@ -577,6 +577,17 @@ fn log_walks_newest_first() {
     assert!(log[2].parents.is_empty());
     assert_eq!(log[1].author_name, "Alice");
     assert_eq!(log[1].author_email, "alice@example.org");
+    assert_eq!(log[1].committer_name, "Alice");
+    assert_eq!(log[1].committer_email, "alice@example.org");
+    assert_eq!(
+        log[1].page_bytes(),
+        log[1].message.len()
+            + log[1].author_name.len()
+            + log[1].author_email.len()
+            + log[1].committer_name.len()
+            + log[1].committer_email.len()
+            + log[1].parents.iter().map(String::len).sum::<usize>()
+    );
     assert_eq!(log[1].time, 1_700_000_100);
     assert_eq!(log[1].message, "second\n\nbody\n");
     assert_eq!(
@@ -1183,7 +1194,7 @@ fn raw_commit(bare: &Path, tree: &str, parents: &[&str], author: &str, time: u64
 }
 
 #[test]
-fn page_budget_counts_author_fields_and_parents() {
+fn page_budget_counts_author_committer_fields_and_parents() {
     let f = fixture("budget");
     let tree = git(
         &f.bare,
@@ -1209,9 +1220,12 @@ fn page_budget_counts_author_fields_and_parents() {
     // Three parents and the 5000-byte name count, with messages of two bytes.
     assert_eq!(
         octopus_bytes,
-        2 + "Alice".len() + "alice@example.org".len() + 3 * 40
+        2 + 2 * ("Alice".len() + "alice@example.org".len()) + 3 * 40
     );
-    assert_eq!(wide_bytes, 2 + 5000 + "alice@example.org".len() + 40);
+    assert_eq!(
+        wide_bytes,
+        2 + 5000 + "alice@example.org".len() + "Alice".len() + "alice@example.org".len() + 40
+    );
     for (tip, bytes) in [(&octopus, octopus_bytes), (&wide, wide_bytes)] {
         // Exact boundary: the page ends after the commit that goes past the budget.
         assert_eq!(Gix.log(&f.bare, tip, 0, 10, bytes - 1).unwrap().len(), 1);
@@ -1501,4 +1515,37 @@ fn tips_reach_only_through_branches_and_tags() {
     ] {
         assert!(!tips(&[id]), "{id}");
     }
+}
+
+#[test]
+fn history_keeps_distinct_author_and_committer_identities() {
+    let f = fixture("committer");
+    let tree = git(
+        &f.bare,
+        &["rev-parse", &format!("{}^{{tree}}", f.first)],
+        "0 +0000",
+    );
+    let content = format!(
+        "tree {tree}\nauthor Alice <alice@example.org> 1700000000 +0000\ncommitter Bob <bob@example.org> 1700000100 +0000\n\nsubject\n\nbody\n"
+    );
+    let path = f.bare.join("different-committer");
+    fs::write(&path, content).unwrap();
+    let id = git(
+        &f.bare,
+        &["hash-object", "-t", "commit", "-w", path.to_str().unwrap()],
+        "0 +0000",
+    );
+    let all = Gix.log(&f.bare, &id, 0, 1, usize::MAX).unwrap();
+    let filtered = Gix
+        .log_path(&f.bare, &id, "README.md", 0, 1, usize::MAX)
+        .unwrap();
+    for c in all.iter().chain(filtered.0.iter()) {
+        assert_eq!(c.author_name, "Alice");
+        assert_eq!(c.author_email, "alice@example.org");
+        assert_eq!(c.committer_name, "Bob");
+        assert_eq!(c.committer_email, "bob@example.org");
+        assert_eq!(c.time, 1_700_000_100);
+        assert_eq!(c.message, "subject\n\nbody\n");
+    }
+    assert_eq!(filtered.0.len(), 1);
 }

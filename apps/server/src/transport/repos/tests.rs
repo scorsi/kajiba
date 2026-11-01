@@ -1434,3 +1434,22 @@ async fn other_active_users_read_public_and_archived_repositories_disabled_ones_
     }
     assert_eq!(pages, 2);
 }
+
+#[test]
+fn commit_response_keeps_committer_identity_and_full_message() {
+    let c = commit(kajiba_gitstore::Commit {
+        id: "a".repeat(40),
+        parents: vec![],
+        author_name: "Alice".into(),
+        author_email: "alice@example.org".into(),
+        committer_name: "Bob".into(),
+        committer_email: "bob@example.org".into(),
+        time: 1_700_000_100,
+        message: "subject\n\nbody\n".into(),
+    });
+    assert_eq!(c.author_name, "Alice");
+    assert_eq!(c.committer_name, "Bob");
+    assert_eq!(c.committer_email, "bob@example.org");
+    assert_eq!(c.commit_time.unwrap().seconds, 1_700_000_100);
+    assert_eq!(c.message, "subject\n\nbody\n");
+}

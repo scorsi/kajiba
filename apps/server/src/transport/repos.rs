@@ -296,6 +296,8 @@ fn commit(commit: kajiba_gitstore::Commit) -> Commit {
         parent_ids: commit.parents,
         author_name: commit.author_name,
         author_email: commit.author_email,
+        committer_name: commit.committer_name,
+        committer_email: commit.committer_email,
         commit_time: Some(kajiba_proto::google::protobuf::Timestamp {
             seconds: commit.time,
             nanos: 0,

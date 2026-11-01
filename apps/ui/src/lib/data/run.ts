@@ -1,3 +1,4 @@
+import { sortChanges } from "../repo-navigation.ts";
 /**
  * Everything the run page shows, in one load: the run, its repository and
  * commit, the runs before it on the same ref, the last green run and the
@@ -163,7 +164,7 @@ export async function loadRun(id: string): Promise<RunPage> {
       run,
       repo: repos.find((r) => `${r.owner}/${r.name}` === run.repo),
       commit: commits[0],
-      changes: [...changes.values()],
+      changes: sortChanges([...changes.values()]),
       history,
       lastGreen,
       since,

@@ -181,7 +181,8 @@ writeShellApplication {
     git -C "$fixture" tag -a v1 -m "First release"
     git -C "$fixture" switch --quiet -c feature
     printf 'More.\n' >> "$fixture/docs/guide/intro.md"
-    git -C "$fixture" commit --quiet -am "Extend the guide"
+    GIT_COMMITTER_NAME=Bob GIT_COMMITTER_EMAIL=bob@example.org \
+      git -C "$fixture" commit --quiet -am "Extend the guide" -m "Explain the next steps for readers."
     git -C "$fixture" switch --quiet main
     # a tag named like a branch, on the commit main points at (duplicate-key regression)
     git -C "$fixture" tag feature

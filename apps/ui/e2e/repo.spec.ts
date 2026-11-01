@@ -155,3 +155,103 @@ test("alice/demo: switching ref and path in place shows the new one at once", as
     .click();
   await expect(page.getByText("Start here.")).toBeVisible();
 });
+
+test("repository files default to content and retain selected commit context", async ({
+  page,
+}) => {
+  await authenticator(page);
+  await enroll(page, enrollLink());
+  await page.getByRole("link", { name: "Continue to kajiba" }).click();
+  await page.goto("/alice/demo?ref=feature&history=1&files=1");
+  const root = page.getByRole("region", { name: "root", exact: true });
+  await root.getByRole("link", { name: /README\.md/ }).click();
+  const preview = page.getByRole("region", { name: "Preview", exact: true });
+  await expect(
+    preview.getByRole("heading", { name: "Demo", exact: true }),
+  ).toBeVisible();
+  await expect(
+    preview.getByRole("button", { name: "File", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await preview.getByRole("button", { name: "Diff", exact: true }).click();
+  await expect(preview.locator("table")).toContainText("# Demo");
+  await page
+    .getByRole("link", { name: "Repository history · feature" })
+    .click();
+  await expect(page).toHaveURL(/ref=feature/);
+  await expect(page).not.toHaveURL(/path=/);
+  const history = page.getByRole("region", { name: "History", exact: true });
+  const pulse = page.getByRole("region", { name: "Pulse", exact: true });
+  const beforePulse = await pulse.locator("ul").first().innerText();
+  const historyScroll = await history.evaluate((el) => el.scrollTop);
+  await history.getByRole("link", { name: /Extend the guide/ }).click();
+  const selected = page.getByRole("region", {
+    name: "Selected commit",
+    exact: true,
+  });
+  await expect(
+    selected.getByRole("heading", { name: "Extend the guide" }),
+  ).toBeVisible();
+  await expect(selected).toContainText("Explain the next steps for readers.");
+  await expect(selected).toContainText("Author: Alice <alice@example.org>");
+  await expect(selected).toContainText("Committer: Bob <bob@example.org>");
+  const sha = new URL(page.url()).searchParams.get("at")!;
+  expect(sha).toMatch(/^[0-9a-f]{40}$/);
+  await expect(selected.locator("code")).toHaveText(sha);
+  await expect(
+    selected.getByRole("button", { name: "Copy commit id" }),
+  ).toBeVisible();
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await selected.getByRole("button", { name: "Copy commit id" }).click();
+  await expect(
+    selected.getByRole("button", { name: "Copied", exact: true }),
+  ).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(sha);
+  await expect(selected.locator("time")).toHaveAttribute("title", /GMT$/);
+  await expect(selected.locator("time")).toHaveText(/\d{2}:\d{2}:\d{2}/);
+  const touched = selected.getByRole("list", {
+    name: "Files touched by selected commit",
+  });
+  await touched.getByRole("link", { name: /docs\/guide\/intro\.md/ }).click();
+  await expect(page).toHaveURL(new RegExp(`at=${sha}`));
+  await expect(
+    preview.getByRole("button", { name: "File", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(preview).toContainText("More.");
+  await expect(
+    touched.getByRole("link", { name: /docs\/guide\/intro\.md/ }),
+  ).toBeVisible();
+  // Older columns fold into spines when a nested file is selected.
+  await expect(page.getByTitle("Back to docs", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole("region", { name: "docs/guide", exact: true })
+      .getByRole("link", { name: /intro\.md/ }),
+  ).toHaveAttribute("aria-current", "true");
+  await expect(
+    preview.getByRole("link", { name: "Raw", exact: true }),
+  ).toHaveAttribute("href", `/raw/alice/demo/${sha}/docs/guide/intro.md`);
+  await expect(pulse.locator("ul").first()).toHaveText(beforePulse, {
+    useInnerText: true,
+  });
+  expect(await history.evaluate((el) => el.scrollTop)).toBe(historyScroll);
+  await page.getByRole("link", { name: "Back to now" }).click();
+  await expect(page).not.toHaveURL(/at=/);
+  await expect(page).not.toHaveURL(/path=/);
+  await expect(page).toHaveURL(/ref=feature/);
+  await expect(pulse.locator("ul").first()).toHaveText(beforePulse, {
+    useInnerText: true,
+  });
+  expect(await history.evaluate((el) => el.scrollTop)).toBe(historyScroll);
+
+  // The root commit touches two paths, in alphabetical order.
+  await history
+    .getByRole("link", { name: /Add the README and a guide/ })
+    .click();
+  await expect(touched.getByRole("link").locator("span:last-child")).toHaveText(
+    ["README.md", "docs/guide/intro.md"],
+  );
+  await touched.getByRole("link", { name: /docs\/guide\/intro\.md/ }).click();
+  await expect(preview).toContainText("Start here.");
+  await expect(preview).not.toContainText("More.");
+  await expect(touched.getByRole("link")).toHaveCount(2);
+});

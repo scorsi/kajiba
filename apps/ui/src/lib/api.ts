@@ -28,6 +28,7 @@ import {
   TokenSource,
   type Token as TokenMessage,
 } from "./gen/kajiba/v1/token_pb.ts";
+import { sortChanges } from "./repo-navigation.ts";
 import { RunLog } from "./runlog.ts";
 
 // ── Types (shape of protobuf-es generated messages) ─────────────────────
@@ -133,6 +134,8 @@ export interface Commit {
   parentIds: string[];
   authorName: string;
   authorEmail: string;
+  committerName: string;
+  committerEmail: string;
   commitTime?: Timestamp;
   message: string;
 }
@@ -276,6 +279,8 @@ function toCommit(c: CommitMessage): Commit {
     parentIds: c.parentIds,
     authorName: c.authorName,
     authorEmail: c.authorEmail,
+    committerName: c.committerName,
+    committerEmail: c.committerEmail,
     commitTime: c.commitTime && {
       seconds: c.commitTime.seconds,
       nanos: c.commitTime.nanos,
@@ -290,12 +295,14 @@ export async function getCommitDiff(req: { repo: RepoRef; revision: string }) {
     revision: short(req.revision),
   });
   return {
-    changes: changes.map<Change>((c) => ({
-      path: c.path,
-      kind: c.kind as number as ChangeKind,
-      oldId: c.oldId,
-      newId: c.newId,
-    })),
+    changes: sortChanges(
+      changes.map<Change>((c) => ({
+        path: c.path,
+        kind: c.kind as number as ChangeKind,
+        oldId: c.oldId,
+        newId: c.newId,
+      })),
+    ),
   };
 }
 

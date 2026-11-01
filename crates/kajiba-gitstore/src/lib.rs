@@ -115,6 +115,8 @@ pub struct Commit {
     pub parents: Vec<String>,
     pub author_name: String,
     pub author_email: String,
+    pub committer_name: String,
+    pub committer_email: String,
     /// Committer time, seconds since the Unix epoch.
     pub time: i64,
     pub message: String,
@@ -122,11 +124,13 @@ pub struct Commit {
 
 impl Commit {
     /// What a history page keeps of this commit, counted toward its byte budget
-    /// (ADR 0051): message, author name, author email and parent ids.
+    /// (ADR 0051): message, author/committer names and emails, and parent ids.
     pub fn page_bytes(&self) -> usize {
         self.message.len()
             + self.author_name.len()
             + self.author_email.len()
+            + self.committer_name.len()
+            + self.committer_email.len()
             + self.parents.iter().map(String::len).sum::<usize>()
     }
 }
@@ -1229,11 +1233,14 @@ impl GitStore for Gix<'_> {
                 skipped += 1;
             } else {
                 let author = object.author()?;
+                let committer = object.committer()?;
                 let commit = Commit {
                     id: id.to_string(),
                     parents: parents.iter().map(|id| id.to_string()).collect(),
                     author_name: author.name.to_string(),
                     author_email: author.email.to_string(),
+                    committer_name: committer.name.to_string(),
+                    committer_email: committer.email.to_string(),
                     time: object.time()?.seconds,
                     message: object.message_raw_sloppy().to_string(),
                 };
@@ -1310,11 +1317,14 @@ impl GitStore for Gix<'_> {
                         break;
                     }
                     let author = object.author()?;
+                    let committer = object.committer()?;
                     let commit = Commit {
                         id: id.to_string(),
                         parents: parents.iter().map(|id| id.to_string()).collect(),
                         author_name: author.name.to_string(),
                         author_email: author.email.to_string(),
+                        committer_name: committer.name.to_string(),
+                        committer_email: committer.email.to_string(),
                         time: object.time()?.seconds,
                         message: object.message_raw_sloppy().to_string(),
                     };

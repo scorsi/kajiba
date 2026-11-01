@@ -37,6 +37,8 @@
 		type Run,
 		type TreeEntry
 	} from '#lib/api.ts';
+	import { repoQuery, isMarkdown, localDateTime } from '#lib/repo-navigation.ts';
+	import CopyButton from '#lib/components/CopyButton.svelte';
 	import CloneButton from '#lib/components/CloneButton.svelte';
 	import CodeView from '#lib/components/CodeView.svelte';
 	import Icon, { type IconName } from '#lib/components/Icon.svelte';
@@ -45,7 +47,6 @@
 	import { lineDiff } from '#lib/diff.ts';
 	import {
 		README_NAMES,
-		absoluteTime,
 		commitBody,
 		commitSubject,
 		formatBytes,
@@ -75,14 +76,7 @@
 	const pipelinesOpen = $derived(q.get('pipelines') !== '0');
 	const filesOpen = $derived(q.get('files') === '1' || (!!path && q.get('files') !== '0'));
 
-	function hrefFor(next: Record<string, string | null>) {
-		const u = new URLSearchParams(q.toString());
-		for (const [k, v] of Object.entries(next)) {
-			if (v === null || v === '') u.delete(k);
-			else u.set(k, v);
-		}
-		return `?${u}`;
-	}
+	const hrefFor = (next: Record<string, string | null>) => repoQuery(q, next);
 	const go = (next: Record<string, string | null>) => goto(hrefFor(next), { reset: false });
 
 	// ── data ───────────────────────────────────────────────────────────
@@ -97,6 +91,7 @@
 	);
 	const empty = $derived(!!refs.data && !refs.data.some((r) => r.name === repo?.defaultBranch));
 	const revision = $derived(at || head);
+	const historyPath = $derived(at ? (q.get('scope') ?? path) : path);
 	// Mirror state is for administrators (ADR 0139); the declared mirrors show for everyone.
 	const mirrors = resource(async () =>
 		(await getViewer()).admin
@@ -110,7 +105,7 @@
 	let logMore = $state(false);
 	const log = resource(async () => {
 		if (!head || empty) return [] as Commit[];
-		const res = await listCommits({ repo: repoKey, revision: head, path, want: 400 });
+		const res = await listCommits({ repo: repoKey, revision: head, path: historyPath, want: 400 });
 		logMore = !!res.nextPageToken;
 		return uniqueCommits(res.commits);
 	});
@@ -158,7 +153,7 @@
 	const ribbonMax = $derived(Math.max(1, ...ribbon.map((d) => d.commits.length)));
 	const inWindow = $derived(ribbon.reduce((n, d) => n + d.commits.length, 0));
 	const recent = $derived(
-		atDay ? (ribbon.find((d) => d.k === atDay)?.commits ?? []) : (log.data ?? []).slice(0, 4)
+		q.get('day') ? (ribbon.find((d) => d.k === q.get('day'))?.commits ?? []) : (log.data ?? []).slice(0, 4)
 	);
 
 	// ── files ──────────────────────────────────────────────────────────
@@ -189,6 +184,10 @@
 	);
 	const collapseBelow = $derived(Math.max(0, segs.length - 2));
 
+	const commitDiff = resource(async () =>
+		at ? getCommitDiff({ repo: repoKey, revision: at }) : undefined
+	);
+
 	const preview = resource(async () => {
 		const [rev, file, sel, p, dir, cols] = [
 			revision,
@@ -199,10 +198,8 @@
 			columns.data
 		];
 		if (!rev || empty) return { kind: 'none' as const };
-		const commit = at
-			? (await listCommits({ repo: repoKey, revision: at, pageSize: 1 })).commits[0]
-			: undefined;
-		const changes = at ? (await getCommitDiff({ repo: repoKey, revision: at })).changes : [];
+		const commit = atCommit;
+		const changes = commitDiff.data?.changes ?? [];
 		if (sel?.kind === EntryKind.SUBMODULE) return { kind: 'submodule' as const, id: sel.id };
 		if (sel?.kind === EntryKind.LINK) {
 			const target = new TextDecoder().decode(
@@ -239,7 +236,9 @@
 				)?.content;
 			return { kind: 'file' as const, now, before, change, commit: shown };
 		}
-		if (commit) return { kind: 'commit' as const, commit, changes };
+		if (at && p && changes.some((c) => c.path === p && c.kind === ChangeKind.DELETED))
+			return { kind: 'deleted' as const };
+		if (commit) return { kind: 'none' as const };
 		const col = cols?.find((c) => c.dir === dir);
 		const entry = README_NAMES.map((n) => col?.entries.find((e) => e.name === n)).find(Boolean);
 		const readme = entry
@@ -274,7 +273,12 @@
 		}
 		return target.startsWith('/') ? undefined : out.join('/');
 	}
-	let fileMode = $state<'diff' | 'file'>('diff');
+	let fileMode = $state<'diff' | 'file'>('file');
+	$effect(() => {
+		void path;
+		void revision;
+		fileMode = 'file';
+	});
 
 	let scroller = $state<HTMLElement>();
 	$effect(() => {
@@ -336,7 +340,7 @@
 			return { ok: false, t: `mirror failing · ${m.attempts} attempts` };
 		return { ok: true, t: 'mirror off' };
 	});
-	const scopeLabel = $derived(path || repo?.name || '');
+	const scopeLabel = $derived(historyPath || repo?.name || '');
 	const branchesAndReleases = $derived(
 		[...(refs.data ?? [])].sort(
 			(a, b) => Number(a.name.startsWith('refs/tags/')) - Number(b.name.startsWith('refs/tags/'))
@@ -500,7 +504,7 @@
 										<button
 											type="button"
 											disabled={!n}
-											onclick={() => go({ at: day.commits[0].id })}
+											onclick={() => go({ at: day.commits[0].id, day: day.k })}
 											title="{fullDay.format(day.dt)} · {n} commit{n === 1 ? '' : 's'}{day.tags
 												.length
 												? ` · ${day.tags.join(', ')}`
@@ -674,6 +678,9 @@
 					>{/if}
 				{#if counts.mirror}<span class="text-danger">mirror failing</span>{/if}
 			{/snippet}
+			{#if path}
+				<a href={hrefFor({ path: null, scope: '', history: '1' })} data-sveltekit-noscroll class="block px-6 py-2 text-xs text-link hover:underline">Repository history · {refShortName(head)}</a>
+			{/if}
 			{@render strip('History', historyOpen, 'history', '1', null, historySummary)}
 			{#if historyOpen}
 				<section
@@ -716,6 +723,35 @@
 					class="ml-auto text-accent hover:underline">Back to now</a
 				>
 			</div>
+		{/if}
+
+		{#if at && atCommit}
+			{@const c = atCommit}
+			<section aria-label="Selected commit" class="shrink-0 border-b-2 border-accent bg-accent-soft px-6 py-4">
+				<div class="flex flex-wrap items-center gap-2 text-xs">
+					<span class="tracking-wide text-accent uppercase">Selected commit</span>
+					<code class="break-all">{c.id}</code><CopyButton text={c.id} label="Copy commit id" />
+				</div>
+				<h2 class="mt-2 text-lg font-semibold">{commitSubject(c.message)}</h2>
+				{#if commitBody(c.message)}<p class="mt-2 text-sm whitespace-pre-wrap">{commitBody(c.message)}</p>{/if}
+				<p class="mt-2 text-xs text-fg-muted">Author: {c.authorName} &lt;{c.authorEmail}&gt;</p>
+				<p class="mt-1 text-xs text-fg-muted">Committer: {c.committerName} &lt;{c.committerEmail}&gt;</p>
+				<time class="mt-1 block text-xs text-fg-muted" datetime={toDate(c.commitTime)?.toISOString()} title={toDate(c.commitTime)?.toUTCString()}>{localDateTime(toDate(c.commitTime))}</time>
+				{#if runByCommit.get(c.id)}
+					<div class="mt-4 max-w-sm">{@render currentRun(runByCommit.get(c.id)!, false)}</div>
+				{/if}
+				<!-- TODO: show verified signature status when the browsing API exposes it; push admission alone cannot verify imported history. -->
+				<h3 class="mt-4 text-xs tracking-wide text-fg-subtle uppercase">{commitDiff.data?.changes.length ?? 0} files changed</h3>
+				{#if commitDiff.error}<p role="alert" class="text-sm text-danger">Could not load the changed files.</p>{/if}
+				<ul aria-label="Files touched by selected commit" class="mt-2 max-h-48 overflow-y-auto">
+					{#each commitDiff.data?.changes ?? [] as ch (`${ch.kind}:${ch.path}`)}
+						{@const k = CHANGE[ch.kind]}
+						<li><a href={hrefFor({ path: ch.path })} data-sveltekit-noscroll aria-current={path === ch.path ? 'true' : undefined} class="flex gap-3 py-1 font-mono text-xs hover:underline">
+							<span class={k.cls} title={k.label}>{k.l}</span><span class="break-all">{ch.path}</span>
+						</a></li>
+					{/each}
+				</ul>
+			</section>
 		{/if}
 
 		<!-- ═══ Files ═══ -->
@@ -865,45 +901,8 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 								<a href={rawHref} class="text-accent hover:underline">Download the raw file</a>
 							</p>
 						</div>
-					{:else if preview.data?.kind === 'commit'}
-						{@const c = preview.data.commit}
-						{@const run = runByCommit.get(c.id)}
-						<div class="mx-auto max-w-3xl px-6 py-8">
-							<p class="font-mono text-xs text-fg-subtle">{c.id}</p>
-							<h2 class="mt-1 text-lg font-semibold">{commitSubject(c.message)}</h2>
-							{#if commitBody(c.message)}<p
-									class="mt-2 text-[0.8125rem] whitespace-pre-wrap text-fg-muted"
-								>
-									{commitBody(c.message)}
-								</p>{/if}
-							<p class="mt-2 text-xs text-fg-subtle">
-								{c.authorName} ·
-								<time title={absoluteTime(toDate(c.commitTime))}
-									>{relativeTime(toDate(c.commitTime))}</time
-								>
-							</p>
-							{#if run}<div class="mt-4 max-w-sm">{@render currentRun(run, false)}</div>{/if}
-							<h3 class="mt-6 mb-2 text-xs tracking-wide text-fg-subtle uppercase">
-								{preview.data.changes.length} files changed
-							</h3>
-							<ul class="divide-y divide-border border-y border-border">
-								{#each preview.data.changes as ch (`${ch.kind}:${ch.path}`)}
-									{@const k = CHANGE[ch.kind]}
-									<li>
-										<a
-											href={hrefFor({ path: ch.path })}
-											data-sveltekit-noscroll
-											class="flex items-center gap-3 py-1.5 font-mono text-xs hover:bg-surface-2"
-										>
-											<span class="w-4 text-center font-semibold {k.cls}" title={k.label}
-												>{k.l}</span
-											>
-											<span class="truncate text-fg-muted">{ch.path}</span>
-										</a>
-									</li>
-								{/each}
-							</ul>
-						</div>
+					{:else if preview.data?.kind === 'deleted'}
+						<p class="p-6 text-sm text-fg-muted">{path} was deleted in this commit.</p>
 					{:else if preview.data?.kind === 'file'}
 						{@const f = preview.data}
 						{@const text = new TextDecoder().decode(f.now)}
@@ -992,6 +991,8 @@ git push -u origin {refShortName(repo?.defaultBranch ?? 'refs/heads/main')}</pre
 											</tbody>
 										{/each}
 									</table>
+								{:else if isMarkdown(path)}
+									<div class="mx-auto max-w-3xl px-6 py-8"><Markdown source={text} /></div>
 								{:else}
 									<CodeView code={text} language={languageFor(path)} />
 								{/if}

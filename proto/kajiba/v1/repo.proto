@@ -216,6 +216,8 @@ message Commit {
   string author_email = 4;
   google.protobuf.Timestamp commit_time = 5;
   string message = 6;
+  string committer_name = 7;
+  string committer_email = 8;
 }
 
 message GetCommitDiffRequest {
