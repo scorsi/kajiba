@@ -185,6 +185,12 @@ async fn main() -> ExitCode {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;
             }
+            if let Err(err) =
+                restore::reconcile(&mut writer, &config.state_dir, db::runs::now()).await
+            {
+                log::error("fatal", &err);
+                return ExitCode::FAILURE;
+            }
             if let Err(err) = db::runners::disconnect_all(&mut writer).await {
                 log::error("fatal", &err);
                 return ExitCode::FAILURE;

@@ -582,7 +582,7 @@ pub async fn expire(
     .bind(now)
     .fetch_all(&mut *tx)
     .await?;
-    lose(tx, lost, now).await
+    lose(tx, lost, None, now).await
 }
 
 /// At a runner's admission, its running attempts that its hello does not list (`held`)
@@ -604,12 +604,26 @@ pub async fn abandon(
         .into_iter()
         .filter(|attempt| !held.contains(&attempt.public_id))
         .collect();
-    lose(tx, lost, now).await
+    lose(tx, lost, None, now).await
+}
+
+/// A restore discarded log acknowledgments: no running attempt may resume (0183).
+pub async fn restored(
+    tx: &mut SqliteConnection,
+    now: i64,
+) -> Result<Vec<(String, RunState)>, sqlx::Error> {
+    let lost = sqlx::query_as(&format!(
+        "{ATTEMPT} WHERE a.state = 'running' ORDER BY a.id"
+    ))
+    .fetch_all(&mut *tx)
+    .await?;
+    lose(tx, lost, Some("restored"), now).await
 }
 
 async fn lose(
     tx: &mut SqliteConnection,
     lost: Vec<Current>,
+    reason: Option<&str>,
     now: i64,
 ) -> Result<Vec<(String, RunState)>, sqlx::Error> {
     let mut changes = Vec::new();
@@ -621,13 +635,17 @@ async fn lose(
             .await?;
         // The lost attempt's id ties its events together.
         let correlation_id = attempt.public_id.as_str();
+        let mut payload = serde_json::json!({ "run": attempt.run, "attempt": attempt.public_id, "runner": attempt.runner });
+        if let Some(reason) = reason {
+            payload["reason"] = reason.into();
+        }
         journal(
             tx,
             "attempt-lost",
             None,
             attempt.repo_id,
             correlation_id,
-            serde_json::json!({ "run": attempt.run, "attempt": attempt.public_id, "runner": attempt.runner }),
+            payload,
             now,
         )
         .await?;
@@ -662,7 +680,7 @@ async fn lose(
             continue;
         }
         let state = if attempt.replayable { "failed" } else { "lost" };
-        let reason = Some("lease-expired".to_owned());
+        let reason = Some(reason.unwrap_or("lease-expired").to_owned());
         changes.extend(
             end(
                 tx,

@@ -274,6 +274,7 @@ async fn installation_rolls_back_copy_and_either_switch_failure_then_can_retry()
     crate::restore::install(&dump, &server, &git, owner, owner, &mut |_| Ok(()))
         .await
         .unwrap();
+    assert!(server.join("db/restore-pending").is_file());
     assert_eq!(
         fs::read(git.join(format!("repos/{LIVE}.git/HEAD"))).unwrap(),
         fs::read(dump.join(format!("git/repos/{LIVE}.git/HEAD"))).unwrap()

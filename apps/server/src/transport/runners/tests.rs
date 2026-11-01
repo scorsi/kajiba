@@ -2093,3 +2093,97 @@ async fn maintenance_extends_live_leases_once_without_reviving_expired_attempts(
             .unwrap();
     assert_eq!(again, after);
 }
+
+#[tokio::test]
+async fn a_reconnected_runner_cancels_an_attempt_invalidated_by_restore() {
+    use kajiba_proto::runner::v1::LogChunk;
+    let state = Forge::state().await;
+    let runners = Runners::new(state.health.clone(), Arc::default());
+    let (out, mut received) = mpsc::channel(4);
+    let (id, generation, _ended) = runners
+        .admit(Some(&peer(BUILD_1)), &hello("build-1"), "test", out)
+        .await
+        .unwrap();
+    let now = crate::db::runs::now();
+    {
+        let mut writer = state.health.writer.get().unwrap().lock().await;
+        sqlx::raw_sql("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
+            INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 'push', 'main', '', 0, 'demo')")
+            .execute(&mut *writer).await.unwrap();
+        let mut tx = writer.begin().await.unwrap();
+        crate::db::runs::create_run(
+            &mut tx,
+            &crate::db::runs::NewRun {
+                repo_id: 1,
+                sha: SHA,
+                reference: Some("refs/heads/main"),
+                trigger: "push",
+                event_id: None,
+                triggered_by: Some(1),
+                correlation_id: "test",
+                now,
+                worktree: None,
+            },
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    runners.pass(now).await;
+    let Some(connect_response::Message::Assignment(assignment)) =
+        received.recv().await.unwrap().unwrap().message
+    else {
+        panic!("expected an assignment");
+    };
+    let attempt = assignment.attempt_id;
+    let answers = runners
+        .handle(
+            (id, "build-1"),
+            "test",
+            Message::LogChunk(LogChunk {
+                attempt_id: attempt.clone(),
+                sequence: 1,
+                data: b"already acknowledged".to_vec(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        answers,
+        [response(connect_response::Message::LogAck(LogAck {
+            attempt_id: attempt.clone(),
+            sequence: 1
+        }))]
+    );
+    runners
+        .disconnected(id, "build-1", generation, "test")
+        .await;
+    {
+        let mut writer = state.health.writer.get().unwrap().lock().await;
+        sqlx::query("DELETE FROM log_chunk")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        std::fs::write(state.health.state_dir.join("db/restore-pending"), b"").unwrap();
+        crate::restore::reconcile(&mut writer, &state.health.state_dir, now)
+            .await
+            .unwrap();
+    }
+    let greeting = Hello {
+        in_flight_attempt_ids: vec![attempt.clone()],
+        ..hello("build-1")
+    };
+    let (out, _received) = mpsc::channel(4);
+    runners
+        .admit(Some(&peer(BUILD_1)), &greeting, "test", out)
+        .await
+        .unwrap();
+    assert_eq!(
+        runners
+            .resume(id, &greeting.in_flight_attempt_ids)
+            .await
+            .unwrap(),
+        [cancel(&attempt)]
+    );
+}

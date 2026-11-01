@@ -99,6 +99,7 @@ import ./ci-common.nix args {
 
     with subtest("restore preserves the privilege split and clears absent log indexes"):
         forge.succeed(restore_cmd(directory))
+        forge.succeed("test -f /var/lib/kajiba-server/db/restore-pending")
         assert forge.succeed(f"sha256sum {directory}/manifest.json").split()[0] == manifest_hash
         for path, owner in [("/var/lib/kajiba-server/db", "kajiba-server:kajiba-server"), ("/var/lib/kajiba-git/repos", "kajiba-git:kajiba-git")]:
             assert forge.succeed(f"stat -c '%U:%G:%a' {path}").strip() == owner + ":750"
@@ -114,6 +115,7 @@ import ./ci-common.nix args {
                    f"runuser -u kajiba-git -- cat {db}")
         forge.succeed("systemctl reset-failed " + units, "systemctl start kajiba-git.service kajiba-server.service")
         forge.wait_until_succeeds("curl -fsS http://127.0.0.1:8080/readyz")
+        forge.succeed("test ! -e /var/lib/kajiba-server/db/restore-pending")
         assert sql(f"SELECT state || '|' || failure_reason FROM run WHERE public_id = '{active}'") == "failed|bundle-missing"
         assert sql(f"SELECT state FROM run WHERE public_id = '{historical}'") == "succeeded"
         assert sql(normal_query) == history_before_dump

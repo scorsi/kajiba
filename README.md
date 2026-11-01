@@ -212,7 +212,11 @@ curl -fsS http://127.0.0.1:8080/readyz
 systemctl start kajiba-dump.timer kajiba-gc.timer
 ```
 
-Again omit an unconfigured runner socket. Normal startup applies migrations and
+Again omit an unconfigured runner socket. The first startup after restore marks
+all assigned/running attempts lost with reason `restored`; replayable jobs below
+the attempt limit are retried, and other runs fail with reason `restored`.
+Reconnecting runners must cancel those old attempts; log acknowledgments are
+never preserved across restore. Normal startup applies migrations and
 reconciliation. Check repository refs/HEAD and HTTP/SSH clones, identities,
 authentication, historical run states and a fresh signed push/CI run against the
 recovery point. `nixos-ops` covers the full disaster-recovery assertions.

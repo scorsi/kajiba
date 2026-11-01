@@ -1235,3 +1235,191 @@ async fn admission_loses_only_the_running_attempts_its_hello_does_not_list() {
     readers.close().await;
     writer.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn restore_marker_invalidates_unexpired_attempts_and_replays_or_fails() {
+    for (accepted, replayable, max_attempts) in [
+        (false, true, 3),
+        (true, true, 3),
+        (true, true, 1),
+        (true, false, 3),
+    ] {
+        let dir = TempDir::new();
+        let (mut writer, readers) = open(&dir.database()).await.unwrap();
+        populate(&mut writer).await;
+        let run = new_run(&mut writer, 1).await;
+        let offers = [offer(1, &["nix"], &[], 1)];
+        let (assigned, _) = pass(&mut writer, &offers, 2).await;
+        let attempt = &assigned[0].attempt;
+        if accepted {
+            let mut tx = writer.begin().await.unwrap();
+            accept(&mut tx, (1, "build-1"), attempt, "accept", 3)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        assert_eq!(
+            log(&mut writer, &dir.0, 1, attempt, 1, b"acked").await,
+            Some(1)
+        );
+        sqlx::query("UPDATE job SET replayable = ?, max_attempts = ?")
+            .bind(replayable)
+            .bind(max_attempts)
+            .execute(&mut writer)
+            .await
+            .unwrap();
+        let pending = new_run(&mut writer, 4).await;
+        assert!(lease(&mut writer).await > 5);
+        // Ordinary restarts preserve the unexpired attempt.
+        crate::restore::reconcile(&mut writer, &dir.0, 5)
+            .await
+            .unwrap();
+        assert_eq!(
+            count(
+                &mut writer,
+                "SELECT count(*) FROM job_attempt WHERE state = 'running'"
+            )
+            .await,
+            1
+        );
+        // Restore drops the index of output the runner has already discarded.
+        sqlx::query("DELETE FROM log_chunk")
+            .execute(&mut writer)
+            .await
+            .unwrap();
+        std::fs::create_dir(dir.0.join("db")).unwrap();
+        let marker = dir.0.join("db/restore-pending");
+        std::fs::write(&marker, b"").unwrap();
+        crate::restore::reconcile(&mut writer, &dir.0, 5)
+            .await
+            .unwrap();
+        assert!(!marker.exists());
+        assert_eq!(
+            count(
+                &mut writer,
+                "SELECT count(*) FROM job_attempt WHERE state = 'lost' AND finished_at = 5"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            resume(&mut writer, 1, std::slice::from_ref(attempt), 5)
+                .await
+                .unwrap(),
+            [None]
+        );
+        let reason: String = sqlx::query_scalar(
+            "SELECT json_extract(payload, '$.reason') FROM event WHERE kind = 'attempt-lost'",
+        )
+        .fetch_one(&mut writer)
+        .await
+        .unwrap();
+        assert_eq!(reason, "restored");
+        let state: (String, Option<String>) =
+            sqlx::query_as("SELECT state, failure_reason FROM run WHERE public_id = ?")
+                .bind(&run)
+                .fetch_one(&mut writer)
+                .await
+                .unwrap();
+        if replayable && max_attempts > 1 {
+            assert_eq!(state.1, None);
+            let (replay, _) = pass(&mut writer, &offers, 6).await;
+            assert_eq!(replay.len(), 1);
+            assert_ne!(replay[0].attempt, *attempt);
+            assert_eq!(
+                count(&mut writer, "SELECT max(number) FROM job_attempt").await,
+                2
+            );
+        } else {
+            assert_eq!(state, ("failed".into(), Some("restored".into())));
+        }
+        // Consumed markers do not invalidate later work on an ordinary restart.
+        crate::restore::reconcile(&mut writer, &dir.0, 7)
+            .await
+            .unwrap();
+        assert_eq!(
+            count(
+                &mut writer,
+                "SELECT count(*) FROM event WHERE kind = 'attempt-lost'"
+            )
+            .await,
+            1
+        );
+        let pending_state: String = sqlx::query_scalar("SELECT state FROM run WHERE public_id = ?")
+            .bind(pending)
+            .fetch_one(&mut writer)
+            .await
+            .unwrap();
+        assert_eq!(pending_state, "queued");
+        readers.close().await;
+        writer.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn restore_reconciliation_retries_failures_and_a_crash_after_commit() {
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    populate(&mut writer).await;
+    let (_, terminal) = running(&mut writer).await;
+    result(
+        &mut writer,
+        (1, "build-1"),
+        &terminal,
+        AttemptState::Succeeded,
+        "",
+    )
+    .await;
+    let (_, attempt) = running(&mut writer).await;
+    std::fs::create_dir(dir.0.join("db")).unwrap();
+    let marker = dir.0.join("db/restore-pending");
+    std::fs::write(&marker, b"").unwrap();
+    sqlx::query("CREATE TRIGGER refuse_loss BEFORE INSERT ON event WHEN NEW.kind = 'attempt-lost' BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+        .execute(&mut writer).await.unwrap();
+    assert!(
+        crate::restore::reconcile(&mut writer, &dir.0, 5)
+            .await
+            .is_err()
+    );
+    assert!(marker.exists());
+    assert_eq!(
+        count(
+            &mut writer,
+            "SELECT count(*) FROM job_attempt WHERE state = 'lost'"
+        )
+        .await,
+        0
+    );
+    sqlx::query("DROP TRIGGER refuse_loss")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    crate::restore::reconcile(&mut writer, &dir.0, 5)
+        .await
+        .unwrap();
+    // Simulate a crash after committing but before unlinking the marker.
+    std::fs::write(&marker, b"").unwrap();
+    crate::restore::reconcile(&mut writer, &dir.0, 6)
+        .await
+        .unwrap();
+    assert!(!marker.exists());
+    assert_eq!(
+        count(
+            &mut writer,
+            "SELECT count(*) FROM event WHERE kind = 'attempt-lost'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(resume(&mut writer, 1, &[attempt], 6).await.unwrap(), [None]);
+    assert_eq!(
+        count(
+            &mut writer,
+            "SELECT count(*) FROM job_attempt WHERE state = 'succeeded'"
+        )
+        .await,
+        1
+    );
+    readers.close().await;
+    writer.close().await.unwrap();
+}

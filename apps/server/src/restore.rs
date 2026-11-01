@@ -16,6 +16,29 @@ use std::{
 type Result<T> = std::result::Result<T, String>;
 type Identity = (u32, u32);
 
+const MARKER: &str = "db/restore-pending";
+
+/// Commit invalidation before removing the marker; a crash retries before admission.
+pub(crate) async fn reconcile(
+    writer: &mut SqliteConnection,
+    state_dir: &Path,
+    now: i64,
+) -> Result<()> {
+    let marker = state_dir.join(MARKER);
+    match fs::symlink_metadata(&marker) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.to_string()),
+        Ok(_) => {}
+    }
+    let mut tx = writer.begin().await.map_err(|e| e.to_string())?;
+    crate::db::attempts::restored(&mut tx, now)
+        .await
+        .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    fs::remove_file(&marker).map_err(|e| e.to_string())?;
+    crate::state::sync_dir(marker.parent().unwrap()).map_err(|e| e.to_string())
+}
+
 pub(crate) async fn validate(root: &Path) -> Result<dump::Manifest> {
     dump::verify(root).await
 }
@@ -241,6 +264,7 @@ pub(super) async fn install(
         }
         validate(&root).await?;
         clear_staged_logs(&stages[0].4.path.join("server/db/kajiba.sqlite")).await?;
+        fs::write(stages[0].4.path.join("server").join(MARKER), b"").map_err(|e| e.to_string())?;
         for (side, _, _, owner, pinned) in &stages {
             let stage = pinned.path.join(".");
             permissions(&stage.join(side), *owner).map_err(|e| e.to_string())?;
