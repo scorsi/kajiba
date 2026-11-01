@@ -17,9 +17,11 @@
 	{href}
 	data-sveltekit-noscroll
 	aria-expanded={open}
-	class="flex h-8 shrink-0 items-center gap-3 border-b border-border px-4 text-xs text-fg-muted hover:bg-surface-2 sm:px-6"
+	class="flex h-8 shrink-0 items-center gap-3 {label === 'Pulse' ? 'bg-surface' : 'border-b border-border'} px-4 text-xs text-fg-muted hover:bg-surface-2 sm:px-6"
 >
 	<span class="w-3 text-fg-subtle" aria-hidden="true">{open ? '▾' : '▸'}</span>
 	<span class="tracking-wide text-fg-subtle uppercase">{label}</span>
-	<span class="flex min-w-0 flex-1 items-center gap-3 truncate">{@render children?.()}</span>
+	<span class="flex min-w-0 flex-1 items-center gap-3 truncate">
+		{#if label !== 'Pulse' || !open}{@render children?.()}{/if}
+	</span>
 </a>

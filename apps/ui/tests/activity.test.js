@@ -138,8 +138,8 @@ test("keyed each blocks use keys unique for real data", async () => {
     readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
   // the same commit in two repositories, steps sharing a name, one path changed twice
   assert.match(
-    src("lib/components/ActivityChart.svelte"),
-    /as \{ c, repo \} \(`\$\{repo\}\/\$\{c\.id\}`\)/,
+    src("lib/views/ActivityView.svelte"),
+    /as \{ c, r \} \(`\$\{r\.key\}\/\$\{c\.id\}`\)/,
   );
   assert.match(
     src("lib/views/RepoView.svelte"),
@@ -152,16 +152,45 @@ test("keyed each blocks use keys unique for real data", async () => {
     assert.doesNotMatch(src(f), /\(st?\.name\)\}/);
 });
 
-test("lastDays gives distinct days across a 25 h daylight-saving day", async (t) => {
+test("lastDays gives consecutive calendar days across both DST transitions", async (t) => {
   const vite = await createServer({
     configFile: false,
     server: { middlewareMode: true, ws: false },
   });
   t.after(() => vite.close());
   const { lastDays } = await vite.ssrLoadModule("/src/lib/data/forge.ts");
-  const days = lastDays(90, new Date(2026, 9, 31, 23, 21));
-  assert.equal(new Set(days.map((d) => d.k)).size, 90);
-  assert.equal(days.at(-1).k, "2026-10-31");
+  const previousTZ = process.env.TZ;
+  process.env.TZ = "Europe/Paris";
+  t.after(() => {
+    if (previousTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTZ;
+  });
+  for (const [now, end, before, after, hours] of [
+    [
+      new Date(2026, 9, 31, 23, 21),
+      "2026-10-31",
+      "2026-10-24",
+      "2026-10-25",
+      25,
+    ],
+    [
+      new Date(2026, 2, 31, 23, 21),
+      "2026-03-31",
+      "2026-03-28",
+      "2026-03-29",
+      23,
+    ],
+  ]) {
+    for (const count of [30, 90]) {
+      const days = lastDays(count, now);
+      assert.equal(days.length, count);
+      assert.equal(new Set(days.map((d) => d.k)).size, count);
+      assert.equal(days.at(-1).k, end);
+      const start = days.find((d) => d.k === before).dt;
+      const finish = days.find((d) => d.k === after).dt;
+      assert.equal((finish - start) / 3_600_000, hours);
+    }
+  }
 });
 
 test("activity includes active runs and hides only recovered branch failures", async (t) => {

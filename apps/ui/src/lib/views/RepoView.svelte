@@ -15,12 +15,10 @@
 -->
 <script lang="ts">
 	import RunActions from '#lib/components/RunActions.svelte';
-	import ActivityChart from '#lib/components/ActivityChart.svelte';
-	import { activityRange } from '#lib/data/activity.ts';
 	import { runLabel } from '#lib/run-label.ts';
 	import RunRef from '#lib/components/RunRef.svelte';
 	import DurationBar from '#lib/components/DurationBar.svelte';
-	import { hasActiveRuns, uniqueCommits } from '#lib/data/forge.ts';
+	import { dayKey, lastDays, hasActiveRuns, uniqueCommits } from '#lib/data/forge.ts';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { tick, type Snippet } from 'svelte';
@@ -137,16 +135,36 @@
 	});
 
 	// ── ribbon ─────────────────────────────────────────────────────────
-	const days = $derived(activityRange(q.get('days')));
 	// The commit of a time-travel banner may not touch the filtered path: fetch it alone.
 	const atFetched = resource(async () =>
 		at ? (await listCommits({ repo: repoKey, revision: at, pageSize: 1 })).commits[0] : undefined
 	);
 	const atCommit = $derived(at ? (log.data?.find((c) => c.id === at) ?? atFetched.data) : undefined);
-	const activitySources = $derived([{
-		repo: repoKey, ref: head, commits: log.data ?? [], tags: tagsAt,
-		runs: (runs.data ?? []).filter(r => !historyPath || log.data?.some(c => c.id === r.commitId))
-	}]);
+	const atDay = $derived(atCommit ? dayKey(toDate(atCommit.commitTime)!) : '');
+	const WORST = [RunState.RUNNING, RunState.FAILED, RunState.CANCELLED, RunState.SUCCEEDED];
+	const ribbon = $derived.by(() => {
+		const byDay = new Map<string, Commit[]>();
+		const flags = new Map<string, string[]>();
+		for (const c of log.data ?? []) {
+			const k = dayKey(toDate(c.commitTime)!);
+			byDay.set(k, [...(byDay.get(k) ?? []), c]);
+			const t = tagsAt.get(c.id);
+			if (t) flags.set(k, [...(flags.get(k) ?? []), ...t]);
+		}
+		return lastDays(90).map(({ dt, k }) => {
+			const commits = byDay.get(k) ?? [];
+			const states = commits
+				.map((c) => runByCommit.get(c.id)?.state)
+				.filter((s) => s !== undefined);
+			const ciState = WORST.find((s) => states.includes(s));
+			return { k, dt, commits, tags: flags.get(k) ?? [], ciState };
+		});
+	});
+	const ribbonMax = $derived(Math.max(1, ...ribbon.map((d) => d.commits.length)));
+	const inWindow = $derived(ribbon.reduce((n, d) => n + d.commits.length, 0));
+	const recent = $derived(
+		q.get('day') ? (ribbon.find((d) => d.k === q.get('day'))?.commits ?? []) : (log.data ?? []).slice(0, 4)
+	);
 
 	// ── files ──────────────────────────────────────────────────────────
 	const columns = resource(async () => {
@@ -291,6 +309,11 @@
 	}
 
 	// ── formatting ─────────────────────────────────────────────────────
+	const fullDay = new Intl.DateTimeFormat('en', {
+		weekday: 'short',
+		month: 'short',
+		day: 'numeric'
+	});
 	const hm = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hour12: false });
 	const dur = (s: number) =>
 		s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s` : `${s}s`;
@@ -413,7 +436,7 @@
 		{/snippet}
 		{@render strip('Pulse', pulseOpen, 'pulse', null, '0', pulseSummary)}
 		{#if pulseOpen}
-			<section class="shrink-0 border-b border-border bg-surface" aria-label="Pulse">
+			<section class="shrink-0 bg-surface" aria-label="Pulse">
 				<div
 					class="grid grid-cols-[minmax(0,1fr)] gap-x-8 px-4 pt-4 pb-4 sm:px-6 xl:grid-cols-[minmax(0,1fr)_15rem]"
 				>
@@ -468,13 +491,79 @@
 						{/if}
 
 						{#if !empty}
-							<p class="mt-3 text-xs text-fg-subtle">Activity of <span class="font-mono">{scopeLabel}</span></p>
-							<ActivityChart sources={activitySources} range={days} selected={q.get('day') ?? ''} {hrefFor}
-								select={(b) => go({ day: b.k, ...(b.pushes[0]?.commits[0] ? { at: b.pushes[0].commits[0].id } : {}) })}
-								commitHref={(_, c) => hrefFor({ at: c.id === at ? null : c.id })}
-								byRef listLabel="Pulse commits" currentCommit={at}
-								cap="Loaded sample: up to 400 scoped commits and 60 recent repository runs."
-							/>
+							<figure class="mt-4">
+								<figcaption class="mb-1.5 flex items-baseline gap-2 text-xs text-fg-subtle">
+									<span>Activity of</span><span class="font-mono text-fg-muted">{scopeLabel}</span>
+									<span class="tabular ml-auto">{inWindow} commits · 90 days</span>
+								</figcaption>
+								<div class="flex h-11 items-end gap-[2px]">
+									{#each ribbon as day (day.k)}
+										{@const n = day.commits.length}
+										<button
+											type="button"
+											disabled={!n}
+											onclick={() => go({ at: day.commits[0].id, day: day.k })}
+											title="{fullDay.format(day.dt)} · {n} commit{n === 1 ? '' : 's'}{day.tags
+												.length
+												? ` · ${day.tags.join(', ')}`
+												: ''}{day.ciState !== undefined ? ` · CI ${RUN_LABEL[day.ciState]}` : ''}"
+											aria-label="{fullDay.format(day.dt)}, {n} commits"
+											class="relative flex h-full flex-1 items-end enabled:cursor-pointer"
+										>
+											{#if day.tags.length}<span
+													class="absolute -top-1.5 left-1/2 size-1.5 -translate-x-1/2 rotate-45 bg-warn"
+													aria-hidden="true"
+												></span>{/if}
+											<span
+												class="block w-full rounded-t-[2px] {day.k === atDay
+													? 'bg-fg'
+													: n
+														? 'bg-accent/75 hover:bg-accent'
+														: 'bg-border/70'}"
+												style:height="{n ? Math.max(14, (n / ribbonMax) * 100) : 5}%"
+											></span>
+										</button>
+									{/each}
+								</div>
+							</figure>
+
+							<ul
+								aria-label="Pulse commits"
+								class="mt-3 max-h-48 overflow-y-auto overscroll-contain space-y-0.5 text-[0.8125rem]"
+							>
+								{#each recent as c (c.id)}
+									{@const run = runByCommit.get(c.id)}
+									<li>
+										<a
+											href={hrefFor({ at: c.id === at ? null : c.id })}
+											data-sveltekit-noscroll
+											class="flex items-center gap-3 rounded-sm px-1 py-0.5 hover:bg-surface-2 {c.id ===
+											at
+												? 'bg-surface-2'
+												: ''}"
+										>
+											<span class="w-3"
+												>{#if run}<RunBadge state={run.state} size={11} />{/if}</span
+											>
+											<span
+												class="w-14 shrink-0 font-mono text-xs {c.id === at
+													? 'text-fg'
+													: 'text-link'}">{shortId(c.id)}</span
+											>
+											<span class="min-w-0 flex-1 truncate {c.id === at ? 'font-medium' : ''}"
+												>{commitSubject(c.message)}</span
+											>
+											<span class="hidden shrink-0 text-xs text-fg-subtle sm:inline"
+												>{c.authorName} · {relativeTime(toDate(c.commitTime))}</span
+											>
+										</a>
+									</li>
+								{:else}
+									<li class="text-xs text-fg-subtle">
+										No commit touched {scopeLabel} on this branch.
+									</li>
+								{/each}
+							</ul>
 						{/if}
 					</div>
 
