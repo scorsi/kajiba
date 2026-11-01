@@ -32,6 +32,12 @@ enum Command {
         #[arg(long)]
         ui_dir: Option<PathBuf>,
     },
+    /// Restore a verified dump offline into empty, pre-provisioned state directories.
+    Restore {
+        dump_dir: PathBuf,
+        #[arg(long)]
+        config: PathBuf,
+    },
     /// Inspect configuration offline.
     Config {
         #[command(subcommand)]
@@ -299,6 +305,17 @@ async fn main() -> ExitCode {
                 }
             };
         }
+        Command::Restore { dump_dir, config } => {
+            let result = match load_config(&config, false) {
+                Ok(config) => restore::run(&dump_dir, &config).await,
+                Err(err) => Err(err),
+            };
+            if let Err(err) = result {
+                log::error("restore-failed", &err);
+                return ExitCode::FAILURE;
+            }
+            return ExitCode::SUCCESS;
+        }
         Command::Config {
             command: ConfigCommand::Check { files, path },
         } => {
@@ -466,6 +483,26 @@ fn load_config(path: &std::path::Path, files: bool) -> Result<ServerConfig, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_offline_restore() {
+        assert_eq!(
+            Args::try_parse_from([
+                "kajiba-server",
+                "restore",
+                "/backup/dump",
+                "--config",
+                "server.toml"
+            ])
+            .unwrap()
+            .command,
+            Command::Restore {
+                dump_dir: "/backup/dump".into(),
+                config: "server.toml".into()
+            }
+        );
+        assert!(Args::try_parse_from(["kajiba-server", "restore", "/backup/dump"]).is_err());
+    }
 
     #[test]
     fn parses_serve_config_path() {

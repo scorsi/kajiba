@@ -261,7 +261,7 @@ async fn database_metadata(conn: &mut SqliteConnection) -> Result<(i64, Vec<Stri
     Ok((migrations.last().unwrap().0, repositories))
 }
 
-/// Read-only validation, shared with the future offline restore command.
+/// Read-only validation, shared with the offline restore command.
 pub(crate) async fn verify(root: &Path) -> Result<Manifest> {
     real_directory(root).map_err(|e| e.to_string())?;
     let path = root.join("manifest.json");
@@ -381,7 +381,7 @@ fn check_repository(path: &Path) -> Result<()> {
 fn encoded(path: &Path) -> String {
     URL_SAFE_NO_PAD.encode(path.as_os_str().as_bytes())
 }
-fn decode_path(key: &str) -> Result<PathBuf> {
+pub(super) fn decode_path(key: &str) -> Result<PathBuf> {
     let bytes = URL_SAFE_NO_PAD.decode(key).map_err(|e| e.to_string())?;
     let path = PathBuf::from(OsString::from_vec(bytes));
     if path.as_os_str().is_empty()
@@ -438,7 +438,7 @@ fn excluded(path: &Path, kind: &fs::FileType) -> bool {
             || (internal.parent() == Some(Path::new("objects/pack")) && name.starts_with(b"tmp_")))
 }
 
-fn copy_tree(
+pub(super) fn copy_tree(
     source: &Path,
     root: &Path,
     relative: &Path,
@@ -477,7 +477,7 @@ fn copy_tree(
     Ok(())
 }
 
-fn inventory(
+pub(super) fn inventory(
     source: &Path,
     relative: &Path,
     entries: &mut BTreeMap<String, Entry>,
@@ -512,7 +512,7 @@ fn inventory(
     Ok(())
 }
 
-fn sync_tree(path: &Path) -> io::Result<()> {
+pub(super) fn sync_tree(path: &Path) -> io::Result<()> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {

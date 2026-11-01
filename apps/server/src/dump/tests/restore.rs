@@ -195,3 +195,140 @@ async fn symlink_escapes_in_manifest_database_and_quarantine_are_refused() {
     }
     f.close().await;
 }
+
+fn destinations(f: &Fixture) -> (PathBuf, PathBuf, (u32, u32)) {
+    use std::os::unix::fs::MetadataExt;
+    let server = f.root.join("restored-server");
+    let git = f.root.join("restored-git");
+    fs::create_dir(&server).unwrap();
+    fs::create_dir(&git).unwrap();
+    let m = fs::metadata(&server).unwrap();
+    (server, git, (m.uid(), m.gid()))
+}
+
+#[tokio::test]
+async fn installation_refuses_occupied_locks_and_either_nonempty_destination() {
+    let mut f = Fixture::new().await;
+    let dump = f.dump().await.unwrap();
+    let before = contents(&dump);
+    let (server, git, owner) = destinations(&f);
+    for (path, name) in [(&server, "kajiba.lock"), (&git, "kajiba-git.lock")] {
+        let held = crate::state::StateLock::acquire(&path.join(name)).unwrap();
+        assert!(
+            crate::restore::install(&dump, &server, &git, owner, owner, &mut |_| Ok(()))
+                .await
+                .unwrap_err()
+                .contains("another instance holds")
+        );
+        drop(held);
+    }
+    for path in [&server, &git] {
+        fs::write(path.join("preserve"), "existing").unwrap();
+        assert!(
+            crate::restore::install(&dump, &server, &git, owner, owner, &mut |_| Ok(()))
+                .await
+                .unwrap_err()
+                .contains("not empty")
+        );
+        assert_eq!(fs::read(path.join("preserve")).unwrap(), b"existing");
+        fs::remove_file(path.join("preserve")).unwrap();
+    }
+    assert_eq!(contents(&dump), before);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn installation_rolls_back_copy_and_either_switch_failure_then_can_retry() {
+    let mut f = Fixture::new().await;
+    let dump = f.dump().await.unwrap();
+    let before = contents(&dump);
+    let (server, git, owner) = destinations(&f);
+    for phase in ["copy", "switch"] {
+        for fail_at in [1, 2] {
+            let mut count = 0;
+            let error = crate::restore::install(&dump, &server, &git, owner, owner, &mut |point| {
+                if point == phase {
+                    count += 1;
+                    if count == fail_at {
+                        return Err("injected filesystem failure".into());
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+            assert!(error.contains("injected filesystem failure"));
+            for (path, lock) in [(&server, "kajiba.lock"), (&git, "kajiba-git.lock")] {
+                assert_eq!(
+                    fs::read_dir(path)
+                        .unwrap()
+                        .map(|e| e.unwrap().file_name())
+                        .collect::<Vec<_>>(),
+                    [OsString::from(lock)]
+                );
+                let _lock = crate::state::StateLock::acquire(&path.join(lock)).unwrap();
+            }
+            assert_eq!(contents(&dump), before);
+        }
+    }
+    crate::restore::install(&dump, &server, &git, owner, owner, &mut |_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(git.join(format!("repos/{LIVE}.git/HEAD"))).unwrap(),
+        fs::read(dump.join(format!("git/repos/{LIVE}.git/HEAD"))).unwrap()
+    );
+    for (side, path) in [("server", &server), ("git", &git)] {
+        for relative in if side == "server" {
+            vec!["db", "db/kajiba.sqlite", "tmp/orphans/preserved"]
+        } else {
+            vec!["repos", "tmp/orphans/01ARZ3NDEKTSV4RRFFQ69G5FAX.git.lock"]
+        } {
+            let m = fs::metadata(path.join(relative)).unwrap();
+            assert_eq!(
+                m.permissions().mode() & 0o777,
+                if m.is_dir() { 0o750 } else { 0o640 }
+            );
+        }
+    }
+    assert_eq!(contents(&dump), before);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn installation_refuses_overlapping_destinations_and_lock_symlinks() {
+    let mut f = Fixture::new().await;
+    let dump = f.dump().await.unwrap();
+    let before = contents(&dump);
+    let (server, git, owner) = destinations(&f);
+    assert!(
+        crate::restore::install(&dump, &server, &server, owner, owner, &mut |_| Ok(()))
+            .await
+            .unwrap_err()
+            .contains("overlap")
+    );
+    let nested = server.join("nested");
+    fs::create_dir(&nested).unwrap();
+    assert!(
+        crate::restore::install(&dump, &server, &nested, owner, owner, &mut |_| Ok(()))
+            .await
+            .unwrap_err()
+            .contains("overlap")
+    );
+    fs::remove_dir(nested).unwrap();
+    let saved = f.root.join("preserve");
+    fs::write(&saved, "untouched").unwrap();
+    for (path, name) in [(&server, "kajiba.lock"), (&git, "kajiba-git.lock")] {
+        symlink(&saved, path.join(name)).unwrap();
+        assert!(
+            crate::restore::install(&dump, &server, &git, owner, owner, &mut |_| Ok(()))
+                .await
+                .unwrap_err()
+                .contains("not empty")
+        );
+        assert_eq!(fs::read(&saved).unwrap(), b"untouched");
+        fs::remove_file(path.join(name)).unwrap();
+    }
+    assert_eq!(contents(&dump), before);
+    f.close().await;
+}
