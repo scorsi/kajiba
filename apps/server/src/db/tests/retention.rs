@@ -290,3 +290,32 @@ async fn a_finished_worktree_runs_bundle_goes_at_once_its_run_and_logs_stay() {
     assert!(!bundles.join("00000000000000000000000002.bundle").exists());
     assert!(logs.join("00000000000000000000000004.log").exists());
 }
+
+#[tokio::test]
+async fn scheduled_retention_waits_for_maintenance_before_deleting() {
+    let dir = TempDir::new();
+    let logs = dir.0.join("logs");
+    let (mut writer, _) = open(&dir.database()).await.unwrap();
+    populate(&mut writer, &logs).await;
+    let writer = crate::db::Writer::new(writer.into());
+    let pass = crate::db::retention::Pass {
+        logs: logs.clone(),
+        bundles: dir.0.join("bundles"),
+        log_retention: Duration::ZERO,
+        worktree_retention: Duration::from_secs(86400),
+    };
+    fs::create_dir(&pass.bundles).unwrap();
+    let maintenance = crate::transport::maintenance::Admission::default();
+    let closed = maintenance.close().unwrap();
+    let queued = pass.run_scheduled(&writer, &maintenance);
+    tokio::pin!(queued);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut queued)
+            .await
+            .is_err()
+    );
+    assert_eq!(indexed(&mut *writer.lock().await).await.len(), 3);
+    drop(closed);
+    queued.await.unwrap();
+    assert_eq!(indexed(&mut *writer.lock().await).await, [3]);
+}

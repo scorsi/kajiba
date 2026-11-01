@@ -90,9 +90,9 @@ impl EventBus {
 const RETRY_INITIAL: Duration = Duration::from_millis(100);
 const RETRY_CAP: Duration = Duration::from_secs(30);
 
-type ApplyFuture<'a> = Pin<Box<dyn Future<Output = Result<(), sqlx::Error>> + 'a>>;
+type ApplyFuture<'a> = Pin<Box<dyn Future<Output = Result<(), sqlx::Error>> + Send + 'a>>;
 
-trait RegisteredHandler {
+trait RegisteredHandler: Send {
     fn name(&self) -> &'static str;
     fn apply<'a>(
         &'a mut self,
@@ -156,7 +156,71 @@ impl Dispatcher {
         });
     }
 
+    /// Drain every handler to a fixed point; any failure aborts maintenance.
+    pub(crate) async fn flush(
+        &mut self,
+        bus: &EventBus,
+        writer: &mut SqliteConnection,
+    ) -> Result<(), String> {
+        loop {
+            let mut progressed = false;
+            for state in &mut self.handlers {
+                while bus
+                    .dispatch(writer, state.handler.as_mut())
+                    .await
+                    .map_err(|e| e.to_string())?
+                {
+                    progressed = true;
+                }
+                state.retry_at = None;
+                state.backoff = RETRY_INITIAL;
+            }
+            if !progressed {
+                return Ok(());
+            }
+        }
+    }
+
+    /// One finite pass; release maintenance admission before waiting for retry.
+    pub(crate) async fn tick(
+        &mut self,
+        bus: &EventBus,
+        writer: &Mutex<SqliteConnection>,
+        clock: &impl Clock,
+    ) -> (bool, Duration) {
+        let mut progressed = false;
+        for state in &mut self.handlers {
+            if state.retry_at.is_some_and(|at| at > clock.now()) {
+                continue;
+            }
+            match bus
+                .dispatch(&mut *writer.lock().await, state.handler.as_mut())
+                .await
+            {
+                Ok(handled) => {
+                    state.retry_at = None;
+                    state.backoff = RETRY_INITIAL;
+                    progressed |= handled;
+                }
+                Err(_) => {
+                    state.retry_at = Some(clock.now() + state.backoff);
+                    state.backoff = (state.backoff * 2).min(RETRY_CAP);
+                }
+            }
+        }
+        let delay = self
+            .handlers
+            .iter()
+            .filter_map(|s| s.retry_at)
+            .min()
+            .map_or(Duration::from_secs(3600), |at| {
+                at.saturating_duration_since(clock.now())
+            });
+        (progressed, delay)
+    }
+
     /// Drain immediately on startup, before waiting for any commit notification.
+    #[cfg(test)]
     pub async fn run(&mut self, bus: &EventBus, writer: &Mutex<SqliteConnection>) {
         loop {
             self.drain(bus, writer, &SystemClock).await;
@@ -165,6 +229,7 @@ impl Dispatcher {
     }
 
     /// Retry deadlines belong to individual handlers; a stuck handler cannot block others.
+    #[cfg(test)]
     pub async fn drain(
         &mut self,
         bus: &EventBus,
@@ -172,61 +237,32 @@ impl Dispatcher {
         clock: &impl Clock,
     ) {
         loop {
-            let mut progressed = false;
-            for state in &mut self.handlers {
-                if state
-                    .retry_at
-                    .is_some_and(|deadline| deadline > clock.now())
-                {
-                    continue;
-                }
-                // Hold the writer for one event only, so request transactions interleave.
-                let result = bus
-                    .dispatch(&mut *writer.lock().await, state.handler.as_mut())
-                    .await;
-                match result {
-                    Ok(handled) => {
-                        state.retry_at = None;
-                        state.backoff = RETRY_INITIAL;
-                        progressed |= handled;
-                    }
-                    Err(_) => {
-                        state.retry_at = Some(clock.now() + state.backoff);
-                        state.backoff = (state.backoff * 2).min(RETRY_CAP);
-                    }
-                }
-            }
+            let (progressed, delay) = self.tick(bus, writer, clock).await;
             if progressed {
                 continue;
             }
-            let Some(deadline) = self
-                .handlers
-                .iter()
-                .filter_map(|state| state.retry_at)
-                .min()
-            else {
+            if self.handlers.iter().all(|s| s.retry_at.is_none()) {
                 return;
-            };
-            // Commits may make work available to healthy handlers during a retry wait.
+            }
             tokio::select! {
-                () = clock.sleep(deadline.saturating_duration_since(clock.now())) => {},
+                () = clock.sleep(delay) => {},
                 () = bus.notified() => {},
             }
         }
     }
 }
 
-pub trait Handler {
+pub trait Handler: Send {
     /// Persistent checkpoint identity; never rename a deployed handler.
     const NAME: &'static str;
 
     /// Write only through this connection. Effects must have a unique event-derived
     /// key and tolerate conflicts on replay; external effects must enqueue DB jobs.
-    async fn apply(
+    fn apply(
         &mut self,
         transaction: &mut SqliteConnection,
         event: &Event,
-    ) -> Result<(), sqlx::Error>;
+    ) -> impl Future<Output = Result<(), sqlx::Error>> + Send;
 }
 
 #[derive(Debug, PartialEq, Eq, FromRow)]

@@ -141,6 +141,7 @@ impl Link {
                 Ok(hello) => {
                     if generation.as_ref() != Some(&hello.generation) || unavailable {
                         if let Some(admin) = recovery {
+                            let _completion = admin.maintenance.completion().await;
                             let mut writer = admin.writer.lock().await;
                             let result = snapshot(
                                 client.as_mut().unwrap(),

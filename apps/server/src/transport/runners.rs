@@ -273,6 +273,7 @@ impl Runners {
         request_id: &str,
         outbound: Outbound,
     ) -> Result<(i64, u64, oneshot::Receiver<()>), Status> {
+        let _permit = self.health.maintenance.background().await;
         let declared =
             self.health.runners.get().ok_or_else(|| {
                 refused(tonic::Code::Unavailable, "MAINTENANCE", "starting".into())
@@ -285,6 +286,11 @@ impl Runners {
         let runners = declared.current();
         let Some((name, declaration)) = declared_by(&runners, peer) else {
             let mut writer = writer.lock().await;
+            self.health
+                .maintenance
+                .resume_leases(&mut writer)
+                .await
+                .map_err(internal)?;
             let disabled: Option<i64> = sqlx::query_scalar(
                 "SELECT 1 FROM runner WHERE name = ? AND disabled_at IS NOT NULL",
             )
@@ -311,6 +317,11 @@ impl Runners {
             ));
         }
         let mut writer = writer.lock().await;
+        self.health
+            .maintenance
+            .resume_leases(&mut writer)
+            .await
+            .map_err(internal)?;
         let id: i64 = sqlx::query_scalar("SELECT id FROM runner WHERE name = ?")
             .bind(name)
             .fetch_one(&mut *writer)
@@ -479,11 +490,21 @@ impl Runners {
 
     /// A stream ended by the runner or by an error; a replaced one leaves the row connected.
     async fn disconnected(&self, id: i64, name: &str, generation: u64, request_id: &str) {
+        let _permit = self.health.maintenance.background().await;
+        self.disconnected_admitted(id, name, generation, request_id)
+            .await;
+    }
+
+    async fn disconnected_admitted(&self, id: i64, name: &str, generation: u64, request_id: &str) {
         let (Some(writer), Some(declared)) = (self.health.writer.get(), self.health.runners.get())
         else {
             return;
         };
         let mut writer = writer.lock().await;
+        if let Err(err) = self.health.maintenance.resume_leases(&mut writer).await {
+            tracing::error!(event = "lease-resume-failed", err = %err);
+            return;
+        }
         if !self.forget(name, generation) {
             return;
         }
@@ -527,6 +548,9 @@ impl Runners {
     }
 
     async fn pass(&self, now: i64) {
+        let Ok(_permit) = self.health.maintenance.admit() else {
+            return;
+        };
         let (Some(writer), Some(declared)) = (self.health.writer.get(), self.health.runners.get())
         else {
             return;
@@ -544,9 +568,13 @@ impl Runners {
             .map(|(name, live)| (name.clone(), live.generation, live.offer.runner_id))
             .collect();
         for (name, generation, id) in expired {
-            self.disconnected(id, &name, generation, "").await;
+            self.disconnected_admitted(id, &name, generation, "").await;
         }
         let mut writer = writer.lock().await;
+        if let Err(err) = self.health.maintenance.resume_leases(&mut writer).await {
+            tracing::error!(event = "lease-resume-failed", err = %err);
+            return;
+        }
         let result = async {
             let mut tx = writer.begin().await?;
             let fresh: Vec<i64> = sqlx::query_scalar(
@@ -612,7 +640,7 @@ impl Runners {
                 });
                 // A stalled runner must not stop matching or lease expiry (0109).
                 if outbound.try_send(Ok(response(message))).is_err() {
-                    self.disconnected(assigned.runner_id, &name, generation, "")
+                    self.disconnected_admitted(assigned.runner_id, &name, generation, "")
                         .await;
                 }
             }
@@ -622,6 +650,7 @@ impl Runners {
     /// Answer each in-flight attempt of a reconnected runner with continue, followed by
     /// its log acknowledgment so the runner resends from there, or cancel (0008).
     async fn resume(&self, id: i64, attempts: &[String]) -> Result<Vec<ConnectResponse>, Status> {
+        let _permit = self.health.maintenance.background().await;
         if attempts.is_empty() {
             return Ok(Vec::new());
         }
@@ -631,6 +660,11 @@ impl Runners {
             .get()
             .ok_or_else(|| internal("no writer"))?;
         let mut writer = writer.lock().await;
+        self.health
+            .maintenance
+            .resume_leases(&mut writer)
+            .await
+            .map_err(internal)?;
         let mut tx = writer.begin().await.map_err(internal)?;
         let answers = attempts::resume(&mut tx, id, attempts, crate::db::runs::now())
             .await
@@ -670,11 +704,17 @@ impl Runners {
         request_id: &str,
         message: Message,
     ) -> Result<Vec<ConnectResponse>, Status> {
+        let _permit = self.health.maintenance.background().await;
         let (writer, declared) = match (self.health.writer.get(), self.health.runners.get()) {
             (Some(writer), Some(declared)) => (writer, declared),
             _ => return Err(internal("not started")),
         };
         let mut writer = writer.lock().await;
+        self.health
+            .maintenance
+            .resume_leases(&mut writer)
+            .await
+            .map_err(internal)?;
         let now = crate::db::runs::now();
         let mut tx = writer.begin().await.map_err(internal)?;
         let mut truncated = false;
@@ -1006,6 +1046,13 @@ impl Runners {
                 },
                 () = out.closed() => return,
                 _ = lease.tick() => {
+                    let _permit = self.health.maintenance.background().await;
+                    if let Some(writer) = self.health.writer.get() {
+                        if let Err(err) = self.health.maintenance.resume_leases(&mut *writer.lock().await).await {
+                            let _ = out.try_send(Err(internal(err)));
+                            return;
+                        }
+                    }
                     let leased = match self.health.database.get() {
                         Some(database) => match database.acquire().await {
                             Ok(mut connection) => {
@@ -1128,6 +1175,15 @@ impl Runners {
         peer: Option<&Peer>,
         attempt: &str,
     ) -> Result<((i64, String), (String, String, String, String)), Status> {
+        let _permit = self.health.maintenance.background().await;
+        if let Some(writer) = self.health.writer.get() {
+            self.health
+                .maintenance
+                .resume_leases(&mut *writer.lock().await)
+                .await
+                .map_err(internal)?;
+        }
+
         let (Some(declared), Some(database)) =
             (self.health.runners.get(), self.health.database.get())
         else {

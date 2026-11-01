@@ -1982,3 +1982,114 @@ async fn cancelling_a_silent_running_job_pushes_cancel_and_ignores_late_results(
     );
     assert!(forge.metric("kajiba_runs_total{result=\"cancelled\"} 1"));
 }
+
+#[tokio::test]
+async fn maintenance_defers_runner_messages_disconnect_and_reconnect() {
+    let state = Forge::state().await;
+    let runners = Runners::new(state.health.clone(), Arc::default());
+    let (out, _received) = mpsc::channel(4);
+    let (id, generation, _ended) = runners
+        .admit(Some(&peer(BUILD_1)), &hello("build-1"), "test", out)
+        .await
+        .unwrap();
+    let closed = state.health.maintenance.close().unwrap();
+    let heartbeat = runners.handle(
+        (id, "build-1"),
+        "test",
+        Message::Heartbeat(Default::default()),
+    );
+    let disconnect = runners.disconnected(id, "build-1", generation, "test");
+    let (out, _received) = mpsc::channel(4);
+    let identity = peer(BUILD_2);
+    let greeting = hello("build-2");
+    let reconnect = runners.admit(Some(&identity), &greeting, "test", out);
+    tokio::pin!(heartbeat, disconnect, reconnect);
+    for _ in 0..2 {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut heartbeat)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut disconnect)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut reconnect)
+                .await
+                .is_err()
+        );
+    }
+    // Scheduler expiry/assignment is a no-op even with a far-future clock.
+    runners
+        .pass(crate::db::runs::now() + attempts::LEASE_MS * 10)
+        .await;
+    let connected: i64 = sqlx::query_scalar("SELECT connected FROM runner WHERE id = ?")
+        .bind(id)
+        .fetch_one(&mut *state.health.writer.get().unwrap().lock().await)
+        .await
+        .unwrap();
+    assert_eq!(connected, 1);
+    drop(closed);
+    assert!(heartbeat.await.unwrap().is_empty());
+    disconnect.await;
+    reconnect.await.unwrap();
+    assert!(!runners.live.lock().unwrap().1.contains_key("build-1"));
+    assert!(runners.live.lock().unwrap().1.contains_key("build-2"));
+}
+
+#[tokio::test]
+async fn maintenance_extends_live_leases_once_without_reviving_expired_attempts() {
+    let state = Forge::state().await;
+    let writer = state.health.writer.get().unwrap();
+    {
+        let mut writer = writer.lock().await;
+        sqlx::raw_sql("INSERT INTO user (id, public_id, name, kind, is_admin, source, created_at) VALUES (1, '00000000000000000000000001', 'alice', 'local', 0, 'config', 0);
+            INSERT INTO repo (id, public_id, owner_id, name, visibility, ci_mode, default_branch, description, created_at, config_key) VALUES (1, '00000000000000000000000001', 1, 'demo', 'public', 'push', 'main', '', 0, 'demo');
+            INSERT INTO run (id, public_id, repo_id, sha, trigger, state, created_at) VALUES (1, '00000000000000000000000001', 1, 'a', 'manual', 'running', 0);
+            INSERT INTO job (id, public_id, run_id, name, requirements, replayable, max_attempts, state, created_at) VALUES (1, '00000000000000000000000001', 1, 'flake-check', '{}', 1, 3, 'running', 0);
+            INSERT INTO job_attempt (id, public_id, job_id, number, runner_id, state, lease_expires_at, started_at) VALUES
+            (1, '00000000000000000000000001', 1, 1, 1, 'running', 0, 0),
+            (2, '00000000000000000000000002', 1, 2, 1, 'failed', 0, 0),
+            (3, '00000000000000000000000003', 1, 3, 1, 'running', 0, 0)").execute(&mut *writer).await.unwrap();
+        sqlx::query("UPDATE job_attempt SET lease_expires_at = ? WHERE id = 3")
+            .bind(crate::db::runs::now() + 60000)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+    }
+    let before: Vec<i64> =
+        sqlx::query_scalar("SELECT lease_expires_at FROM job_attempt ORDER BY id")
+            .fetch_all(&mut *writer.lock().await)
+            .await
+            .unwrap();
+    let closed = state.health.maintenance.close().unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    drop(closed);
+    state
+        .health
+        .maintenance
+        .resume_leases(&mut *writer.lock().await)
+        .await
+        .unwrap();
+    let after: Vec<i64> =
+        sqlx::query_scalar("SELECT lease_expires_at FROM job_attempt ORDER BY id")
+            .fetch_all(&mut *writer.lock().await)
+            .await
+            .unwrap();
+    assert_eq!(&after[..2], &[0, 0]);
+    assert!(after[2] >= before[2] + 30);
+    state
+        .health
+        .maintenance
+        .resume_leases(&mut *writer.lock().await)
+        .await
+        .unwrap();
+    let again: Vec<i64> =
+        sqlx::query_scalar("SELECT lease_expires_at FROM job_attempt ORDER BY id")
+            .fetch_all(&mut *writer.lock().await)
+            .await
+            .unwrap();
+    assert_eq!(again, after);
+}

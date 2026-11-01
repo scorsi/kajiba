@@ -227,13 +227,15 @@ async fn main() -> ExitCode {
             // Request handlers that write (enrollment, push hooks) take a clone of this handle.
             let writer = db::Writer::new(writer.into());
             // The mirror handler registers here when it is implemented.
-            let mut dispatcher = db::events::Dispatcher::default();
+            let maintenance = health.maintenance.clone();
+            let mut dispatcher = maintenance.dispatcher.lock().await;
             let wake = std::sync::Arc::new(tokio::sync::Notify::new());
             dispatcher.register(db::runs::Ci {
                 now: db::runs::now,
                 repos: config.git.state_dir.join("repos"),
                 wake: wake.clone(),
             });
+            drop(dispatcher);
             let retention = db::retention::Pass {
                 logs: config.state_dir.join("ci/logs"),
                 bundles: config.state_dir.join("ci/bundles"),
@@ -278,10 +280,10 @@ async fn main() -> ExitCode {
             return match tokio::select! {
                 result = transport::serve(&config, health, readers, bus.clone(), admin, registry) => result,
                 () = reload.run(hangup) => unreachable!("reload runs until shutdown"),
-                () = dispatcher.run(&bus, &writer) => unreachable!("dispatcher runs until shutdown"),
-                () = db::sessions::purge_periodically(&writer) => unreachable!("purge runs until shutdown"),
-                () = db::retention::purge_daily(&writer, &retention, config.ci.run_at) => unreachable!("retention runs until shutdown"),
-                () = gate.recover_periodically(&db::events::SystemClock, &writer, &bus, &config.git.state_dir, &store) => unreachable!("recovery runs until shutdown"),
+                () = maintenance.dispatch(&bus, &writer) => unreachable!("dispatcher runs until shutdown"),
+                () = db::sessions::purge_periodically(&writer, &maintenance) => unreachable!("purge runs until shutdown"),
+                () = db::retention::purge_daily(&writer, &retention, config.ci.run_at, &maintenance) => unreachable!("retention runs until shutdown"),
+                () = gate.recover_periodically(&db::events::SystemClock, &writer, &bus, &config.git.state_dir, &store, &maintenance) => unreachable!("recovery runs until shutdown"),
             } {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {

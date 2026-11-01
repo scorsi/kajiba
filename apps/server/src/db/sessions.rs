@@ -55,11 +55,15 @@ pub async fn purge(writer: &mut SqliteConnection, now: i64) -> Result<u64, sqlx:
 const PURGE_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Purges at startup, then every hour; a failure is logged and the next pass retries.
-pub async fn purge_periodically(writer: &super::Writer) {
+pub async fn purge_periodically(
+    writer: &super::Writer,
+    maintenance: &crate::transport::maintenance::Admission,
+) {
     let mut interval = tokio::time::interval(PURGE_INTERVAL);
     loop {
         // The first tick completes at once: the startup purge.
         interval.tick().await;
+        let _permit = maintenance.background().await;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as i64);

@@ -1292,6 +1292,7 @@ async fn post_receive_validates_session_and_wakes_recovery_without_a_timer_tick(
         &admin.bus,
         &admin.state_dir,
         &kajiba_gitstore::Gix,
+        &admin.maintenance,
     );
     tokio::pin!(recovery);
     let converted = async {
@@ -1721,4 +1722,111 @@ async fn maintenance_refuses_writing_sessions_and_existing_pushes_but_allows_clo
     request.kind = SessionKind::ReceivePack.into();
     request.session_id = kajiba_core::new_id().unwrap();
     assert!(gate.open_session(Request::new(request)).await.is_ok());
+}
+
+#[tokio::test]
+async fn maintenance_waits_for_session_exit_before_quiescence() {
+    let (_state, admin, gate, alice) = session_fixture().await;
+    admin
+        .gate
+        .rebuild(
+            &mut *admin.writer.lock().await,
+            "00000000000000000000000001",
+            vec![],
+        )
+        .await
+        .unwrap();
+    gate.hello(Request::new(HelloRequest {
+        version: env!("CARGO_PKG_VERSION").into(),
+        generation: "00000000000000000000000001".into(),
+    }))
+    .await
+    .unwrap();
+    let session_id = kajiba_core::new_id().unwrap();
+    gate.open(&OpenSessionRequest {
+        generation: gate.admission.generation().unwrap(),
+        session_id: session_id.clone(),
+        kind: kajiba_proto::git::v1::SessionKind::ReceivePack as i32,
+        user_public_id: alice,
+        repository: Some(open_session_request::Repository::RepoAddress(
+            "alice/demo".into(),
+        )),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let mut daemon = crate::transport::git_side::fake::Fake::start(&admin.state_dir).await;
+    {
+        let drain = admin
+            .maintenance
+            .close()
+            .unwrap()
+            .drain(&admin, &mut daemon.client);
+        tokio::pin!(drain);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut drain)
+                .await
+                .is_err()
+        );
+        assert!(admin.writer.try_lock().is_ok());
+        // Generation-local hooks and completion remain callable with admission closed.
+        gate.session_exited(Request::new(SessionExitedRequest {
+            session_id,
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+        assert!(admin.gate.quiescent());
+        let guard = drain.await.unwrap();
+        assert!(admin.maintenance.admit().is_err());
+        drop(guard);
+    }
+    assert!(admin.maintenance.admit().is_ok());
+}
+
+#[tokio::test]
+async fn maintenance_refuses_retained_pending_push_and_reopens() {
+    let (_state, admin, _gate, _alice) = session_fixture().await;
+    let mut daemon = crate::transport::git_side::fake::Fake::start(&admin.state_dir).await;
+    let mut writer = admin.writer.lock().await;
+    admin
+        .gate
+        .rebuild(&mut writer, "00000000000000000000000001", vec![])
+        .await
+        .unwrap();
+    let repo: i64 = sqlx::query_scalar("SELECT id FROM repo")
+        .fetch_one(&mut *writer)
+        .await
+        .unwrap();
+    admin
+        .gate
+        .admit(
+            &mut writer,
+            repo,
+            None,
+            "retained",
+            &[crate::db::pushes::RefUpdate {
+                name: "refs/heads/main".into(),
+                old: "1".repeat(40),
+                new: "2".repeat(40),
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+    admin.gate.exited(repo);
+    drop(writer);
+    let result = admin
+        .maintenance
+        .close()
+        .unwrap()
+        .drain(&admin, &mut daemon.client)
+        .await;
+    assert!(matches!(result, Err(ref error) if error.contains("reconciliation incomplete")));
+    assert!(admin.maintenance.admit().is_ok());
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM pending_push")
+        .fetch_one(&mut *admin.writer.lock().await)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 1);
 }

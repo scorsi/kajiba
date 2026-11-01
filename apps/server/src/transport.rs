@@ -783,7 +783,7 @@ mod gate;
 pub mod git_http;
 pub(crate) mod git_side;
 pub mod local;
-mod maintenance;
+pub(crate) mod maintenance;
 mod passkeys;
 pub mod raw;
 pub mod repos;

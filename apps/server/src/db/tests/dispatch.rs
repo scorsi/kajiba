@@ -648,3 +648,63 @@ async fn sigkill_after_commit_replays_exactly_one_effect_on_restart() {
     readers.close().await;
     writer.into_inner().close().await.unwrap();
 }
+
+#[tokio::test]
+async fn maintenance_flush_fails_without_checkpoint_then_replays_once() {
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    setup(&mut writer).await;
+    let bus = EventBus::default();
+    let mut tx = writer.begin().await.unwrap();
+    let id = append(&mut tx, 1).await;
+    bus.commit(tx).await.unwrap();
+    let mut dispatcher = crate::db::events::Dispatcher::default();
+    dispatcher.register(FailingHandler {
+        remaining: 1,
+        readers: readers.clone(),
+        previous: None,
+        check_mirror: false,
+    });
+    assert!(dispatcher.flush(&bus, &mut writer).await.is_err());
+    assert_eq!(checkpoint(&readers, "ci").await, None);
+    assert!(effects(&readers, "ci").await.is_empty());
+    dispatcher.flush(&bus, &mut writer).await.unwrap();
+    dispatcher.flush(&bus, &mut writer).await.unwrap();
+    assert_eq!(effects(&readers, "ci").await, [id]);
+    assert_eq!(checkpoint(&readers, "ci").await, Some(id));
+}
+
+#[tokio::test]
+async fn maintenance_queues_the_live_dispatcher_and_release_replays_once() {
+    let dir = TempDir::new();
+    let (mut writer, readers) = open(&dir.database()).await.unwrap();
+    setup(&mut writer).await;
+    let bus = EventBus::default();
+    let mut tx = writer.begin().await.unwrap();
+    let id = append(&mut tx, 1).await;
+    bus.commit(tx).await.unwrap();
+    let writer = crate::db::Writer::new(writer.into());
+    let maintenance = crate::transport::maintenance::Admission::default();
+    maintenance
+        .dispatcher
+        .lock()
+        .await
+        .register(TestHandler::<false> { fail: false });
+    let closed = maintenance.close().unwrap();
+    let dispatch = maintenance.dispatch(&bus, &writer);
+    tokio::pin!(dispatch);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut dispatch)
+            .await
+            .is_err()
+    );
+    assert!(effects(&readers, "ci").await.is_empty());
+    drop(closed);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::select! {
+            () = &mut dispatch => panic!("dispatcher stopped"),
+            () = async { while checkpoint(&readers, "ci").await != Some(id) { tokio::task::yield_now().await; } } => {},
+        }
+    }).await.unwrap();
+    assert_eq!(effects(&readers, "ci").await, [id]);
+}

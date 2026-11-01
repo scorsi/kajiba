@@ -60,6 +60,10 @@ impl Gate {
         self.wake.notify_one();
     }
 
+    pub(crate) fn quiescent(&self) -> bool {
+        self.sessions.lock().unwrap().is_empty() && self.running.lock().unwrap().is_empty()
+    }
+
     pub fn running(&self, repo: i64) -> bool {
         self.running.lock().unwrap().contains(&repo)
     }
@@ -430,12 +434,14 @@ impl Gate {
         bus: &EventBus,
         state_dir: &Path,
         store: &impl GitStore,
+        maintenance: &crate::transport::maintenance::Admission,
     ) {
         loop {
             tokio::select! {
                 () = clock.sleep(RECOVERY_INTERVAL) => {},
                 () = self.wake.notified() => {},
             }
+            let _permit = maintenance.background().await;
             self.recover_once(&mut *writer.lock().await, bus, state_dir, store)
                 .await;
         }

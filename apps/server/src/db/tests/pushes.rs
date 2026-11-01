@@ -306,7 +306,8 @@ async fn the_recovery_timer_waits_its_interval_then_retries_each_tick() {
             .unwrap()
     };
     {
-        let recovery = gate.recover_periodically(&clock, &writer, &bus, &dir, &Gix);
+        let maintenance = crate::transport::maintenance::Admission::default();
+        let recovery = gate.recover_periodically(&clock, &writer, &bus, &dir, &Gix, &maintenance);
         tokio::pin!(recovery);
         // Runs the loop until its next sleep, i.e. until the current pass is over.
         let mut tick = async || {

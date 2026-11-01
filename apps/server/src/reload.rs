@@ -46,6 +46,7 @@ impl Reload {
     }
 
     async fn apply(&mut self) -> Result<Vec<&'static str>, String> {
+        let _permit = self.health.maintenance.background().await;
         let next = crate::load_config(&self.path, true)?;
         let restart = self.running.restart_keys(&next);
         let mut applied = self.running.clone();
@@ -136,7 +137,19 @@ mod tests {
             config(&dir.0, "[repos.tools]\nowner = 'alice'\ndescription = ''\n"),
         )
         .unwrap();
-        assert_eq!(reload.reload().await, Ok(vec![]));
+        let closed = reload.health.maintenance.close().unwrap();
+        {
+            let queued = reload.reload();
+            tokio::pin!(queued);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(20), &mut queued)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(count(&writer, repos).await, 1);
+            drop(closed);
+            assert_eq!(queued.await, Ok(vec![]));
+        }
         assert_eq!(
             (count(&writer, tokens).await, count(&writer, repos).await),
             (0, 2)

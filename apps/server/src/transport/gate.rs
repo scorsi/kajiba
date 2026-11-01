@@ -50,6 +50,7 @@ impl GateService for Gate {
                 details,
             ));
         }
+        let _completion = self.maintenance.completion().await;
         let _writer = self.writer.lock().await;
         let mut generation = self.generation.lock().unwrap();
         if generation.as_ref() != Some(&request.generation) {
@@ -146,6 +147,7 @@ impl GateService for Gate {
         &self,
         request: Request<SessionExitedRequest>,
     ) -> Result<Response<SessionExitedResponse>, Status> {
+        let _completion = self.maintenance.completion().await;
         let request = request.into_inner();
         if !kajiba_core::names::is_public_id(&request.session_id) {
             return Err(rpc_error(

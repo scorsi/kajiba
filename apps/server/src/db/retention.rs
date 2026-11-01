@@ -282,15 +282,17 @@ pub fn next_run(now: i64, (hour, minute): (u8, u8)) -> i64 {
 
 /// The daily pass at `run_at`, local time; the operator also runs it on demand
 /// (`kajiba-server admin retention`).
-pub async fn purge_daily(writer: &super::Writer, pass: &Pass, run_at: (u8, u8)) {
+pub async fn purge_daily(
+    writer: &super::Writer,
+    pass: &Pass,
+    run_at: (u8, u8),
+    maintenance: &crate::transport::maintenance::Admission,
+) {
     loop {
         let now = super::runs::now() / 1000;
         let wait = next_run(now, run_at) - now;
         tokio::time::sleep(Duration::from_secs(wait.max(1) as u64)).await;
-        match pass
-            .run(&mut *writer.lock().await, super::runs::now())
-            .await
-        {
+        match pass.run_scheduled(writer, maintenance).await {
             Ok((logs, worktree_runs)) => {
                 tracing::info!(event = "retention-completed", logs, worktree_runs)
             }
@@ -310,6 +312,16 @@ pub struct Pass {
 }
 
 impl Pass {
+    pub(crate) async fn run_scheduled(
+        &self,
+        writer: &super::Writer,
+        maintenance: &crate::transport::maintenance::Admission,
+    ) -> Result<(u64, u64), String> {
+        let _permit = maintenance.background().await;
+        self.run(&mut *writer.lock().await, super::runs::now())
+            .await
+    }
+
     /// Worktree runs, then old logs; returns how many attempts lost their logs and how
     /// many worktree runs were deleted.
     pub async fn run(&self, writer: &mut SqliteConnection, now: i64) -> Result<(u64, u64), String> {
