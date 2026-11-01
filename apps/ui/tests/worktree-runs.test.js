@@ -45,6 +45,7 @@ test("worktree labels show user, base and checks; they never fail a branch", asy
         runs,
       },
     ],
+    runs,
     runners: [],
     mirrors: [],
   });

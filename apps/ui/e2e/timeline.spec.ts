@@ -23,6 +23,7 @@ test("activity: commits by author, a failed default-branch run, the reader's vie
   page,
   browser,
 }) => {
+  test.setTimeout(120_000);
   const flag = env("KAJIBA_E2E_FAIL_FLAG");
   writeFileSync(flag, "");
   let id: string;
@@ -63,6 +64,70 @@ test("activity: commits by author, a failed default-branch run, the reader's vie
     page.getByText("Add the README and a guide").first(),
   ).toBeVisible();
   await expect(page.getByText("Alice").first()).toBeVisible();
+
+  // A new run appears immediately and does not hide the unresolved failure.
+  const hold = env("KAJIBA_E2E_HOLD_FLAG");
+  writeFileSync(hold, "");
+  let recovery: string;
+  // Pulse also contains passed badges for earlier runs.
+  const runStatus = page
+    .getByRole("region", { name: "Pulse" })
+    .getByRole("heading", { level: 1 })
+    .locator("..");
+  try {
+    recovery = execFileSync(
+      "kajiba",
+      [
+        "--token-file",
+        env("KAJIBA_E2E_TOKEN_FILE"),
+        "--development",
+        "ci",
+        "run",
+        "--detach",
+        "alice/demo",
+        env("KAJIBA_E2E_MAIN_SHA"),
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    await page.goto("/?history=1&kind=ci");
+    await expect(
+      attention.locator(`a[href="/-/runs/${recovery}"]`),
+    ).toBeVisible();
+    await expect(attention).toContainText("In progress");
+    await expect(attention.locator(`a[href="/-/runs/${id}"]`)).toBeVisible();
+    await expect(
+      page
+        .getByRole("region", { name: "History" })
+        .locator(`a[href="/-/runs/${recovery}"]`),
+    ).toBeVisible();
+    await page.goto(`/-/runs/${recovery}`);
+    await expect(runStatus).toContainText(/queued|running/);
+    await expect(runStatus).not.toContainText("passed");
+  } finally {
+    rmSync(hold, { force: true });
+  }
+  await expect(runStatus.getByText("passed", { exact: true })).toBeVisible({
+    timeout: 60_000,
+  });
+  await page.goto("/?history=1&kind=ci");
+  await expect(
+    page.getByRole("checkbox", { name: "Hide fixed failures" }),
+  ).toBeChecked();
+  await expect(attention.locator(`a[href="/-/runs/${id}"]`)).toHaveCount(0);
+  await expect(
+    page
+      .getByRole("region", { name: "History" })
+      .locator(`a[href="/-/runs/${id}"]`)
+      .locator(".."),
+  ).toContainText("failed · fixed");
+  await page.getByRole("checkbox", { name: "Hide fixed failures" }).uncheck();
+  await expect(attention.locator(`a[href="/-/runs/${id}"]`)).toContainText(
+    "fixed",
+  );
+  await page.reload();
+  await expect(
+    page.getByRole("checkbox", { name: "Hide fixed failures" }),
+  ).not.toBeChecked();
 
   // The reader sees the same repository, with no administrators' lines.
   const other = await browser.newContext();

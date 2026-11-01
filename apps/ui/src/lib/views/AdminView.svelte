@@ -7,7 +7,7 @@
 	  Runners   — grouped by host: state, labels, what it runs now, 7-day figures
 	  Mirrors   — push mirrors (open when one fails)
 	  Users     — users and their roles across repositories (folded)
-	  History   — operational events: failed runs, mirrors, runners (folded)
+	  History   — operational events: failed and active runs, mirrors, runners (folded)
 
 	Band state lives in the URL: runners, mirrors, users, history, kind.
 -->
@@ -435,8 +435,8 @@
 
 	<!-- History -->
 	<BandStrip label="History" open={historyOpen} href={toggle('history', historyOpen, false)}>
-		{#if counts.ci}<span class="tabular text-danger"
-				>{counts.ci} failed run{counts.ci > 1 ? 's' : ''}</span
+		{#if counts.ci}<span class="tabular"
+				>{counts.ci} CI run{counts.ci > 1 ? 's' : ''}</span
 			>{/if}
 		{#if counts.mirror}<span class="tabular text-danger"
 				>{counts.mirror} mirror{counts.mirror > 1 ? 's' : ''} failing</span

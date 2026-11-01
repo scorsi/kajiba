@@ -13,7 +13,7 @@
 	import { RunState, type Run } from '#lib/api.ts';
 	import Icon, { type IconName } from '#lib/components/Icon.svelte';
 	import { commitSubject, relativeTime, shortId, toDate } from '#lib/format.ts';
-	import RunBadge from '#lib/components/RunBadge.svelte';
+	import RunBadge, { RUN_LABEL } from '#lib/components/RunBadge.svelte';
 	import {
 		EVENT_FILTERS,
 		countEvents,
@@ -169,7 +169,7 @@
 						<span class="w-10 shrink-0 pt-px font-mono text-xs text-fg-subtle"
 							>{hm.format(new Date(e.t * 1000))}</span
 						>
-						<span class="shrink-0 pt-0.5 {TONE[e.kind]}" aria-hidden="true"
+						<span class="shrink-0 pt-0.5 {e.kind === 'ci' ? (e.fixed ? 'text-fg-muted' : e.run.state === RunState.FAILED ? 'text-danger' : 'text-accent') : TONE[e.kind]}" aria-hidden="true"
 							><Icon name={ICON[e.kind]} size={13} /></span
 						>
 						<div class="min-w-0 flex-1">
@@ -228,7 +228,8 @@
 										>#{e.run.short}</a
 									>
 									<RunRef run={e.run} />
-									<span class="text-danger">failed</span>
+									<RunBadge state={e.run.state} size={10} />
+									<span class={e.fixed ? 'text-fg-muted' : e.run.state === RunState.FAILED ? 'text-danger' : 'text-accent'}>{e.fixed ? 'failed · fixed' : RUN_LABEL[e.run.state]}</span>
 									{#if repoHref}in {@render repoName(e.repo)}{/if}
 								</p>
 								<p class="text-xs text-fg-subtle">

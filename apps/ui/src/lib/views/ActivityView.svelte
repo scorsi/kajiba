@@ -2,7 +2,7 @@
 	Activity model A — "Bands": the repository view's grammar at forge scale.
 	Pulse (forge-wide ribbon, state line, what needs attention, latest
 	commits), Pipelines (running now, recent failures), History (folded: the
-	forge's events — commits, releases, failed runs, mirrors, runners), then
+	forge's events — commits, releases, failed and active runs, mirrors, runners), then
 	every repository as a small card. Same folding strips as the repository view.
 -->
 <script lang="ts">
@@ -18,7 +18,7 @@
 	import Icon from '#lib/components/Icon.svelte';
 	import { commitSubject, relativeTime, shortId, toDate } from '#lib/format.ts';
 	import RunBadge, { RUN_LABEL } from '#lib/components/RunBadge.svelte';
-	import { buildEvents, countEvents } from '#lib/data/events.ts';
+	import { buildEvents, countEvents, isFixed } from '#lib/data/events.ts';
 	import { commitDay, dayKey, lastDays, repoHref, type Forge } from '#lib/data/forge.ts';
 	import HistoryFeed from '#lib/components/HistoryFeed.svelte';
 	import NeedsAttention from '#lib/components/NeedsAttention.svelte';
@@ -52,7 +52,9 @@
 	const weekAgo = new Date(lastDays(7)[0].dt).setHours(0, 0, 0, 0) / 1000;
 	const runs7 = $derived(forge.runs.filter((r) => Number(r.createTime!.seconds) > weekAgo));
 	const passed7 = $derived(runs7.filter((r) => r.state === RunState.SUCCEEDED).length);
-	const running = $derived(forge.runs.filter((r) => r.state === RunState.RUNNING));
+	const running = $derived(
+		forge.runs.filter((r) => r.state === RunState.RUNNING || r.state === RunState.QUEUED)
+	);
 	const durationMax = $derived(Math.max(1, ...running.map((r) => r.durationSeconds)));
 	const failures = $derived(runs7.filter((r) => r.state === RunState.FAILED));
 	const activeRepos = $derived(new Set(inWindow.map((x) => x.r.key)).size);
@@ -124,7 +126,7 @@
 				><RunBadge state={RunState.SUCCEEDED} size={10} />CI {passed7}/{runs7.length} passed · 7 days</span
 			>
 			{#if running.length}<span class="flex items-center gap-1.5"
-					><RunBadge state={RunState.RUNNING} size={10} />{running.length} running</span
+					><RunBadge state={RunState.RUNNING} size={10} />{running.length} in progress</span
 				>{/if}
 			<span class="flex items-center gap-1.5 {mirrorsFailing.length ? 'text-danger' : ''}"
 				><Icon name="mirror" size={11} />mirrors {mirrorsOk} ok{mirrorsFailing.length
@@ -154,7 +156,7 @@
 		<section class="border-b border-border bg-surface px-4 py-3 sm:px-6" aria-label="Pipelines">
 			<div class="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-2">
 				<div>
-					<h2 class="mb-1.5 text-xs text-fg-subtle">Running now</h2>
+					<h2 class="mb-1.5 text-xs text-fg-subtle">In progress</h2>
 					{#each running as r (r.id)}
 						<a
 							href="/-/runs/{r.id}"
@@ -165,7 +167,7 @@
 							<span class="ml-auto"><DurationBar seconds={r.durationSeconds} max={durationMax} /></span>
 						</a>
 					{:else}
-						<p class="text-[0.8125rem] text-fg-subtle">Nothing running.</p>
+						<p class="text-[0.8125rem] text-fg-subtle">Nothing queued or running.</p>
 					{/each}
 				</div>
 				<div>
@@ -179,7 +181,7 @@
 									><RunBadge state={r.state} size={11} /><span
 										class="font-mono text-xs text-fg-muted">{r.repo} #{r.short}</span
 									>{#if r.trigger === 'worktree'}<RunRef run={r} />{/if}<span class="truncate text-xs text-fg-subtle"
-										>{r.steps.find((s) => s.state === RunState.FAILED)?.name}</span
+										>{isFixed(r, forge.runs) ? 'fixed · ' : ''}{r.steps.find((s) => s.state === RunState.FAILED)?.name}</span
 									><span class="ml-auto text-xs text-fg-subtle"
 										>{relativeTime(toDate(r.createTime))}</span
 									></a
@@ -200,8 +202,8 @@
 		{#if counts.release}<span class="tabular text-warn"
 				>{counts.release} release{counts.release > 1 ? 's' : ''}</span
 			>{/if}
-		{#if counts.ci}<span class="tabular text-danger"
-				>{counts.ci} failed run{counts.ci > 1 ? 's' : ''}</span
+		{#if counts.ci}<span class="tabular"
+				>{counts.ci} CI run{counts.ci > 1 ? 's' : ''}</span
 			>{/if}
 		{#if counts.mirror}<span class="tabular text-danger"
 				>{counts.mirror} mirror{counts.mirror > 1 ? 's' : ''} failing</span

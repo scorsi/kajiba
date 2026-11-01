@@ -1,7 +1,7 @@
 /**
  * History events: what happened, at forge or repository scope.
  *
- * Commits are grouped per (day, author, repository); releases, failed runs,
+ * Commits are grouped per (day, author, repository); releases, failed and active runs,
  * failing mirrors and offline runners are events of their own. Everything is
  * derived client-side from the RPCs we already call; a real server would want
  * one `ListEvents`-style RPC instead (see DESIGN.md, open questions).
@@ -28,7 +28,7 @@ export type HistoryEvent =
       commits: Commit[];
     }
   | { t: number; kind: "release"; repo: string; name: string; commit: Commit }
-  | { t: number; kind: "ci"; repo: string; run: Run }
+  | { t: number; kind: "ci"; repo: string; run: Run; fixed: boolean }
   | { t: number; kind: "mirror"; repo: string; mirror: MirrorStatus }
   | { t: number; kind: "runner"; runner: Runner };
 
@@ -54,6 +54,26 @@ export interface BuildOptions {
 }
 
 const secs = (t?: { seconds: bigint }) => Number(t?.seconds ?? 0n);
+
+/** Recovery is scoped to the exact repository/ref, never to local sources. */
+export function isFixed(run: Run, runs: Run[]) {
+  return (
+    run.state === RunState.FAILED &&
+    run.trigger !== "worktree" &&
+    !!run.createTime &&
+    runs.some(
+      (next) =>
+        next.trigger !== "worktree" &&
+        next.state === RunState.SUCCEEDED &&
+        next.repo === run.repo &&
+        next.ref === run.ref &&
+        !!next.createTime &&
+        (next.createTime.seconds > run.createTime!.seconds ||
+          (next.createTime.seconds === run.createTime!.seconds &&
+            (next.createTime.nanos ?? 0) > (run.createTime!.nanos ?? 0))),
+    )
+  );
+}
 
 export function buildEvents(
   sources: EventSource[],
@@ -86,14 +106,22 @@ export function buildEvents(
         commits,
       });
     for (const run of s.runs) {
-      if (run.state !== RunState.FAILED) continue;
+      if (
+        ![RunState.FAILED, RunState.RUNNING, RunState.QUEUED].includes(
+          run.state,
+        )
+      )
+        continue;
       if (secs(run.createTime) < since) continue;
       if (opts.runsOnListedCommits && !listed.has(run.commitId)) continue;
       out.push({
-        t: secs(run.createTime) + run.durationSeconds,
+        t:
+          secs(run.createTime) +
+          (run.state === RunState.FAILED ? run.durationSeconds : 0),
         kind: "ci",
         repo: s.repo,
         run,
+        fixed: isFixed(run, s.runs),
       });
     }
   }
@@ -141,33 +169,40 @@ export function countEvents(events: HistoryEvent[]) {
   return n;
 }
 
-/**
- * "Needs attention": current states someone should act on. A default branch
- * whose last finished run failed (a manual run has no ref: it counts when it
- * ran the branch's tip), a failing push mirror, an offline runner. Mirrors and
- * runners are only loaded for administrators (0139).
- */
-export function attention(forge: Forge) {
+/** Default-branch failures and distinct active runs; worktrees never count. */
+export function attention(forge: Forge, hideFixed = true) {
   return {
     branches: forge.repos.flatMap((r) => {
       const tip = r.commits[0]?.id;
-      const last = r.runs.find(
-        (x) =>
-          x.trigger !== "worktree" &&
-          (x.ref === r.repo.defaultBranch || (!x.ref && x.commitId === tip)) &&
-          x.state !== RunState.RUNNING &&
-          x.state !== RunState.QUEUED,
-      );
-      return last?.state === RunState.FAILED
+      const last = [...r.runs]
+        .sort(
+          (a, b) =>
+            secs(b.createTime) - secs(a.createTime) ||
+            (b.createTime?.nanos ?? 0) - (a.createTime?.nanos ?? 0),
+        )
+        .find(
+          (x) =>
+            x.trigger !== "worktree" &&
+            x.state === RunState.FAILED &&
+            (x.ref === r.repo.defaultBranch || (!x.ref && x.commitId === tip)),
+        );
+      const fixed = last ? isFixed(last, r.runs) : false;
+      return last && (!hideFixed || !fixed)
         ? [
             {
               key: r.key,
               branch: refShortName(r.repo.defaultBranch),
               run: last,
+              fixed,
             },
           ]
         : [];
     }),
+    active: forge.runs.filter(
+      (r) =>
+        r.trigger !== "worktree" &&
+        (r.state === RunState.QUEUED || r.state === RunState.RUNNING),
+    ),
     mirrors: forge.mirrors.filter((m) => m.state === MirrorState.FAILING),
     runners: forge.runners.filter(
       (r) => r.state === RunnerState.OFFLINE && !r.disabled,

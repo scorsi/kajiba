@@ -7,7 +7,7 @@
 	  Pulse      — identity, state line, activity ribbon (scoped to the selected
 	               path), latest commits, branches & releases
 	  Pipelines  — current run with its steps, recent runs (when CI is on)
-	  History    — events of the scope by day: commits, releases, failed runs,
+	  History    — events of the scope by day: commits, releases, failed and active runs,
 	               mirror failures (folded by default; shared with Activity)
 	  Files      — column browser (folded by default on the repo root)
 	State lives in the URL: path, ref, at (time travel), pulse, pipelines,
@@ -590,8 +590,8 @@
 				{#if counts.release}<span class="tabular text-warn"
 						>{counts.release} release{counts.release > 1 ? 's' : ''}</span
 					>{/if}
-				{#if counts.ci}<span class="tabular text-danger"
-						>{counts.ci} failed run{counts.ci > 1 ? 's' : ''}</span
+				{#if counts.ci}<span class="tabular"
+						>{counts.ci} CI run{counts.ci > 1 ? 's' : ''}</span
 					>{/if}
 				{#if counts.mirror}<span class="text-danger">mirror failing</span>{/if}
 			{/snippet}
