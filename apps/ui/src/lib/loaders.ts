@@ -5,24 +5,18 @@
 
 import * as api from "./api";
 
-/** Every repository the viewer can read, paged from `ListRepos` and cached for the session. */
-let repoCache: Promise<api.Repo[]> | undefined;
-
-export function allRepos(): Promise<api.Repo[]> {
-  repoCache ??= (async () => {
-    const out: api.Repo[] = [];
-    let pageToken = "";
-    do {
-      const res = await api.listRepos({ pageSize: 100, pageToken });
-      out.push(...res.repos);
-      pageToken = res.nextPageToken;
-    } while (pageToken);
-    return out.sort((a, b) =>
-      `${a.owner}/${a.name}`.localeCompare(`${b.owner}/${b.name}`),
-    );
-  })();
-  repoCache.catch(() => (repoCache = undefined));
-  return repoCache;
+/** Every repository the current viewer can read, paged from `ListRepos`. */
+export async function allRepos(): Promise<api.Repo[]> {
+  const out: api.Repo[] = [];
+  let pageToken = "";
+  do {
+    const res = await api.listRepos({ pageSize: 100, pageToken });
+    out.push(...res.repos);
+    pageToken = res.nextPageToken;
+  } while (pageToken);
+  return out.sort((a, b) =>
+    `${a.owner}/${a.name}`.localeCompare(`${b.owner}/${b.name}`),
+  );
 }
 
 /** The newest runs of every readable repository, newest first (there is no forge-wide `ListRuns`). */
