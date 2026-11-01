@@ -2,6 +2,7 @@
 { pkgs, ... }@args:
 import ./ci-common.nix args {
   name = "ops-restore";
+  forgeConfig.environment.systemPackages = [ pkgs.python3 ];
   script = ''
     def restore_cmd(directory):
         return f"kajiba-server restore {directory} --config /etc/kajiba/server.toml"
