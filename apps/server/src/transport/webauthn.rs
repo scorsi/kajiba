@@ -206,7 +206,15 @@ pub(super) fn routes(health: Health) -> Router {
         .route("/auth/webauthn/register/finish", post(register_finish))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .route_layer(middleware::from_fn_with_state(budget, admit))
+        .route_layer(middleware::from_fn_with_state(health.clone(), maintenance))
         .with_state(health)
+}
+
+async fn maintenance(State(health): State<Health>, request: Request, next: Next) -> Response {
+    let Ok(_admitted) = health.maintenance.admit() else {
+        return refusal(StatusCode::SERVICE_UNAVAILABLE, "MAINTENANCE");
+    };
+    next.run(request).await
 }
 
 /// A permit of the shared ceremony budget, held until the handler answers; taken before the

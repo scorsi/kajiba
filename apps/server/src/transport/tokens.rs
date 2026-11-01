@@ -122,6 +122,7 @@ impl TokenService for Tokens {
         &self,
         request: Request<CreateTokenRequest>,
     ) -> Result<Response<CreateTokenResponse>, Status> {
+        let _admitted = self.0.maintenance.admit()?;
         let principal = session_caller(&request)?;
         let user = principal.user_id;
         let hash = principal.session.expect("session caller");
@@ -247,6 +248,7 @@ impl TokenService for Tokens {
         &self,
         request: Request<RevokeTokenRequest>,
     ) -> Result<Response<RevokeTokenResponse>, Status> {
+        let _admitted = self.0.maintenance.admit()?;
         let user = session_caller(&request)?.user_id;
         let public_id = request.into_inner().public_id;
         let mut writer = self.writer()?.lock().await;

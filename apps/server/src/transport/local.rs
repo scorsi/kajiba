@@ -24,6 +24,7 @@ pub const SOCKET_PATH: &str = "/run/kajiba/local.sock";
 
 #[derive(Clone)]
 pub struct Admin {
+    pub(crate) maintenance: super::maintenance::Admission,
     pub writer: crate::db::Writer,
     pub public_url: String,
     pub enrollment_ttl: Duration,
@@ -47,6 +48,7 @@ impl AdminService for Admin {
         &self,
         request: Request<EnrollRequest>,
     ) -> Result<Response<EnrollResponse>, Status> {
+        let _admitted = self.maintenance.admit()?;
         use crate::db::enrollment::{Error, issue};
         // Validated before taking the writer; a rejected name is never echoed (ADR 0022).
         let user =
@@ -140,6 +142,7 @@ impl AdminService for Admin {
         &self,
         request: Request<ImportRequest>,
     ) -> Result<Response<ImportResponse>, Status> {
+        let _admitted = self.maintenance.admit()?;
         use crate::import::Error;
         let correlation_id = request
             .extensions()
@@ -193,6 +196,7 @@ impl AdminService for Admin {
         &self,
         _: Request<RetentionRequest>,
     ) -> Result<Response<RetentionResponse>, Status> {
+        let _admitted = self.maintenance.admit()?;
         let (logs, worktree_runs) = self
             .retention
             .run(&mut *self.writer.lock().await, crate::db::runs::now())

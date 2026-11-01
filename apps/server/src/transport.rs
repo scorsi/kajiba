@@ -47,6 +47,7 @@ use tonic::{Request, Response, Status, service::Routes};
 
 #[derive(Clone)]
 pub struct Health {
+    pub(crate) maintenance: maintenance::Admission,
     database: Arc<OnceLock<SqlitePool>>,
     writer: Arc<OnceLock<crate::db::Writer>>,
     passkeys: Arc<OnceLock<webauthn::Passkeys>>,
@@ -84,6 +85,7 @@ const SSH_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 impl Health {
     pub fn new(state_dir: PathBuf, git_state_dir: PathBuf, ssh_probe: Option<SocketAddr>) -> Self {
         Self {
+            maintenance: Default::default(),
             database: Arc::default(),
             writer: Arc::default(),
             passkeys: Arc::default(),
@@ -781,6 +783,7 @@ mod gate;
 pub mod git_http;
 pub(crate) mod git_side;
 pub mod local;
+mod maintenance;
 mod passkeys;
 pub mod raw;
 pub mod repos;

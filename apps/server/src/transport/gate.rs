@@ -19,6 +19,7 @@ pub const SOCKET_NAME: &str = "git.sock";
 mod policy;
 
 pub struct Gate {
+    maintenance: super::maintenance::Admission,
     pub writer: Writer,
     pub generation: Mutex<Option<String>>,
     // shortcut: retain closed IDs per generation; use an acknowledgment watermark if volume requires a bound.
@@ -260,6 +261,7 @@ impl Gate {
 
 impl Gate {
     async fn admit(&self, request: PreReceiveRequest) -> Result<PreReceiveResponse, Status> {
+        let _admitted = self.maintenance.admit()?;
         // Policy, admission and session exit share the writer lock.
         let mut writer = self.writer.lock().await;
         let mut refusals = self.refusals(&mut writer, &request).await?;
@@ -304,6 +306,7 @@ impl Gate {
 
     pub fn new(admin: &super::local::Admin, registry: Arc<Registry>) -> Self {
         Self {
+            maintenance: admin.maintenance.clone(),
             writer: admin.writer.clone(),
             generation: Mutex::default(),
             closed: Mutex::default(),
@@ -327,6 +330,11 @@ impl Gate {
                     "invalid session kind",
                 )
             })?;
+        let _admitted = if kind == SessionKind::UploadPack {
+            None
+        } else {
+            Some(self.maintenance.admit()?)
+        };
         if !kajiba_core::names::is_public_id(&request.session_id) {
             return Err(rpc_error(
                 tonic::Code::InvalidArgument,

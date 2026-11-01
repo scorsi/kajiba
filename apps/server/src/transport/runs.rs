@@ -753,6 +753,7 @@ impl RunService for Runs {
         &self,
         request: Request<TriggerRunRequest>,
     ) -> Result<Response<TriggerRunResponse>, Status> {
+        let _admitted = self.0.maintenance.admit()?;
         let user = caller(&request)?;
         let correlation_id = request
             .extensions()
@@ -851,6 +852,7 @@ impl RunService for Runs {
             Some(Part::Spec(spec)) => spec,
             _ => return Err(out_of_order()),
         };
+        let _admitted = self.0.maintenance.admit()?;
         // Every check before a byte of the bundle is stored (0097).
         let admitted = self.admit(user, &spec).await?;
         let (writer, declared) = match (self.0.writer.get(), self.0.runners.get()) {
@@ -972,6 +974,7 @@ impl RunService for Runs {
         &self,
         request: Request<CancelRunRequest>,
     ) -> Result<Response<CancelRunResponse>, Status> {
+        let _admitted = self.0.maintenance.admit()?;
         let user = caller(&request)?;
         let correlation = request
             .extensions()
@@ -1056,6 +1059,7 @@ impl RunService for Runs {
         &self,
         request: Request<RerunRunRequest>,
     ) -> Result<Response<RerunRunResponse>, Status> {
+        let _admitted = self.0.maintenance.admit()?;
         let user = caller(&request)?;
         let correlation = request
             .extensions()

@@ -33,6 +33,7 @@ pub(in crate::transport) async fn admin(dir: &Path, users: &str) -> Admin {
     .users;
     crate::db::reconcile(&mut writer, &users).await.unwrap();
     Admin {
+        maintenance: Default::default(),
         git_socket: dir.join("absent.sock"),
         writer: crate::db::Writer::new(writer.into()),
         public_url: PUBLIC_URL.into(),
@@ -559,4 +560,55 @@ async fn retention_deletes_old_logs_on_demand() {
         "logs deleted: 0 attempts\nworktree runs deleted: 2"
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn maintenance_refuses_local_mutations_without_side_effects_and_keeps_reads() {
+    let dir = SocketDir::new();
+    let admin = admin(&dir.0, "[users.alice]").await;
+    let closed = admin.maintenance.close().unwrap();
+    for status in [
+        admin
+            .enroll(Request::new(EnrollRequest {
+                user: "alice".into(),
+            }))
+            .await
+            .unwrap_err(),
+        admin
+            .import(Request::new(ImportRequest::default()))
+            .await
+            .unwrap_err(),
+        admin
+            .retention(Request::new(RetentionRequest {}))
+            .await
+            .unwrap_err(),
+    ] {
+        assert_eq!(status.code(), Code::Unavailable);
+        assert_eq!(
+            status.get_error_details().error_info().unwrap().reason,
+            "MAINTENANCE"
+        );
+        assert!(status.message().contains("retry"));
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM enrollment_token")
+        .fetch_one(&mut *admin.writer.lock().await)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(
+        admin
+            .list_repos(Request::new(ListReposRequest::default()))
+            .await
+            .is_ok()
+    );
+    assert!(!dir.0.join("logs").exists());
+    drop(closed);
+    assert!(
+        admin
+            .enroll(Request::new(EnrollRequest {
+                user: "alice".into()
+            }))
+            .await
+            .is_ok()
+    );
 }

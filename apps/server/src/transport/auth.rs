@@ -264,13 +264,15 @@ impl Auth {
         }
         // ADR 0078: at most one usage write per minute and credential, through the writer.
         if found.last_used_at.is_none_or(|used| now - used >= 60_000) {
-            let mut writer = writer.lock().await;
-            if session.is_some() {
-                crate::db::sessions::seen(&mut writer, found.id, now).await
-            } else {
-                crate::db::credentials::token_used(&mut writer, found.id, now).await
+            if let Ok(_admitted) = self.health.maintenance.admit() {
+                let mut writer = writer.lock().await;
+                if session.is_some() {
+                    crate::db::sessions::seen(&mut writer, found.id, now).await
+                } else {
+                    crate::db::credentials::token_used(&mut writer, found.id, now).await
+                }
+                .map_err(internal)?;
             }
-            .map_err(internal)?;
         }
         Ok(Principal {
             user_id: found.user_id,
@@ -324,6 +326,7 @@ impl AuthService for Sessions {
         &self,
         request: tonic::Request<LogoutRequest>,
     ) -> Result<tonic::Response<LogoutResponse>, Status> {
+        let _admitted = self.0.maintenance.admit()?;
         let headers = request.metadata().clone().into_headers();
         if let Some(value) = cookie(&headers) {
             let writer = self

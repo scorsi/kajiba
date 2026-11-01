@@ -768,3 +768,80 @@ async fn get_viewer_names_the_caller_its_effective_admin_flag_and_declared_keys(
         );
     }
 }
+
+#[tokio::test]
+async fn maintenance_reads_authenticate_without_incidental_usage_writes() {
+    let fixture = Fixture::new(&format!("{DEMO}{}", tokens())).await;
+    session(&fixture, "alice", SESSION, now() + 60_000).await;
+    let mut app = router(
+        fixture.repos.0.clone(),
+        false,
+        Arc::default(),
+        "https://example.org",
+    )
+    .unwrap();
+    let closed = fixture.repos.0.maintenance.close().unwrap();
+    for headers in [
+        vec![("authorization", format!("Bearer {READ}"))],
+        vec![("cookie", format!("{SESSION_COOKIE}={SESSION}"))],
+    ] {
+        let headers: Vec<_> = headers
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+        assert!(call(&mut app, LIST, &headers).await.is_none());
+    }
+    assert_eq!(last_used(&fixture, READ).await, None);
+    let seen: i64 = sqlx::query_scalar("SELECT last_seen_at FROM session")
+        .fetch_one(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    assert_eq!(seen, 0);
+    let status = call(&mut app, LIST, &[("authorization", "Bearer kjb_invalid")])
+        .await
+        .unwrap();
+    assert_eq!(status.code(), Code::Unauthenticated);
+    for path in [
+        "/kajiba.v1.TokenService/CreateToken",
+        "/kajiba.v1.TokenService/RevokeToken",
+        "/kajiba.v1.PasskeyService/DeletePasskey",
+        "/kajiba.v1.AuthService/Logout",
+    ] {
+        let cookie = format!("{SESSION_COOKIE}={SESSION}");
+        let status = call(&mut app, path, &[("cookie", &cookie)]).await.unwrap();
+        assert_eq!(status.code(), Code::Unavailable);
+        assert_eq!(reason(&status), "MAINTENANCE");
+    }
+    for ceremony in ["enroll", "login", "step-up", "register"] {
+        for step in ["start", "finish"] {
+            let response = app
+                .call(
+                    http::Request::post(format!("/auth/webauthn/{ceremony}/{step}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["reason"],
+                "MAINTENANCE"
+            );
+        }
+    }
+    drop(closed);
+    assert!(
+        call(
+            &mut app,
+            LIST,
+            &[("authorization", &format!("Bearer {READ}"))]
+        )
+        .await
+        .is_none()
+    );
+    assert!(last_used(&fixture, READ).await.is_some());
+}

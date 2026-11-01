@@ -1977,3 +1977,122 @@ async fn watch_preserves_production_times_at_chunk_boundaries_and_resume_offsets
         }
     }
 }
+
+#[tokio::test]
+async fn maintenance_refuses_run_mutations_before_upload_storage_and_keeps_reads() {
+    let (fixture, runs) = fixture("").await;
+    let tip = head(&fixture.bare("alice/ci").await);
+    let run = trigger(&runs, BOB, "alice/ci", &tip).await.unwrap();
+    let closed = runs.0.maintenance.close().unwrap();
+    for status in [
+        trigger(&runs, BOB, "alice/ci", &tip).await.unwrap_err(),
+        create(
+            &runs,
+            BOB,
+            Some(spec("alice/ci")),
+            b"refused before parsing",
+        )
+        .await
+        .unwrap_err(),
+        cancel_run(&runs, BOB, &run.public_id).await.unwrap_err(),
+        rerun_run(&runs, BOB, &run.public_id).await.unwrap_err(),
+    ] {
+        assert_eq!(refusal(status), (Code::Unavailable, "MAINTENANCE".into()));
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM run")
+        .fetch_one(&mut *fixture.writer.lock().await)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(
+        std::fs::read_dir(runs.0.state_dir.join("tmp"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(
+        std::fs::read_dir(runs.0.state_dir.join("ci/bundles"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert!(
+        runs.get_run(as_user(
+            BOB,
+            GetRunRequest {
+                run: run.public_id.clone()
+            }
+        ))
+        .await
+        .is_ok()
+    );
+    assert!(
+        runs.get_worktree_base(as_user(
+            BOB,
+            GetWorktreeBaseRequest {
+                spec: Some(spec("alice/ci")),
+            }
+        ))
+        .await
+        .is_ok()
+    );
+    drop(closed);
+    assert!(trigger(&runs, BOB, "alice/ci", &tip).await.is_ok());
+}
+
+#[tokio::test]
+async fn maintenance_keeps_admitted_upload_owned_until_cancellation_cleans_it_up() {
+    use tonic::codec::Codec;
+    let (_fixture, runs) = fixture("").await;
+    let (sender, receiver) =
+        tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(1);
+    let mut bytes = Vec::new();
+    for part in [
+        Part::Spec(spec("alice/ci")),
+        Part::Chunk(b"partial bundle".to_vec()),
+    ] {
+        let message = CreateWorktreeRunRequest { part: Some(part) }.encode_to_vec();
+        bytes.push(0);
+        bytes.extend_from_slice(&(message.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&message);
+    }
+    sender.send(Ok(bytes.into())).await.unwrap();
+    let decoder =
+        tonic::codec::ProstCodec::<CreateWorktreeRunResponse, CreateWorktreeRunRequest>::default()
+            .decoder();
+    let body = axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(receiver));
+    let parts = tonic::Streaming::new_request(decoder, body, None, None);
+    let service = runs.clone();
+    let task = tokio::spawn(async move { service.create_worktree_run(as_user(BOB, parts)).await });
+    let tmp = runs.0.state_dir.join("tmp");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let stored = std::fs::read_dir(&tmp)
+                .unwrap()
+                .any(|entry| entry.unwrap().metadata().unwrap().len() > 0);
+            if stored {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let closed = runs.0.maintenance.close().unwrap();
+    assert_eq!(runs.0.uploads.held(&BOB), 1);
+    assert!(!task.is_finished());
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(runs.0.uploads.held(&BOB), 0);
+    assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
+    drop(closed);
+    assert_eq!(
+        refusal(
+            create(&runs, BOB, Some(spec("alice/ci")), b"invalid")
+                .await
+                .unwrap_err()
+        ),
+        (Code::InvalidArgument, "BUNDLE_INVALID".into())
+    );
+    assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
+}

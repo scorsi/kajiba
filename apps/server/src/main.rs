@@ -241,6 +241,7 @@ async fn main() -> ExitCode {
                 worktree_retention: config.ci.worktree_retention,
             };
             let admin = transport::local::Admin {
+                maintenance: health.maintenance.clone(),
                 git_socket: config.git.socket.clone(),
                 writer: writer.clone(),
                 public_url: config.http.public_url.clone(),

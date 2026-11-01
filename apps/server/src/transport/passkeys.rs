@@ -99,6 +99,7 @@ impl PasskeyService for Passkeys {
         &self,
         request: Request<DeletePasskeyRequest>,
     ) -> Result<Response<DeletePasskeyResponse>, Status> {
+        let _admitted = self.0.maintenance.admit()?;
         let (user, hash) = session_caller(&request)?;
         let public_id = request.into_inner().public_id;
         let mut writer = self

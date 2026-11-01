@@ -1636,3 +1636,89 @@ async fn session_exit_answers_the_runs_its_push_created() {
         () = pushes => {}
     }
 }
+
+#[tokio::test]
+async fn maintenance_refuses_writing_sessions_and_existing_pushes_but_allows_clone_and_exit() {
+    use kajiba_proto::git::v1::SessionKind;
+    let (_state, admin, gate, alice) = session_fixture().await;
+    let mut request = OpenSessionRequest {
+        generation: gate.admission.generation().unwrap(),
+        user_public_id: alice,
+        kind: SessionKind::ReceivePack.into(),
+        repository: Some(open_session_request::Repository::RepoAddress(
+            "alice/demo".into(),
+        )),
+        correlation_id: String::new(),
+        session_id: kajiba_core::new_id().unwrap(),
+    };
+    let session = gate
+        .open_session(Request::new(request.clone()))
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    let closed = admin.maintenance.close().unwrap();
+    for kind in [
+        SessionKind::ReceivePack,
+        SessionKind::Import,
+        SessionKind::Maintenance,
+    ] {
+        request.kind = kind.into();
+        request.session_id = kajiba_core::new_id().unwrap();
+        let status = gate
+            .open_session(Request::new(request.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::Unavailable);
+        assert_eq!(
+            status.get_error_details().error_info().unwrap().reason,
+            "MAINTENANCE"
+        );
+        assert!(status.message().contains("retry"));
+        assert!(gate.admission.session(&request.session_id).is_none());
+    }
+    let status = gate
+        .pre_receive(Request::new(PreReceiveRequest {
+            session_id: session.session_id.clone(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::Unavailable);
+    assert_eq!(
+        status.get_error_details().error_info().unwrap().reason,
+        "MAINTENANCE"
+    );
+    let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM pending_push")
+        .fetch_one(&mut *admin.writer.lock().await)
+        .await
+        .unwrap();
+    assert_eq!(pending, 0);
+    request.kind = SessionKind::UploadPack.into();
+    let read = gate
+        .open_session(Request::new(request.clone()))
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    gate.post_receive(Request::new(PostReceiveRequest {
+        session_id: session.session_id.clone(),
+    }))
+    .await
+    .unwrap();
+    for id in [session.session_id, read.session_id] {
+        gate.session_exited(Request::new(SessionExitedRequest {
+            session_id: id,
+            exit_status: 0,
+        }))
+        .await
+        .unwrap();
+    }
+    assert!(!gate.admission.running(1));
+    drop(closed);
+    request.kind = SessionKind::ReceivePack.into();
+    request.session_id = kajiba_core::new_id().unwrap();
+    assert!(gate.open_session(Request::new(request)).await.is_ok());
+}
