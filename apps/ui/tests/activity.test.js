@@ -294,3 +294,53 @@ test("activity includes active runs and hides only recovered branch failures", a
   source.runs.push({ ...failed, id: "relapse", createTime: at(24) });
   assert.equal(attention(forge).branches[0].run.id, "relapse");
 });
+
+test("global failure filtering uses the full snapshot before list limits", async (t) => {
+  const vite = await createServer({
+    configFile: false,
+    server: { middlewareMode: true, ws: false },
+  });
+  t.after(() => vite.close());
+  const { visibleRuns, buildEvents } = await vite.ssrLoadModule(
+    "/src/lib/data/events.ts",
+  );
+  const { RunState } = await vite.ssrLoadModule("/src/lib/api.ts");
+  const failed = run("fixed", RunState.FAILED, {
+    repo: "alice/demo",
+    ref: "refs/heads/main",
+  });
+  const success = run("success", RunState.SUCCEEDED, {
+    ...failed,
+    id: "success",
+    state: RunState.SUCCEEDED,
+    createTime: at(21),
+  });
+  const unresolved = { ...failed, id: "unresolved", ref: "refs/heads/dev" };
+  const local = { ...failed, id: "local", trigger: "worktree" };
+  const active = { ...failed, id: "active", state: RunState.RUNNING };
+  const snapshot = [failed, unresolved, local, active, success];
+  assert.deepEqual(
+    visibleRuns(snapshot, true).map((r) => r.id),
+    ["unresolved", "local", "active", "success"],
+  );
+  assert.deepEqual(visibleRuns(snapshot, false), snapshot);
+  assert.deepEqual(visibleRuns([failed], true, snapshot), []);
+  const source = {
+    repo: "alice/demo",
+    runs: snapshot,
+    commits: [],
+    tags: new Map(),
+  };
+  assert.equal(
+    buildEvents([source], { hideFixed: true }).some(
+      (e) => e.run?.id === "fixed",
+    ),
+    false,
+  );
+  assert.equal(
+    buildEvents([source], { hideFixed: false }).find(
+      (e) => e.run?.id === "fixed",
+    ).fixed,
+    true,
+  );
+});

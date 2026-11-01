@@ -45,6 +45,7 @@ export interface EventSource {
 }
 
 export interface BuildOptions {
+  hideFixed?: boolean;
   mirrors?: MirrorStatus[];
   runners?: Runner[];
   /** Unix seconds; commits, releases and runs before this are left out. */
@@ -73,6 +74,15 @@ export function isFixed(run: Run, runs: Run[]) {
             (next.createTime.nanos ?? 0) > (run.createTime!.nanos ?? 0))),
     )
   );
+}
+
+/** Keep recovery evidence from the full snapshot, before slicing or ref filters. */
+export function visibleRuns(
+  runs: Run[],
+  hideFixed: boolean,
+  snapshot = runs,
+): Run[] {
+  return hideFixed ? runs.filter((run) => !isFixed(run, snapshot)) : runs;
 }
 
 export function buildEvents(
@@ -105,7 +115,7 @@ export function buildEvents(
         author: commits[0].authorName,
         commits,
       });
-    for (const run of s.runs) {
+    for (const run of visibleRuns(s.runs, opts.hideFixed ?? false)) {
       if (
         ![RunState.FAILED, RunState.RUNNING, RunState.QUEUED].includes(
           run.state,

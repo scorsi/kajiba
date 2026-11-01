@@ -110,24 +110,41 @@ test("activity: commits by author, a failed default-branch run, the reader's vie
     timeout: 60_000,
   });
   await page.goto("/?history=1&kind=ci");
-  await expect(
-    page.getByRole("checkbox", { name: "Hide fixed failures" }),
-  ).toBeChecked();
+  const options = page.getByLabel("Options", { exact: true });
+  const hideFixed = page.getByRole("checkbox", { name: "Hide fixed failures" });
+  const historyFailure = page
+    .getByRole("region", { name: "History" })
+    .locator(`a[href="/-/runs/${id}"]`);
+  const pipelineFailure = page
+    .getByRole("region", { name: "Pipelines" })
+    .locator(`a[href="/-/runs/${id}"]`);
+  await options.click();
+  await expect(hideFixed).toBeChecked();
   await expect(attention.locator(`a[href="/-/runs/${id}"]`)).toHaveCount(0);
-  await expect(
-    page
-      .getByRole("region", { name: "History" })
-      .locator(`a[href="/-/runs/${id}"]`)
-      .locator(".."),
-  ).toContainText("failed · fixed");
-  await page.getByRole("checkbox", { name: "Hide fixed failures" }).uncheck();
+  await expect(historyFailure).toHaveCount(0);
+  await expect(pipelineFailure).toHaveCount(0);
+  await hideFixed.uncheck();
   await expect(attention.locator(`a[href="/-/runs/${id}"]`)).toContainText(
     "fixed",
   );
+  await expect(historyFailure.locator("..")).toContainText("failed · fixed");
+  await expect(pipelineFailure).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(hideFixed).not.toBeVisible();
+  await expect(options).toBeFocused();
+
+  // Navigation and reload keep this viewer's global choice.
+  await page.goto("/alice/demo?history=1&kind=ci");
+  await expect(pipelineFailure).toBeVisible();
+  await expect(historyFailure).toBeVisible();
   await page.reload();
-  await expect(
-    page.getByRole("checkbox", { name: "Hide fixed failures" }),
-  ).not.toBeChecked();
+  await options.click();
+  await expect(hideFixed).not.toBeChecked();
+  await hideFixed.check();
+  await expect(pipelineFailure).toHaveCount(0);
+  await expect(historyFailure).toHaveCount(0);
+  await page.goto("/?history=1&kind=ci");
+  await expect(attention.locator(`a[href="/-/runs/${id}"]`)).toHaveCount(0);
 
   // The reader sees the same repository, with no administrators' lines.
   const other = await browser.newContext();

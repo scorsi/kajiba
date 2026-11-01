@@ -7,6 +7,8 @@
 	URL: ?step, ?check (StepColumns), ?steps=0 folds Steps, ?changed=0|1.
 -->
 <script lang="ts">
+	import { visibleRuns } from '#lib/data/events.ts';
+	import { preferences } from '#lib/viewer-preferences.svelte.ts';
 	import RunActions from '#lib/components/RunActions.svelte';
 	import RunRef from '#lib/components/RunRef.svelte';
 	import { page } from '$app/state';
@@ -61,7 +63,9 @@
 		return w.map((x) => (x / total) * 100);
 	});
 
-	const older = $derived([...data.history].reverse().slice(-24));
+	const older = $derived(
+		[...visibleRuns(data.history, preferences.hideFixedFailures, [...data.history, run])].reverse().slice(-24)
+	);
 	const STATE_BG: Record<RunState, string> = {
 		[RunState.UNSPECIFIED]: 'bg-border',
 		[RunState.QUEUED]: 'bg-border',

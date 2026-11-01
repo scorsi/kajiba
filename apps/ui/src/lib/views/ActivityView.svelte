@@ -6,6 +6,7 @@
 	every repository as a small card. Same folding strips as the repository view.
 -->
 <script lang="ts">
+	import { preferences } from '#lib/viewer-preferences.svelte.ts';
 	import RunActions from '#lib/components/RunActions.svelte';
 	import RunRef from '#lib/components/RunRef.svelte';
 	import DurationBar from '#lib/components/DurationBar.svelte';
@@ -16,7 +17,7 @@
 	import Icon from '#lib/components/Icon.svelte';
 	import { commitSubject, relativeTime, shortId, toDate } from '#lib/format.ts';
 	import RunBadge, { RUN_LABEL } from '#lib/components/RunBadge.svelte';
-	import { buildEvents, countEvents, isFixed } from '#lib/data/events.ts';
+	import { buildEvents, countEvents, isFixed, visibleRuns } from '#lib/data/events.ts';
 	import { commitDay, lastDays, repoHref, type Forge } from '#lib/data/forge.ts';
 	import HistoryFeed from '#lib/components/HistoryFeed.svelte';
 	import NeedsAttention from '#lib/components/NeedsAttention.svelte';
@@ -78,7 +79,7 @@
 		forge.runs.filter((r) => r.state === RunState.RUNNING || r.state === RunState.QUEUED)
 	);
 	const durationMax = $derived(Math.max(1, ...running.map((r) => r.durationSeconds)));
-	const failures = $derived(runs7.filter((r) => r.state === RunState.FAILED));
+	const failures = $derived(visibleRuns(runs7, preferences.hideFixedFailures, forge.runs).filter((r) => r.state === RunState.FAILED));
 	const activeRepos = $derived(new Set(inWindow.map((x) => x.r.key)).size);
 	const authors = $derived(new Set(inWindow.map((x) => x.c.authorName)).size);
 	const mirrorsOk = $derived(forge.mirrors.filter((m) => m.state === MirrorState.OK).length);
@@ -108,6 +109,7 @@
 		buildEvents(
 			forge.repos.map((r) => ({ ...r, repo: r.key })),
 			{
+				hideFixed: preferences.hideFixedFailures,
 				mirrors: forge.mirrors,
 				runners: forge.runners,
 				since: new Date(win[0].dt).setHours(0, 0, 0, 0) / 1000
@@ -327,7 +329,7 @@
 			{#each cards as r (r.key)}
 				{@const s = spark(r.commits)}
 				{@const last = r.commits[0]}
-				{@const run = r.runs.find((run) => run.trigger !== 'worktree')}
+				{@const run = visibleRuns(r.runs, preferences.hideFixedFailures).find((run) => run.trigger !== 'worktree')}
 				<li>
 					<a
 						href={repoHref(r.key)}

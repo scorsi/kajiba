@@ -14,6 +14,7 @@
 	history, files, kind (History filter).
 -->
 <script lang="ts">
+	import { preferences } from '#lib/viewer-preferences.svelte.ts';
 	import RunActions from '#lib/components/RunActions.svelte';
 	import { runLabel } from '#lib/run-label.ts';
 	import RunRef from '#lib/components/RunRef.svelte';
@@ -68,7 +69,7 @@
 	import { ENTRY_ICON, ROLE_LABEL } from '#lib/repo-ui.ts';
 	import { resource } from '#lib/resource.svelte.ts';
 	import RunBadge, { RUN_LABEL } from '#lib/components/RunBadge.svelte';
-	import { buildEvents, countEvents } from '#lib/data/events.ts';
+	import { buildEvents, countEvents, visibleRuns } from '#lib/data/events.ts';
 	import HistoryFeed from '#lib/components/HistoryFeed.svelte';
 
 	let { repoKey }: { repoKey: string } = $props();
@@ -111,7 +112,7 @@
 		hasActiveRuns
 	);
 	const branchRuns = $derived(
-		(runs.data ?? []).filter((r) => r.trigger !== 'worktree' && (!r.ref || r.ref === head))
+		visibleRuns(runs.data ?? [], preferences.hideFixedFailures).filter((r) => r.trigger !== 'worktree' && (!r.ref || r.ref === head))
 	);
 	const worktreeRuns = $derived((runs.data ?? []).filter((r) => r.trigger === 'worktree'));
 	const runByCommit = $derived(new Map(branchRuns.map((r) => [r.commitId, r])));
@@ -327,6 +328,7 @@
 	// failed runs on those commits, a failing mirror)
 	const events = $derived(
 		buildEvents([{ repo: repoKey, commits: log.data ?? [], tags: tagsAt, runs: runs.data ?? [] }], {
+			hideFixed: preferences.hideFixedFailures,
 			mirrors: mirrors.data ?? [],
 			runsOnListedCommits: true
 		})

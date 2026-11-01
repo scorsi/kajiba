@@ -12,6 +12,7 @@
 	Band state lives in the URL: runners, mirrors, users, history, kind.
 -->
 <script lang="ts">
+	import { preferences } from '#lib/viewer-preferences.svelte.ts';
 	import RunRef from '#lib/components/RunRef.svelte';
 	import DurationBar from '#lib/components/DurationBar.svelte';
 	import { page } from '$app/state';
@@ -28,7 +29,7 @@
 	import { absoluteTime, formatBytes, relativeTime, shortId, toDate } from '#lib/format.ts';
 	import RunBadge, { RUN_LABEL } from '#lib/components/RunBadge.svelte';
 	import BandStrip from '#lib/components/BandStrip.svelte';
-	import { buildEvents, countEvents } from '#lib/data/events.ts';
+	import { buildEvents, countEvents, visibleRuns } from '#lib/data/events.ts';
 	import { dur, repoHref, type Forge } from '#lib/data/forge.ts';
 	import HistoryFeed from '#lib/components/HistoryFeed.svelte';
 	import NeedsAttention from '#lib/components/NeedsAttention.svelte';
@@ -130,7 +131,12 @@
 	const events = $derived(
 		buildEvents(
 			forge.repos.map((r) => ({ repo: r.key, commits: [], tags: new Map(), runs: r.runs })),
-			{ mirrors: forge.mirrors, runners: forge.runners, since: now - 30 * 86400 }
+			{
+				hideFixed: preferences.hideFixedFailures,
+				mirrors: forge.mirrors,
+				runners: forge.runners,
+				since: now - 30 * 86400
+			}
 		)
 	);
 	const counts = $derived(countEvents(events));
@@ -254,6 +260,7 @@
 					<ul>
 						{#each h.runners as r (r.name)}
 							{@const s = stats(r)}
+							{@const lastRun = visibleRuns(s.runs, preferences.hideFixedFailures, forge.runs)[0]}
 							<li
 								id="runner-{r.name}"
 								class="grid scroll-mt-10 grid-cols-[minmax(0,1fr)] gap-x-5 gap-y-1.5 px-4 py-2.5 text-[0.8125rem] target:bg-accent-soft sm:px-6 lg:grid-cols-[10rem_9rem_minmax(0,1fr)_minmax(0,1.4fr)_15rem] lg:items-center"
@@ -316,11 +323,11 @@
 										>
 									{:else}
 										<span class="text-fg-subtle"
-											>idle{#if s.runs[0]}{' · last run '}
-												<a href="/-/runs/{s.runs[0].id}" class="font-mono hover:underline"
-													>#{s.runs[0].short}</a
+											>idle{#if lastRun}{' · last run '}
+												<a href="/-/runs/{lastRun.id}" class="font-mono hover:underline"
+													>#{lastRun.short}</a
 												>
-												<RunRef run={s.runs[0]} />{relativeTime(toDate(s.runs[0].createTime))}{/if}</span
+												<RunRef run={lastRun} />{relativeTime(toDate(lastRun.createTime))}{/if}</span
 										>
 									{/if}
 								</span>

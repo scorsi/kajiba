@@ -15,6 +15,9 @@
 	import Icon from '#lib/components/Icon.svelte';
 	import RunBadge from '#lib/components/RunBadge.svelte';
 	import StateView from '#lib/components/StateView.svelte';
+	import Popover from '#lib/components/Popover.svelte';
+	import { preferences, loadPreferences, setHideFixedFailures } from '#lib/viewer-preferences.svelte.ts';
+	import { isFixed } from '#lib/data/events.ts';
 	import ThemeToggle from '#lib/components/ThemeToggle.svelte';
 	import { relativeTime, toDate } from '#lib/format.ts';
 	import { allRepos, recentRuns } from '#lib/loaders.ts';
@@ -24,6 +27,9 @@
 	let { location, children }: { location?: string; children: Snippet } = $props();
 
 	const viewer = resource(() => getViewer());
+	$effect(() => {
+		if (viewer.data) loadPreferences(viewer.data.user);
+	});
 	// A signed-out visitor sees the sign-in state, not pages that cannot load.
 	const isUnauthenticated = $derived(
 		typeof viewer.error === 'object' &&
@@ -101,7 +107,7 @@
 				if (d < 30) days[29 - d]++;
 			}
 			const lastRun: Run | undefined = runs.find((x) => x.trigger !== 'worktree' && x.repo === `${r.owner}/${r.name}`);
-			return { repo: r, days, last: logs[i][0], lastRun };
+			return { repo: r, days, last: logs[i][0], lastRun, runs };
 		});
 	}, (rows) => rows?.some((r) => r.lastRun && hasActiveRuns([r.lastRun])) ?? false);
 	const navLink =
@@ -151,6 +157,16 @@
 					</button>
 				{/if}
 				<ThemeToggle class="rounded-sm p-1.5 text-fg-muted hover:bg-surface-2" />
+				<Popover label="Options" width="14rem" triggerClass="rounded-sm p-1.5 text-fg-muted hover:bg-surface-2 hover:text-fg">
+					{#snippet trigger()}<Icon name="menu" size={14} />{/snippet}
+					<div class="p-3">
+						<p class="mb-2 tracking-wide text-fg-subtle uppercase">Options</p>
+						<label class="flex items-center gap-2">
+							<input type="checkbox" disabled={!viewer.data} checked={preferences.hideFixedFailures} onchange={(e) => setHideFixedFailures(e.currentTarget.checked)} />
+							Hide fixed failures
+						</label>
+					</div>
+				</Popover>
 			</div>
 		</div>
 	</header>
@@ -196,7 +212,7 @@
 											: 'empty'}</span
 									>
 									<span class="w-4"
-										>{#if o.lastRun}<RunBadge state={o.lastRun.state} size={11} />{/if}</span
+										>{#if o.lastRun && (!preferences.hideFixedFailures || !isFixed(o.lastRun, o.runs))}<RunBadge state={o.lastRun.state} size={11} />{/if}</span
 									>
 								</a>
 							</li>

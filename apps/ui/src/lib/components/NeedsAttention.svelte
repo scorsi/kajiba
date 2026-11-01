@@ -1,8 +1,7 @@
 <!-- Shared attention: unresolved default-branch failures, distinct active runs,
      failing mirrors and offline runners; fixed failures can be revealed. -->
 <script lang="ts">
-	import { page } from '$app/state';
-	import { goto } from '$app/navigation';
+	import { preferences } from '#lib/viewer-preferences.svelte.ts';
 	import RunRef from '#lib/components/RunRef.svelte';
 	import Icon from '#lib/components/Icon.svelte';
 	import { relativeTime, toDate } from '#lib/format.ts';
@@ -22,18 +21,9 @@
 		mirrorHref?: (repo: string) => string;
 	} = $props();
 
-	const hideFixed = $derived(page.url.searchParams.get('fixed') !== '1');
-	const a = $derived(attention(forge, hideFixed));
-	function toggleFixed() {
-		const q = new URLSearchParams(page.url.searchParams.toString());
-		hideFixed ? q.set('fixed', '1') : q.delete('fixed');
-		goto(`?${q}`, { reset: false, replace: true });
-	}
+	const a = $derived(attention(forge, preferences.hideFixedFailures));
 </script>
 
-<label class="mt-3 flex items-center gap-1.5 text-xs text-fg-subtle">
-	<input type="checkbox" checked={hideFixed} onchange={toggleFixed} />Hide fixed failures
-</label>
 {#if a.branches.length || a.mirrors.length || a.runners.length || a.active.length}
 	<div class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" role="status">
 		<span class="tracking-wide text-fg-subtle uppercase">Needs attention</span>
