@@ -29,6 +29,7 @@
 	const run = $derived(data.run);
 
 	const q = $derived(page.url.searchParams);
+	const pulseOpen = $derived(q.get('pulse') !== '0');
 	function hrefFor(next: Record<string, string | null>) {
 		const u = new URLSearchParams(q.toString());
 		for (const [k, v] of Object.entries(next)) v === null ? u.delete(k) : u.set(k, v);
@@ -82,8 +83,11 @@
 
 <div class="relative min-h-0 flex-1 overflow-y-auto">
 	<!-- Pulse -->
+	<BandStrip label="Pulse" open={pulseOpen} href={hrefFor({ pulse: pulseOpen ? '0' : null })}>
+		<span>Run #{run.short}</span>
+	</BandStrip>
+	{#if pulseOpen}
 	<section class="border-b border-border bg-surface px-4 py-4 sm:px-6" aria-label="Pulse">
-		<p class="text-xs tracking-wide text-fg-subtle uppercase">▾ Pulse</p>
 		<div class="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
 			<h1 class="text-2xl font-semibold tracking-tight">
 				Run <span class="font-mono" title={run.id}>#{run.short}</span>
@@ -188,6 +192,7 @@
 			{/if}
 		</div>
 	</section>
+	{/if}
 
 	<!-- what changed -->
 	<BandStrip label="What changed" open={changedOpen} href={changedHref}>

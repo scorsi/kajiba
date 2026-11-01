@@ -135,6 +135,9 @@
 			>
 		{/each}
 	</nav>
+	<span class="text-xs text-fg-subtle">
+		{scoped.filter((e) => e.kind === 'commits').length} pushes (grouped by author/day)
+	</span>
 	{#if repoHref && repos.length > 1}
 		<label class="ml-auto text-xs text-fg-subtle">
 			<span class="sr-only">Repository</span>

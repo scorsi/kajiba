@@ -8,6 +8,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import type { Snippet } from 'svelte';
+	import BandStrip from '#lib/components/BandStrip.svelte';
 	import { MirrorState, RunState, type Commit } from '#lib/api.ts';
 	import Icon from '#lib/components/Icon.svelte';
 	import { commitSubject, relativeTime, shortId, toDate } from '#lib/format.ts';
@@ -20,6 +21,7 @@
 	let { forge }: { forge: Forge } = $props();
 
 	const q = $derived(page.url.searchParams);
+	const pulseOpen = $derived(q.get('pulse') !== '0');
 	const days = $derived(q.get('days') === '30' ? 30 : 90);
 	const pipelinesOpen = $derived(q.get('pipelines') !== '0');
 	const historyOpen = $derived(q.get('history') === '1');
@@ -115,22 +117,18 @@
 	closedV: string | null,
 	summary: Snippet
 )}
-	<a
-		href={hrefFor({ [param]: open ? closedV : openV })}
-		data-sveltekit-noscroll
-		aria-expanded={open}
-		class="flex h-8 shrink-0 items-center gap-3 border-b border-border px-4 text-xs text-fg-muted hover:bg-surface-2 sm:px-6"
-	>
-		<span class="w-3 text-fg-subtle" aria-hidden="true">{open ? '▾' : '▸'}</span>
-		<span class="tracking-wide text-fg-subtle uppercase">{label}</span>
-		<span class="flex min-w-0 flex-1 items-center gap-3 truncate">{@render summary()}</span>
-	</a>
+	<BandStrip {label} {open} href={hrefFor({ [param]: open ? closedV : openV })}>
+		{@render summary()}
+	</BandStrip>
 {/snippet}
 
 <div class="relative min-h-0 flex-1 overflow-y-auto">
 	<!-- Pulse -->
+	<BandStrip label="Pulse" open={pulseOpen} href={hrefFor({ pulse: pulseOpen ? '0' : null })}>
+		<span>Activity</span>
+	</BandStrip>
+	{#if pulseOpen}
 	<section class="border-b border-border bg-surface px-4 pt-4 pb-4 sm:px-6" aria-label="Pulse">
-		<p class="text-xs tracking-wide text-fg-subtle uppercase">▾ Pulse</p>
 		<div class="mt-1 flex flex-wrap items-end gap-3">
 			<h1 class="flex-1 text-2xl font-semibold tracking-tight">
 				Activity <span class="text-base font-normal text-fg-muted"
@@ -225,6 +223,7 @@
 			{/each}
 		</ul>
 	</section>
+	{/if}
 
 	<!-- Pipelines -->
 	{#snippet pipeSummary()}

@@ -18,6 +18,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { tick, type Snippet } from 'svelte';
+	import BandStrip from '#lib/components/BandStrip.svelte';
 	import {
 		ChangeKind,
 		Code,
@@ -365,16 +366,9 @@
 	closedValue: string | null,
 	summary: Snippet
 )}
-	<a
-		href={hrefFor({ [param]: open ? closedValue : openValue })}
-		data-sveltekit-noscroll
-		aria-expanded={open}
-		class="flex h-8 shrink-0 items-center gap-3 border-b border-border px-4 text-xs text-fg-muted hover:bg-surface-2 sm:px-6"
-	>
-		<span class="w-3 text-fg-subtle" aria-hidden="true">{open ? '▾' : '▸'}</span>
-		<span class="tracking-wide text-fg-subtle uppercase">{label}</span>
-		<span class="flex min-w-0 flex-1 items-center gap-3 truncate">{@render summary()}</span>
-	</a>
+	<BandStrip {label} {open} href={hrefFor({ [param]: open ? closedValue : openValue })}>
+		{@render summary()}
+	</BandStrip>
 {/snippet}
 
 {#snippet runChain(list: Run[], n: number)}
@@ -402,14 +396,17 @@
 {#snippet currentRun(r: Run, compact: boolean)}
 	<a
 		href="/-/runs/{r.id}"
-		class="block rounded-md border border-border bg-bg px-3 py-2 hover:border-border-strong"
+		class="block min-w-0 rounded-md border border-border bg-bg px-3 py-2 hover:border-border-strong"
 	>
-		<div class="flex items-center gap-2 text-[0.8125rem]">
+		<div class="flex flex-wrap items-center gap-2 text-[0.8125rem]">
 			<RunBadge state={r.state} label />
-			<span class="font-mono text-xs text-fg-muted">#{r.short}</span>
+			<span title={r.id} class="min-w-0 truncate font-mono text-xs text-fg-muted">#{r.short}</span>
 			<span class="tabular ml-auto text-xs text-fg-subtle">{dur(r.durationSeconds)}</span>
 		</div>
-		<p class="mt-1 truncate text-xs text-fg-muted">
+		<p
+			title="{refShortName(r.ref)} · {r.commitId} · {r.runner}"
+			class="mt-1 truncate text-xs text-fg-muted"
+		>
 			{refShortName(r.ref)} · <span class="font-mono">{shortId(r.commitId)}</span> · {r.runner}
 		</p>
 		<div class="mt-2">{@render stepsBar(r, !compact)}</div>
@@ -419,17 +416,16 @@
 <div class="flex min-h-0 flex-1 flex-col lg:flex-row">
 	<div class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
 		<!-- ═══ Pulse ═══ -->
-		{#if !pulseOpen}
-			{#snippet pulseSummary()}
-				<span class="font-medium text-fg">{repo?.owner} / {repo?.name}</span>
-				<span>last change {relativeTime(toDate(log.data?.[0]?.commitTime))}</span>
-				{#if current && ciOn}<span class="flex items-center gap-1"
-						><RunBadge state={current.state} size={10} />#{current.short}</span
-					>{/if}
-				{#if mirror}<span class={mirror.ok ? '' : 'text-danger'}>{mirror.t}</span>{/if}
-			{/snippet}
-			{@render strip('Pulse', false, 'pulse', null, '0', pulseSummary)}
-		{:else}
+		{#snippet pulseSummary()}
+			<span class="font-medium text-fg">{repo?.owner} / {repo?.name}</span>
+			<span>last change {relativeTime(toDate(log.data?.[0]?.commitTime))}</span>
+			{#if current && ciOn}<span class="flex items-center gap-1"
+					><RunBadge state={current.state} size={10} />#{current.short}</span
+				>{/if}
+			{#if mirror}<span class={mirror.ok ? '' : 'text-danger'}>{mirror.t}</span>{/if}
+		{/snippet}
+		{@render strip('Pulse', pulseOpen, 'pulse', null, '0', pulseSummary)}
+		{#if pulseOpen}
 			<section class="shrink-0 border-b border-border bg-surface" aria-label="Pulse">
 				<div
 					class="grid grid-cols-[minmax(0,1fr)] gap-x-8 px-4 pt-4 pb-4 sm:px-6 xl:grid-cols-[minmax(0,1fr)_15rem]"
@@ -437,14 +433,6 @@
 					<div class="min-w-0">
 						<div class="flex flex-wrap items-start gap-x-6 gap-y-2">
 							<div class="min-w-0 flex-1 basis-full sm:basis-0">
-								<div class="flex items-center gap-2 text-xs text-fg-subtle">
-									<a
-										href={hrefFor({ pulse: '0' })}
-										data-sveltekit-noscroll
-										aria-expanded="true"
-										class="tracking-wide uppercase hover:text-fg">▾ Pulse</a
-									>
-								</div>
 								<h1 class="mt-1 text-2xl tracking-tight">
 									<span class="text-fg-muted">{repo?.owner} /</span>
 									<span class="font-semibold">{repo?.name}</span>
@@ -529,7 +517,10 @@
 								</div>
 							</figure>
 
-							<ul class="mt-3 space-y-0.5 text-[0.8125rem]">
+							<ul
+								aria-label="Pulse commits"
+								class="mt-3 max-h-48 overflow-y-auto overscroll-contain space-y-0.5 text-[0.8125rem]"
+							>
 								{#each recent as c (c.id)}
 									{@const run = runByCommit.get(c.id)}
 									<li>
@@ -633,7 +624,7 @@
 					class="shrink-0 border-b border-border bg-surface px-4 py-3 sm:px-6"
 					aria-label="Pipelines"
 				>
-					<div class="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[20rem_minmax(0,1fr)]">
+					<div class="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)]">
 						{#if current}{@render currentRun(current, false)}{/if}
 						<div class="min-w-0">
 							<ul class="relative flex gap-2 overflow-x-auto pb-1">
@@ -643,13 +634,15 @@
 											href="/-/runs/{r.id}"
 											class="block w-36 rounded-md border border-border px-2.5 py-1.5 text-xs hover:border-border-strong"
 										>
-											<span class="flex items-center gap-1.5"
-												><RunBadge state={r.state} size={11} /><span class="font-mono text-fg-muted"
+											<span class="flex flex-wrap items-center gap-1.5"
+												><RunBadge state={r.state} size={11} /><span title={r.id} class="min-w-0 truncate font-mono text-fg-muted"
 													>#{r.short}</span
 												><span class="tabular ml-auto text-fg-subtle">{dur(r.durationSeconds)}</span
 												></span
 											>
-											<span class="mt-0.5 block truncate text-fg-subtle"
+											<span
+												title="{relativeTime(toDate(r.createTime))} · {r.commitId}"
+												class="mt-0.5 block truncate text-fg-subtle"
 												>{relativeTime(toDate(r.createTime))} ·
 												<span class="font-mono">{shortId(r.commitId)}</span></span
 											>

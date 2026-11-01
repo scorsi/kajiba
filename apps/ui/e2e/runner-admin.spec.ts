@@ -75,7 +75,11 @@ test("another user gets 403 and no administration entry", async ({ page }) => {
   await page.goto("/-/admin");
   await expect(page.getByText("403 · no access")).toBeVisible();
   await page.goto("/?drawer=1");
-  await expect(page.getByRole("link", { name: "Account" })).toBeVisible();
+  await expect(
+    page
+      .getByRole("navigation", { name: "Pages" })
+      .getByRole("link", { name: "Account", exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole("link", { name: "Administration" })).toHaveCount(
     0,
   );

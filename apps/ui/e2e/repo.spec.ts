@@ -255,3 +255,127 @@ test("repository files default to content and retain selected commit context", a
   await expect(preview).not.toContainText("More.");
   await expect(touched.getByRole("link")).toHaveCount(2);
 });
+
+test("bands fold from the far edge; Pulse day lists stay bounded and stable", async ({
+  page,
+}) => {
+  await authenticator(page);
+  await enroll(page, enrollLink());
+  await page.getByRole("link", { name: "Continue to kajiba" }).click();
+
+  test.setTimeout(60_000);
+
+  // Exercise the empty far edge of every strip, including the shared component
+  // on account, activity and administration pages.
+  for (const url of [
+    "/alice/demo?ref=feature",
+    "/-/account",
+    "/",
+    "/-/admin",
+  ]) {
+    await page.goto(url);
+    const pulse = page.getByRole("region", { name: "Pulse", exact: true });
+    await expect(pulse).toBeVisible();
+    if (url.startsWith("/alice/demo")) {
+      await expect(
+        pulse.getByRole("list", { name: "Pulse commits" }).getByRole("link"),
+      ).toHaveCount(2);
+    }
+    const strips = page.locator("a[aria-expanded]");
+    const count = await strips.count();
+    for (let i = 0; i < count; i++) {
+      const strip = strips.nth(i);
+      await strip.scrollIntoViewIfNeeded();
+      const before = await strip.boundingBox();
+      const expanded = await strip.getAttribute("aria-expanded");
+      await strip.click({
+        position: { x: before!.width - 5, y: before!.height / 2 },
+      });
+      await expect(strip).toHaveAttribute(
+        "aria-expanded",
+        expanded === "true" ? "false" : "true",
+      );
+      if (i === 0) {
+        expect((await strip.boundingBox())!.y).toBeCloseTo(before!.y, 0);
+        await expect(pulse).toBeHidden();
+      }
+      const box = await strip.boundingBox();
+      await strip.click({
+        position: { x: box!.width - 5, y: box!.height / 2 },
+      });
+      await expect(strip).toHaveAttribute("aria-expanded", expanded!);
+    }
+  }
+
+  await page.goto("/alice/demo?ref=feature&history=1");
+  const pulse = page.getByRole("region", { name: "Pulse", exact: true });
+  const list = pulse.getByRole("list", { name: "Pulse commits" });
+  await expect(list.getByRole("link")).toHaveCount(2);
+  // Selecting a recent commit must not switch to a day list.
+  const recent = await list.innerText();
+  const recentPosition = await list.boundingBox();
+  await list.getByRole("link", { name: /Extend the guide/ }).click();
+  await expect(page).toHaveURL(/[?&]at=/);
+  await expect(page).not.toHaveURL(/day=/);
+  await expect(list).toHaveText(recent, { useInnerText: true });
+  expect((await list.boundingBox())!.y).toBeCloseTo(recentPosition!.y, 0);
+
+  await pulse
+    .getByRole("button", { name: /, [1-9]\d* commits/ })
+    .last()
+    .click();
+  await expect(page).toHaveURL(/day=/);
+  const day = new URL(page.url()).searchParams.get("day");
+  const contents = await list.innerText();
+  const before = await list.boundingBox();
+  await list.getByRole("link").first().click();
+  await expect(page).not.toHaveURL(/[?&]at=/);
+  expect(new URL(page.url()).searchParams.get("day")).toBe(day);
+  await expect(list).toHaveText(contents, { useInnerText: true });
+  expect((await list.boundingBox())!.y).toBeCloseTo(before!.y, 0);
+
+  // Stress the real day-list layout independently of the tiny Git fixture.
+  await list.evaluate((el) => {
+    const row = el.firstElementChild!;
+    for (let i = 0; i < 40; i++) el.append(row.cloneNode(true));
+  });
+  const height = await list.evaluate((el) => ({
+    client: el.clientHeight,
+    scroll: el.scrollHeight,
+    max: parseFloat(getComputedStyle(el).maxHeight),
+    overflow: getComputedStyle(el).overflowY,
+  }));
+  expect(height.overflow).toBe("auto");
+  expect(height.client).toBeLessThanOrEqual(height.max);
+  expect(height.scroll).toBeGreaterThan(height.client);
+  await list.evaluate((el) => {
+    el.scrollTop = el.scrollHeight;
+  });
+  expect(await list.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+
+  // Select from the scrolled list and keep both its viewport and scroll offset.
+  const commit = list.getByRole("link").last();
+  await commit.scrollIntoViewIfNeeded();
+  const scrollTop = await list.evaluate((el) => el.scrollTop);
+  const position = await list.boundingBox();
+  const selected = new URL(
+    (await commit.getAttribute("href"))!,
+    page.url(),
+  ).searchParams.get("at");
+  expect(selected).toBeTruthy();
+  await commit.click();
+  await expect(page).toHaveURL(
+    (url) => url.searchParams.get("at") === selected,
+  );
+  expect(new URL(page.url()).searchParams.get("day")).toBe(day);
+  expect(await list.evaluate((el) => el.scrollTop)).toBeCloseTo(scrollTop, 0);
+  expect((await list.boundingBox())!.y).toBeCloseTo(position!.y, 0);
+
+  const history = page.getByRole("region", { name: "History", exact: true });
+  await expect(
+    history.getByRole("link", { name: /^Commits\s*2$/ }),
+  ).toBeVisible();
+  await expect(
+    history.getByText(/\d+ pushes \(grouped by author\/day\)/),
+  ).toBeVisible();
+});

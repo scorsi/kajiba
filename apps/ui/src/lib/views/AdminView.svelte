@@ -34,6 +34,7 @@
 	let { forge, server }: { forge: Forge; server: ServerInfo } = $props();
 
 	const q = $derived(page.url.searchParams);
+	const pulseOpen = $derived(q.get('pulse') !== '0');
 	function hrefFor(next: Record<string, string | null>) {
 		const u = new URLSearchParams(q.toString());
 		for (const [k, v] of Object.entries(next)) v === null ? u.delete(k) : u.set(k, v);
@@ -144,10 +145,13 @@
 
 <div class="relative min-h-0 flex-1 overflow-y-auto">
 	<!-- Pulse -->
+	<BandStrip label="Pulse" open={pulseOpen} href={hrefFor({ pulse: pulseOpen ? '0' : null })}>
+		<span>Administration</span>
+	</BandStrip>
+	{#if pulseOpen}
 	<section class="border-b border-border bg-surface px-4 py-4 sm:px-6" aria-label="Pulse">
 		<div class="grid grid-cols-[minmax(0,1fr)] gap-x-10 gap-y-5 lg:grid-cols-[minmax(0,1fr)_17rem]">
 			<div class="min-w-0">
-				<p class="text-xs tracking-wide text-fg-subtle uppercase">▾ Pulse</p>
 				<h1 class="mt-1 text-2xl font-semibold tracking-tight">
 					Administration <span class="text-base font-normal text-fg-muted"
 						>kajiba {server.version}</span
@@ -215,6 +219,7 @@
 			</aside>
 		</div>
 	</section>
+	{/if}
 
 	<!-- Runners -->
 	<BandStrip label="Runners" open={runnersOpen} href={toggle('runners', runnersOpen, true)}>
