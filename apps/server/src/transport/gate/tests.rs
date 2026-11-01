@@ -284,6 +284,95 @@ async fn session_fixture() -> (State, local::Admin, Gate, String) {
 }
 
 #[tokio::test]
+async fn session_before_snapshot_waits_then_proceeds() {
+    let (_state, admin, gate, alice) = session_fixture().await;
+    let generation = kajiba_core::new_id().unwrap();
+    gate.hello(Request::new(HelloRequest {
+        version: env!("CARGO_PKG_VERSION").into(),
+        generation: generation.clone(),
+    }))
+    .await
+    .unwrap();
+    let request = OpenSessionRequest {
+        generation: generation.clone(),
+        user_public_id: alice,
+        kind: kajiba_proto::git::v1::SessionKind::ReceivePack.into(),
+        repository: Some(open_session_request::Repository::RepoAddress(
+            "alice/demo".into(),
+        )),
+        session_id: kajiba_core::new_id().unwrap(),
+        correlation_id: "before-snapshot".into(),
+    };
+    let open = gate.open_session(Request::new(request.clone()));
+    tokio::pin!(open);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut open)
+            .await
+            .is_err()
+    );
+    assert!(gate.admission.session(&request.session_id).is_none());
+    // Acquiring the writer here also proves the waiter releases it.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        gate.admission
+            .rebuild(&mut *admin.writer.lock().await, &generation, vec![])
+            .await
+            .unwrap();
+        let opened = open.await.unwrap().into_inner().session.unwrap();
+        assert_eq!(opened.session_id, request.session_id);
+        assert_eq!(opened.generation, generation);
+    })
+    .await
+    .unwrap();
+    assert!(gate.admission.session(&request.session_id).is_some());
+}
+
+#[tokio::test]
+async fn session_before_snapshot_times_out_cleanly() {
+    let (_state, admin, gate, alice) = session_fixture().await;
+    let generation = kajiba_core::new_id().unwrap();
+    gate.hello(Request::new(HelloRequest {
+        version: env!("CARGO_PKG_VERSION").into(),
+        generation: generation.clone(),
+    }))
+    .await
+    .unwrap();
+    let request = OpenSessionRequest {
+        generation: generation.clone(),
+        user_public_id: alice,
+        kind: kajiba_proto::git::v1::SessionKind::ReceivePack.into(),
+        repository: Some(open_session_request::Repository::RepoAddress(
+            "alice/demo".into(),
+        )),
+        session_id: kajiba_core::new_id().unwrap(),
+        correlation_id: "missing-snapshot".into(),
+    };
+    let start = tokio::time::Instant::now();
+    let err = tokio::time::timeout(
+        Duration::from_secs(4),
+        gate.open_session(Request::new(request.clone())),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(start.elapsed() >= Duration::from_secs(3));
+    assert_eq!(err.code(), Code::Unavailable);
+    assert_eq!(
+        err.message(),
+        "GIT_SIDE_UNAVAILABLE: session snapshot required"
+    );
+    assert_eq!(
+        err.get_error_details().error_info().unwrap().reason,
+        "GIT_SIDE_UNAVAILABLE"
+    );
+    assert!(gate.admission.session(&request.session_id).is_none());
+    gate.admission
+        .rebuild(&mut *admin.writer.lock().await, &generation, vec![])
+        .await
+        .unwrap();
+    gate.open_session(Request::new(request)).await.unwrap();
+}
+
+#[tokio::test]
 async fn sessions_resolve_redirects_check_roles_and_refuse_archives() {
     use kajiba_proto::git::v1::SessionKind;
     let (_state, admin, gate, alice) = session_fixture().await;

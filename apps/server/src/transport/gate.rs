@@ -334,19 +334,33 @@ impl Gate {
                 "invalid session_id",
             ));
         }
-        let mut writer = self.writer.lock().await;
-        let generation = self
-            .generation
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| super::git_side::unavailable("Hello required"))?;
-        if request.generation != generation {
-            return Err(super::git_side::unavailable("session generation changed"));
-        }
-        if self.admission.generation().as_ref() != Some(&generation) {
-            return Err(super::git_side::unavailable("session snapshot required"));
-        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        let (mut writer, generation) = loop {
+            let writer = tokio::time::timeout_at(deadline, self.writer.lock())
+                .await
+                .map_err(|_| super::git_side::unavailable("session snapshot required"))?;
+            let generation = self
+                .generation
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| super::git_side::unavailable("Hello required"))?;
+            if request.generation != generation {
+                return Err(super::git_side::unavailable("session generation changed"));
+            }
+            if self.admission.generation().as_ref() == Some(&generation) {
+                break (writer, generation);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(super::git_side::unavailable("session snapshot required"));
+            }
+            // Snapshot rebuilding needs the writer lock too.
+            drop(writer);
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(25)),
+            )
+            .await;
+        };
         if self.closed.lock().unwrap().contains(&request.session_id) {
             return Err(rpc_error(
                 tonic::Code::FailedPrecondition,
