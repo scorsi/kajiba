@@ -149,5 +149,21 @@ import ./ci-common.nix (args // { kajibaGitPackage = heldGit; }) {
         forge.succeed(dump_cmd)
         assert len([e for e in unit_lines(forge, "kajiba-server.service") if e.get("event") == "dump-done"]) == 2
         forge.fail("runuser -u kajiba-server -- touch /var/lib/kajiba-git/repos/forbidden")
+
+    with subtest("documented pre-backup hook copies a completed dump"):
+        forge.succeed("install -d -o kajiba-server -g kajiba-server -m 0700 /var/lib/kajiba-backup-handoff")
+        forge.succeed("sh ${pkgs.writeText "kajiba-backup-hook.sh" (builtins.readFile ../../docs/examples/backup-hook.sh)}")
+        copied = forge.succeed("find /var/lib/kajiba-backup-handoff -mindepth 1 -maxdepth 1 -type d").splitlines()
+        assert len(copied) == 1, copied
+        original = "/var/lib/kajiba-dumps/" + copied[0].rsplit("/", 1)[-1]
+        forge.succeed(f"diff -r {original} {copied[0]}")
+        # A successful dump followed by a failed copy must still fail the hook.
+        forge.succeed("chmod 0500 /var/lib/kajiba-backup-handoff")
+        try:
+            forge.fail("sh ${pkgs.writeText "kajiba-backup-hook.sh" (builtins.readFile ../../docs/examples/backup-hook.sh)}")
+            assert forge.succeed("find /var/lib/kajiba-backup-handoff -mindepth 1 -maxdepth 1 -type d").splitlines() == copied
+        finally:
+            forge.succeed("chmod 0700 /var/lib/kajiba-backup-handoff")
+
   '';
 }

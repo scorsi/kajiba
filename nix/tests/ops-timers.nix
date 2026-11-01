@@ -110,5 +110,31 @@ import ./ci-common.nix args {
         retried = forge.succeed("cat /var/lib/kajiba-fixtures/gc-entered").splitlines()
         assert len(retried) > len(children) and set(retried) == {"kajiba-git"}, retried
         validate_logs(forge, "kajiba-gc.service")
+
+    with subtest("documented hook succeeds and a live copy defers scheduled rotation"):
+        forge.succeed("install -d -o kajiba-server -g kajiba-server -m 0700 /var/lib/kajiba-backup-handoff")
+        forge.succeed("sh ${pkgs.writeText "kajiba-backup-hook.sh" (builtins.readFile ../../docs/examples/backup-hook.sh)}")
+        copied = forge.succeed("find /var/lib/kajiba-backup-handoff -mindepth 1 -maxdepth 1 -type d").splitlines()
+        assert len(copied) == 1, copied
+        original = "/var/lib/kajiba-dumps/" + copied[0].rsplit("/", 1)[-1]
+        forge.succeed(f"diff -r {original} {copied[0]}")
+        # Hold the same descriptor a direct external reader keeps until its read ends.
+        forge.succeed("(flock -x 9; touch /tmp/copy-locked; while test ! -e /tmp/copy-release; do sleep 0.02; done) 9>/var/lib/kajiba-dumps/.copy.lock </dev/null >/tmp/copy-lock.out 2>&1 &")
+        try:
+            forge.wait_until_succeeds("test -e /tmp/copy-locked")
+            protected = dumps()
+            for _ in range(3):
+                invoke_dump()
+            assert len(dumps()) == len(protected) + 3
+            assert set(protected).issubset(dumps())
+            forge.succeed(f"diff -r {original} {copied[0]}")
+            forge.succeed("curl -fsS http://127.0.0.1:8080/readyz")
+        finally:
+            forge.succeed("touch /tmp/copy-release")
+        forge.wait_until_succeeds("flock -n /var/lib/kajiba-dumps/.copy.lock true")
+        invoke_dump()
+        assert len(dumps()) == 2
+        # The external tool's completed private copy survives rotation of the source.
+        forge.succeed(f"test -f {copied[0]}/manifest.json")
   '';
 }

@@ -137,8 +137,9 @@ hardened oneshot clients run as the respective service users, use only Unix
 sockets, have no writable state paths and wait for the admitted operation to
 complete. The server owns dump creation and retention; the Git daemon owns gc.
 No automatic quarantine deletion or separate retention timer is installed.
-External-copy coordination and the full restore procedure are documented by
-the J8 backup handoff task, not by additional module options.
+External-copy locking, the pre-backup hook and the full offline restore procedure
+are documented in the [README](../README.md#dump-and-external-backup) (0174).
+They reuse `dump.dir`; no additional module option is needed.
 
 The server reads `/etc/kajiba/server.toml`. Changes to `users`, `runners`, `repos`
 and `mirror` send SIGHUP without restarting. All other settings, the server

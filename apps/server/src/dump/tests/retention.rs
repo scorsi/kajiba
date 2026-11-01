@@ -90,3 +90,48 @@ fn ordering_boundaries_clock_regression_and_failed_deletion() {
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     assert_eq!(attempted, ["oldest"]);
 }
+
+#[tokio::test]
+async fn external_copy_defers_rotation_until_release_without_blocking_publication() {
+    let mut f = Fixture::new().await;
+    let first = f.dump().await.unwrap();
+    retain(&f.dumps, 1, &first).await.unwrap();
+    let lock = File::options()
+        .write(true)
+        .open(f.dumps.join(".copy.lock"))
+        .unwrap();
+    assert_eq!(lock.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+    lock.try_lock().unwrap();
+    let second = f.dump().await.unwrap();
+    retain(&f.dumps, 1, &second).await.unwrap();
+    verify(&first).await.unwrap();
+    verify(&second).await.unwrap();
+    lock.unlock().unwrap();
+    retain(&f.dumps, 1, &second).await.unwrap();
+    assert!(!first.exists());
+    verify(&second).await.unwrap();
+    // Rotation releases its lock even after verification fails.
+    fs::write(second.join("unexpected"), "invalid").unwrap();
+    assert!(retain(&f.dumps, 1, &second).await.is_err());
+    lock.try_lock().unwrap();
+    lock.unlock().unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+async fn unsafe_copy_lock_refuses_pruning() {
+    let mut f = Fixture::new().await;
+    let first = f.dump().await.unwrap();
+    let second = f.dump().await.unwrap();
+    let target = f.root.join("untouched");
+    fs::write(&target, "keep").unwrap();
+    symlink(&target, f.dumps.join(".copy.lock")).unwrap();
+    assert!(retain(&f.dumps, 1, &second).await.is_err());
+    assert_eq!(fs::read(&target).unwrap(), b"keep");
+    assert!(first.exists() && second.exists());
+    fs::remove_file(f.dumps.join(".copy.lock")).unwrap();
+    fs::create_dir(f.dumps.join(".copy.lock")).unwrap();
+    assert!(retain(&f.dumps, 1, &second).await.is_err());
+    assert!(first.exists() && second.exists());
+    f.close().await;
+}

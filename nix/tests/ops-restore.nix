@@ -1,13 +1,15 @@
 # J8 tasks 6/10: offline restore and cleanup recovery across both state trees.
-args:
+{ pkgs, ... }@args:
 import ./ci-common.nix args {
   name = "ops-restore";
   script = ''
-    restore_cmd = "kajiba-server restore --config /etc/kajiba/server.toml "
+    def restore_cmd(directory):
+        return f"kajiba-server restore {directory} --config /etc/kajiba/server.toml"
     normal_query = "SELECT r.public_id, r.state, coalesce(r.failure_reason, 'none'), j.public_id, j.state, a.public_id, a.state, s.idx, s.state FROM run r JOIN job j ON j.run_id = r.id LEFT JOIN job_attempt a ON a.job_id = j.id LEFT JOIN step s ON s.attempt_id = a.id WHERE r.trigger != 'worktree' ORDER BY r.id, j.id, a.id, s.idx"
     units = "kajiba-server.service kajiba-git.service kajiba-server.socket kajiba-server-runner.socket kajiba-git.socket kajiba-git-ssh.socket"
 
     def stopped():
+        forge.succeed("systemctl stop kajiba-dump.timer kajiba-gc.timer kajiba-dump.service kajiba-gc.service")
         forge.succeed("systemctl stop " + units)
         for unit in units.split():
             assert forge.succeed(f"systemctl show -P ActiveState {unit}").strip() in ("inactive", "failed")
@@ -65,16 +67,20 @@ import ./ci-common.nix args {
         quarantine_files = forge.succeed(f"cd {quarantine} && find . -type f -exec sha256sum {{}} + | sort")
         assert sql(f"SELECT archived_at FROM repo WHERE public_id = '{archived_id}'") == "1"
         history_before_dump = sql(normal_query)
-        directory = forge.succeed("kajiba-server admin dump").strip()
+        forge.succeed("install -d -o kajiba-server -g kajiba-server -m 0700 /var/lib/kajiba-backup-handoff")
+        forge.succeed("sh ${pkgs.writeText "kajiba-backup-hook.sh" (builtins.readFile ../../docs/examples/backup-hook.sh)}")
+        copied = forge.succeed("find /var/lib/kajiba-backup-handoff -mindepth 1 -maxdepth 1 -type d").splitlines()
+        assert len(copied) == 1, copied
+        directory = copied[0]
         manifest_hash = forge.succeed(f"sha256sum {directory}/manifest.json").split()[0]
 
     with subtest("running daemons and stopped daemons with active sockets refuse restore"):
-        code, out = forge.execute(restore_cmd + directory + " 2>&1")
+        code, out = forge.execute(restore_cmd(directory) + " 2>&1")
         assert code != 0 and "stop both daemons" in out, out
         forge.succeed("systemctl stop kajiba-server.service kajiba-git.service")
         # A service stop leaves activating sockets alive (0157).
         forge.succeed("systemctl is-active kajiba-server.socket")
-        code, out = forge.execute(restore_cmd + directory + " 2>&1")
+        code, out = forge.execute(restore_cmd(directory) + " 2>&1")
         assert code != 0 and "activating sockets" in out, out
         stopped()
 
@@ -85,13 +91,13 @@ import ./ci-common.nix args {
         forge.succeed("sqlite3 /root/newer-dump/server/db/kajiba.sqlite \"INSERT INTO _sqlx_migrations (version, description, installed_on, success, checksum, execution_time) VALUES (9999, 'future', CURRENT_TIMESTAMP, 1, X'00', 0)\"")
         forge.succeed("python3 - <<'PY'\nimport base64, hashlib, json\nfrom pathlib import Path\np = Path('/root/newer-dump')\nm = json.loads((p / 'manifest.json').read_text())\nb = (p / 'server/db/kajiba.sqlite').read_bytes()\nk = base64.urlsafe_b64encode(b'server/db/kajiba.sqlite').decode().rstrip('=')\nm['entries'][k]['size'] = len(b)\nm['entries'][k]['sha256'] = hashlib.sha256(b).hexdigest()\nm['schema'] = 9999\n(p / 'manifest.json').write_text(json.dumps(m))\nPY")
         newer_hash = forge.succeed("sha256sum /root/newer-dump/server/db/kajiba.sqlite").split()[0]
-        code, out = forge.execute(restore_cmd + "/root/newer-dump 2>&1")
+        code, out = forge.execute(restore_cmd("/root/newer-dump") + " 2>&1")
         assert code != 0 and "schema" in out, out
         assert forge.succeed("sha256sum /root/newer-dump/server/db/kajiba.sqlite").split()[0] == newer_hash
         forge.succeed("test ! -e /var/lib/kajiba-server/db", "test ! -e /var/lib/kajiba-git/repos")
 
     with subtest("restore preserves the privilege split and clears absent log indexes"):
-        forge.succeed(restore_cmd + directory)
+        forge.succeed(restore_cmd(directory))
         assert forge.succeed(f"sha256sum {directory}/manifest.json").split()[0] == manifest_hash
         for path, owner in [("/var/lib/kajiba-server/db", "kajiba-server:kajiba-server"), ("/var/lib/kajiba-git/repos", "kajiba-git:kajiba-git")]:
             assert forge.succeed(f"stat -c '%U:%G:%a' {path}").strip() == owner + ":750"

@@ -6,11 +6,11 @@ use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
-    fs::{self, File},
+    fs::{self, File, OpenOptions, TryLockError},
     io::{self, Read, Write},
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
-        fs::DirBuilderExt,
+        fs::{DirBuilderExt, OpenOptionsExt},
     },
     path::{Component, Path, PathBuf},
     process::Command,
@@ -180,6 +180,24 @@ async fn create_payload(
 pub(crate) async fn retain(destination: &Path, keep: u32, current: &Path) -> Result<()> {
     real_directory(destination).map_err(|e| e.to_string())?;
     let destination = destination.canonicalize().map_err(|e| e.to_string())?;
+    let lock = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(destination.join(".copy.lock"))
+        .map_err(|e| e.to_string())?;
+    if !lock.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err("dump copy lock is not a regular file".into());
+    }
+    match lock.try_lock() {
+        Ok(()) => {}
+        // External copies must not extend maintenance; retry pruning on the next dump.
+        Err(TryLockError::WouldBlock) => return Ok(()),
+        Err(TryLockError::Error(e)) => return Err(e.to_string()),
+    }
+    let _lock = CopyLock(lock);
     let mut completed = Vec::new();
     for entry in fs::read_dir(&destination).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -212,6 +230,14 @@ pub(crate) async fn retain(destination: &Path, keep: u32, current: &Path) -> Res
     prune(completed, keep, current, |path| fs::remove_dir_all(path))
         .and_then(|()| crate::state::sync_dir(&destination))
         .map_err(|e| e.to_string())
+}
+
+// Explicit unlock also releases a descriptor briefly inherited by a spawned child.
+struct CopyLock(File);
+impl Drop for CopyLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 fn prune(

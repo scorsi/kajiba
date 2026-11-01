@@ -695,7 +695,9 @@ async fn dump_drains_refuses_concurrency_and_publishes_only_success() {
         sample(admin.registry.exposition("test", [0; 4], [0; 4])),
         sample(success)
     );
-    assert_eq!(fs::read_dir(&admin.dump_dir).unwrap().count(), 1);
+    assert!(completed.is_dir());
+    assert!(admin.dump_dir.join(".copy.lock").is_file());
+    assert_eq!(fs::read_dir(&admin.dump_dir).unwrap().count(), 2);
     fs::remove_file(git_state.join("tmp/orphans/unsafe")).unwrap();
     let next = admin
         .create_dump(&mut git.client)
@@ -705,7 +707,8 @@ async fn dump_drains_refuses_concurrency_and_publishes_only_success() {
         .dir;
     assert!(!completed.exists());
     assert!(PathBuf::from(next).is_dir());
-    assert_eq!(fs::read_dir(&admin.dump_dir).unwrap().count(), 1);
+    assert!(admin.dump_dir.join(".copy.lock").is_file());
+    assert_eq!(fs::read_dir(&admin.dump_dir).unwrap().count(), 2);
 }
 
 #[tokio::test]

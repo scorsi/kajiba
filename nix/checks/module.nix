@@ -328,6 +328,27 @@ in
   # As in oroshi, discard the Linux toplevel context so Darwin never builds it.
   module-eval =
     assert assertionsPass { };
+    assert
+      let
+        example = import ../../docs/examples/nixos.nix;
+        evaluated = evaluateWith false [ example ];
+        cfg = evaluated.config.services.kajiba-server;
+      in
+      builtins.all (a: a.assertion) evaluated.config.assertions
+      && cfg.http.publicUrl == "https://forge.example.org"
+      && cfg.dump.keep == 7
+      &&
+        cfg.persistedPaths == [
+          "/var/lib/kajiba-server"
+          "/var/lib/kajiba-git"
+          "/var/lib/kajiba-dumps"
+        ]
+      && lib.hasInfix ("```nix\n" + builtins.readFile ../../docs/examples/nixos.nix + "```") (
+        builtins.readFile ../../README.md
+      );
+    assert lib.hasInfix ("```sh\n" + builtins.readFile ../../docs/examples/backup-hook.sh + "```") (
+      builtins.readFile ../../README.md
+    );
     # Keep the documented J8 surface stable for J9; development-only overrides stay internal.
     assert
       let
@@ -1326,6 +1347,9 @@ in
       }
       ! grep -q '^probe =' ${
         configFileOf (evaluateWith true [ { services.kajiba-server.ssh.probe = null; } ])
+      }
+      ${lib.getExe kajibaServerPackage} config check ${
+        configFileOf (evaluateWith true [ (import ../../docs/examples/nixos.nix) ])
       }
       # Parse the actual dedicated config with OpenSSH, without runtime users or host keys.
       ${lib.getExe' pkgs.openssh "sshd"} -G -f ${
