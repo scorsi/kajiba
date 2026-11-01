@@ -41,6 +41,9 @@ nix build .#kajiba-server .#kajiba-git .#kajiba-runner .#kajiba-cli .#kajiba-ui
 `nix flake check` is only complete on Linux (`aarch64-linux`); the NixOS
 integration tests don't run on Darwin.
 
+The frozen NixOS option surface and unit contracts are documented in
+[`docs/nixos.md`](docs/nixos.md).
+
 ## License
 
 Apache-2.0, see [`LICENSE`](LICENSE).

@@ -328,6 +328,54 @@ in
   # As in oroshi, discard the Linux toplevel context so Darwin never builds it.
   module-eval =
     assert assertionsPass { };
+    # Keep the documented J8 surface stable for J9; development-only overrides stay internal.
+    assert
+      let
+        options = (evaluate false { }).options.services;
+      in
+      lib.attrNames options.kajiba-server == [
+        "auth"
+        "ci"
+        "dump"
+        "enable"
+        "git"
+        "http"
+        "log"
+        "metrics"
+        "mirror"
+        "package"
+        "persistedPaths"
+        "repos"
+        "runnerListener"
+        "runners"
+        "ssh"
+        "stateDir"
+        "ui"
+        "users"
+      ]
+      &&
+        lib.attrNames options.kajiba-git == [
+          "log"
+          "metrics"
+          "package"
+          "ssh"
+          "stateDir"
+        ]
+      &&
+        lib.attrNames options.kajiba-runner == [
+          "backends"
+          "enable"
+          "hostname"
+          "log"
+          "maxJobs"
+          "metrics"
+          "name"
+          "package"
+          "stateDir"
+          "tags"
+          "tls"
+          "url"
+        ];
     # 0133: every CI mode evaluates, a typo does not, and the removed boolean names its replacement.
     assert lib.all (ci: assertionsPass { services.kajiba-server.repos.tools = { inherit ci; }; }) [
       "off"
@@ -504,8 +552,88 @@ in
         (evaluate false { })
         (evaluateWith false [ ])
       ];
+    assert
+      let
+        services = (evaluate false { }).config.systemd.services;
+      in
+      lib.all
+        (
+          name:
+          lib.all (key: services.${name}.serviceConfig.${key} == services.kajiba-server.serviceConfig.${key})
+            [
+              "ProtectSystem"
+              "ProtectHome"
+              "PrivateTmp"
+              "PrivateDevices"
+              "NoNewPrivileges"
+              "CapabilityBoundingSet"
+              "AmbientCapabilities"
+              "RestrictNamespaces"
+              "RestrictRealtime"
+              "RestrictSUIDSGID"
+              "LockPersonality"
+              "ProtectClock"
+              "ProtectControlGroups"
+              "ProtectHostname"
+              "ProtectKernelLogs"
+              "ProtectKernelModules"
+              "ProtectKernelTunables"
+              "ProtectProc"
+              "RemoveIPC"
+              "SystemCallArchitectures"
+              "ProcSubset"
+              "PrivateIPC"
+              "LimitCORE"
+            ]
+          &&
+            services.${name}.serviceConfig.SystemCallFilter == [
+              "@system-service"
+              "~@privileged"
+            ]
+        )
+        [
+          "kajiba-dump"
+          "kajiba-gc"
+        ];
     assert (evaluateWith false [ ]).config.services.kajiba-server.dump.dir == "/var/lib/kajiba-dumps";
     assert (evaluateWith false [ ]).config.services.kajiba-server.dump.keep == null;
+    # Optional values stay omitted so Rust remains the source of runtime defaults.
+    assert
+      let
+        services = (evaluateWith false [ ]).config.services;
+        server = services.kajiba-server;
+        runner = services.kajiba-runner;
+      in
+      server.stateDir == "/var/lib/kajiba-server"
+      && services.kajiba-git.stateDir == "/var/lib/kajiba-git"
+      && runner.stateDir == "/var/lib/kajiba-runner"
+      && server.ui.enable
+      && server.runnerListener == null
+      && server.users == { }
+      && server.runners == { }
+      && server.repos == { }
+      && lib.all (value: value == null) [
+        server.http.listen
+        server.http.reflection
+        server.log.level
+        server.metrics.listen
+        server.auth.sessionTtl
+        server.auth.enrollmentTtl
+        server.mirror.reconcileInterval
+        server.ci.logRetention
+        server.ci.artifactRetention
+        server.ci.runAt
+        server.ci.worktreeRetention
+        server.dump.keep
+        services.kajiba-git.log.level
+        services.kajiba-git.metrics.listen
+        runner.hostname
+        runner.backends
+        runner.tags
+        runner.maxJobs
+        runner.log.level
+        runner.metrics.listen
+      ];
     # Generated unit, identity and persisted paths (0012, 0015, 0022), full then default options.
     assert
       let
@@ -607,22 +735,64 @@ in
       && lib.hasInfix " serve --config /etc/kajiba/server.toml" unit.ExecStart
       && lib.hasSuffix "kill -HUP $MAINPID" unit.ExecReload
       && lib.elem inputs.self.packages.${linux}.kajiba-server environment.systemPackages;
-    # Declaring a user changes only the reload triggers; a listen address restarts.
+    # Every declaration group reloads; all other configuration groups restart (0141).
     assert
       let
-        triggers =
-          modules:
-          lib.getAttrs [
-            "restartTriggers"
-            "reloadTriggers"
-          ] (evaluateWith false modules).config.systemd.services.kajiba-server;
-        base = triggers [ ];
-        user = triggers [ { services.kajiba-server.users.zed = { }; } ];
-        moved = triggers [ { services.kajiba-server.http.listen = "127.0.0.1:8081"; } ];
+        service = extra: (evaluate false extra).config.systemd.services.kajiba-server;
+        base = service { };
+        sockets =
+          extra:
+          lib.mapAttrs (_: socket: {
+            inherit (socket) listenStreams socketConfig;
+          }) (evaluate false extra).config.systemd.sockets;
       in
-      user.restartTriggers == base.restartTriggers
-      && user.reloadTriggers != base.reloadTriggers
-      && moved.restartTriggers != base.restartTriggers;
+      lib.all
+        (
+          extra:
+          let
+            next = service extra;
+          in
+          next.restartTriggers == base.restartTriggers
+          && next.reloadTriggers != base.reloadTriggers
+          && next.serviceConfig.ExecStart == base.serviceConfig.ExecStart
+          && sockets extra == sockets { }
+        )
+        [
+          { services.kajiba-server.users.zed = { }; }
+          { services.kajiba-server.repos.tools.description = lib.mkForce "Updated"; }
+          { services.kajiba-server.runners.build-1.capabilities.maxJobs = lib.mkForce 3; }
+          { services.kajiba-server.mirror.reconcileInterval = lib.mkForce "3h"; }
+        ]
+      && lib.all (extra: (service extra).restartTriggers != base.restartTriggers) [
+        { services.kajiba-server.stateDir = lib.mkForce "/srv/other-server"; }
+        { services.kajiba-server.git.socket = lib.mkForce "/run/other-git/local.sock"; }
+        { services.kajiba-server.http.listen = lib.mkForce "127.0.0.1:8082"; }
+        { services.kajiba-server.ssh.host = lib.mkForce "git.example.org"; }
+        { services.kajiba-server.log.level = lib.mkForce "warn"; }
+        { services.kajiba-server.metrics.listen = lib.mkForce "127.0.0.1:19431"; }
+        { services.kajiba-server.auth.sessionTtl = lib.mkForce "2d"; }
+        { services.kajiba-server.runnerListener.listen = lib.mkForce "0.0.0.0:8444"; }
+        { services.kajiba-server.ci.runAt = lib.mkForce "05:00"; }
+        { services.kajiba-server.ci.worktreeRetention = lib.mkForce "3h"; }
+        { services.kajiba-server.dump.keep = lib.mkForce 4; }
+        { services.kajiba-server.dump.dir = lib.mkForce "/srv/other-dumps"; }
+      ];
+    # Package and UI changes affect the command, while declarations never affect sockets.
+    assert
+      let
+        base = (evaluate false { }).config.systemd.services.kajiba-server;
+        changed =
+          (evaluate false {
+            services.kajiba-server.ui.package = lib.mkForce pkgs.emptyDirectory;
+          }).config.systemd.services.kajiba-server;
+      in
+      changed.serviceConfig.ExecStart != base.serviceConfig.ExecStart
+      && changed.restartIfChanged
+      && !changed.reloadIfChanged
+      &&
+        (evaluate false {
+          services.kajiba-server.package = lib.mkForce pkgs.emptyDirectory;
+        }).config.systemd.services.kajiba-server.restartTriggers != base.restartTriggers;
     assert lib.all
       (
         evaluation:
@@ -709,6 +879,8 @@ in
         && unit.SocketBindDeny == "any"
         && unit.SocketBindAllow == lib.optional (services.kajiba-git.metrics.listen != null) "tcp:9433"
         && !(unit ? ExecStartPost)
+        && !(unit ? ExecReload)
+        && git.reloadTriggers == [ ]
         &&
           unit.ExecStart == "${lib.getExe services.kajiba-git.package} serve --config ${
             environment.etc."kajiba/git.toml".source
@@ -841,6 +1013,39 @@ in
           )).drvPath
           true
       )).success;
+    # The root broker grants only fixed job operations; its socket outlives the runner.
+    assert
+      let
+        inherit ((evaluate false { }).config) systemd security;
+        socket = systemd.sockets.kajiba-job;
+        broker = systemd.services."kajiba-job@";
+        runner = systemd.services.kajiba-runner;
+      in
+      socket.socketConfig.ListenStream == "/run/kajiba-job/control"
+      && socket.socketConfig.Accept
+      && socket.socketConfig.SocketUser == "kajiba-runner"
+      && socket.socketConfig.SocketGroup == "kajiba-runner"
+      && socket.socketConfig.SocketMode == "0600"
+      && socket.socketConfig.MaxConnections == 16
+      && socket.partOf == [ ]
+      && socket.bindsTo == [ ]
+      && broker.partOf == [ ]
+      && broker.bindsTo == [ ]
+      && !(lib.elem "kajiba-runner.service" (
+        broker.requires ++ broker.after ++ socket.requires ++ socket.after
+      ))
+      && runner.requires == [ "kajiba-job.socket" ]
+      && broker.serviceConfig.User == "root"
+      && broker.serviceConfig.StandardInput == "socket"
+      && broker.serviceConfig.StandardOutput == "socket"
+      && broker.serviceConfig.NoNewPrivileges
+      && broker.serviceConfig.ProtectSystem == "strict"
+      && broker.serviceConfig.ProtectHome
+      && broker.serviceConfig.CapabilityBoundingSet == ""
+      && broker.serviceConfig.RestrictAddressFamilies == [ "AF_UNIX" ]
+      && broker.serviceConfig.TimeoutStartSec == 30
+      && broker.serviceConfig.RuntimeMaxSec == 30
+      && !security.polkit.enable;
     # darwinModules.runner: the same options, as a launchd daemon.
     assert
       let
@@ -992,6 +1197,7 @@ in
     assert evaluationFails { services.kajiba-git.enable = true; };
     assert evaluationFails { services.kajiba-git.unexpected = true; };
     assert evaluationFails { services.kajiba-git.stateDir = lib.mkForce "relative"; };
+    assert evaluationFails { services.kajiba-server.dump.dir = lib.mkForce "relative"; };
     assert lib.all
       (
         pair:
@@ -1143,6 +1349,12 @@ in
   };
   module-token-hash = refused "users.alice.tokens.ci.sha256" {
     services.kajiba-server.users.alice.tokens.ci.sha256 = lib.mkForce "not-a-hash";
+  };
+  module-ci-run-at = refused "ci.run_at" {
+    services.kajiba-server.ci.runAt = lib.mkForce "24:00";
+  };
+  module-worktree-retention = refused "ci.worktree_retention" {
+    services.kajiba-server.ci.worktreeRetention = lib.mkForce "0s";
   };
   module-runner-listener = refused "runner_listener: required to declare runners.build-1" {
     services.kajiba-server.runnerListener = lib.mkForce null;

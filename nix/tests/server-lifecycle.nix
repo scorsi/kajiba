@@ -219,6 +219,40 @@ pkgs.testers.runNixOSTest {
         assert not [e for e in events if e["event"] in ("config-reload-failed", "config-reload-partial")], f"{events}"
         assert_ready()
 
+    with subtest("manual reload applies declarations but retains restart-only operations settings"):
+        config = "/etc/kajiba/server.toml"
+        source = machine.succeed(f"readlink -f {config}").strip()
+        original = machine.succeed(f"cat {config}")
+        invocation = machine.succeed(f"systemctl show -P InvocationID {unit}").strip()
+        socket_invocation = machine.succeed("systemctl show -P InvocationID kajiba-server.socket").strip()
+        sockets = machine.succeed("stat -c '%i' /run/kajiba-git/local.sock /run/kajiba-git/ssh.sock")
+        # These keys normally cause a NixOS restart; manual SIGHUP must apply only declarations.
+        changed = original
+        for table, fields in [
+            ("http", 'listen = "127.0.0.1:8081"'),
+            ("dump", "keep = 2"),
+            ("ci", 'run_at = "04:30"\nworktree_retention = "2h"'),
+        ]:
+            header = f"[{table}]"
+            changed = changed.replace(header, header + "\n" + fields, 1) if header in changed else changed + "\n" + header + "\n" + fields + "\n"
+        changed += "\n[users.zed]\n"
+        assert changed != original
+        try:
+            machine.succeed(f"rm {config}", f"printf %s {shlex.quote(changed)} > {config}")
+            machine.succeed(f"kajiba-server config check --files {config}", f"systemctl reload {unit}")
+            machine.wait_until_succeeds(f"test \"$(sqlite3 {db} \"SELECT count(*) FROM user WHERE name = 'zed' AND disabled_at IS NULL\")\" = 1")
+            machine.wait_until_succeeds(f"journalctl _SYSTEMD_INVOCATION_ID={invocation} -o cat | grep -F config-reload-partial")
+            partial = [e for e in invocation_events() if e["event"] == "config-reload-partial"]
+            assert len(partial) == 1 and set(partial[0]["keys"].split(",")) == {"http", "ci", "dump"}, partial
+            assert machine.succeed(f"systemctl show -P InvocationID {unit}").strip() == invocation
+            assert machine.succeed("systemctl show -P InvocationID kajiba-server.socket").strip() == socket_invocation
+            assert machine.succeed("stat -c '%i' /run/kajiba-git/local.sock /run/kajiba-git/ssh.sock") == sockets
+            assert_ready()
+            machine.fail("curl -fsS --max-time 2 http://127.0.0.1:8081/healthz")
+        finally:
+            machine.succeed(f"ln -sfn {shlex.quote(source)} {config}", f"systemctl reload {unit}")
+        machine.wait_until_succeeds(f"test \"$(sqlite3 {db} \"SELECT count(*) FROM user WHERE name = 'zed' AND disabled_at IS NULL\")\" = 0")
+
     with subtest("a restart completes within a few seconds"):
         started = machine.succeed("date +%s.%N")
         machine.succeed(f"systemctl restart {unit}")
