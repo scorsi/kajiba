@@ -783,7 +783,8 @@ in
       description = "Weekly kajiba repository gc";
       wantedBy = [ "timers.target" ];
       timerConfig = {
-        OnCalendar = "weekly";
+        # Not `weekly` (Monday 00:00): the daily dump's maintenance would refuse the gc every week (0188).
+        OnCalendar = "Mon 04:00";
         Persistent = true;
         Unit = "kajiba-gc.service";
       };

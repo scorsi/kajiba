@@ -132,7 +132,8 @@ world-accessible or readable by any Git-side group (0073, 0074). Known tmpfiles,
 `environment.etc`, sops and agenix metadata is checked at evaluation; actual
 runtime ownership, ACLs and parent-directory access remain deployment concerns.
 
-`kajiba-dump.timer` runs daily, `kajiba-gc.timer` weekly, both persistent. Their
+`kajiba-dump.timer` runs daily, `kajiba-gc.timer` weekly on Monday 04:00 (after the
+dump, which would refuse it under maintenance), both persistent. Their
 hardened oneshot clients run as the respective service users, use only Unix
 sockets, have no writable state paths and wait for the admitted operation to
 complete. The server owns dump creation and retention; the Git daemon owns gc.

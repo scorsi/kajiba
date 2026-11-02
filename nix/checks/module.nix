@@ -499,7 +499,7 @@ in
           unit = service.serviceConfig;
         in
         timer.wantedBy == [ "timers.target" ]
-        && timer.timerConfig.OnCalendar == "weekly"
+        && timer.timerConfig.OnCalendar == "Mon 04:00"
         && timer.timerConfig.Persistent
         && timer.timerConfig.Unit == "kajiba-gc.service"
         &&

@@ -121,7 +121,8 @@ updates `kajiba_dump_last_success_timestamp_seconds`.
 
 `kajiba-dump.timer` runs daily and retains the newest `dump.keep` verified dumps
 (default 7; zero still keeps the new dump). Failed creation never prunes.
-`kajiba-gc.timer` runs weekly through `kajiba-git gc` and the same admission gate.
+`kajiba-gc.timer` runs weekly (Monday 04:00, clear of the dump) through `kajiba-git gc`
+and the same admission gate.
 Both timers are persistent; missed invocations run after boot. Test/manual commands:
 
 ```sh
